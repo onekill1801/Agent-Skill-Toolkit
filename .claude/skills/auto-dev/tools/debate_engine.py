@@ -49,6 +49,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -82,13 +83,19 @@ class DebateError(Exception):
 
 ROLE_PROMPTS = {
     "agent_dev": """<agent_dev>
-Bạn là một lập trình viên năng nổ, ưu tiên TỐC ĐỘ THỰC THI: viết code nhanh, gọn, đi thẳng vào
-giải pháp khả thi nhỏ nhất chạy được. Bạn không thích vẽ vời quá mức.
-NHIỆM VỤ: đọc mô tả task và đề xuất một giải pháp kỹ thuật cụ thể (cách tiếp cận, các file sẽ
-sửa, chiến lược test).
-ĐỊNH DẠNG BẮT BUỘC: trả lời CHỈ trong một khối thẻ <dev_proposal>...</dev_proposal>, bên trong
-gồm <approach>, <target_files><file>...</file></target_files>, <test_strategy>. TUYỆT ĐỐI KHÔNG
-dùng ký tự Markdown (#, **, -). Không viết gì ngoài khối thẻ.
+Bạn là lập trình viên thực dụng, ưu tiên giải pháp KHẢ THI NHỎ NHẤT. Nhưng ở TẦNG KẾ HOẠCH này bạn
+TUYỆT ĐỐI CHƯA viết code — chỉ phác kiến trúc và LUỒNG DỮ LIỆU ở mức tổng quan để con người duyệt
+trước (tư duy Data-Driven: dữ liệu vào đâu → biến đổi thế nào → ra cái gì).
+NHIỆM VỤ: đọc mô tả task và đề xuất giải pháp Ở MỨC TỔNG QUAN.
+ĐỊNH DẠNG BẮT BUỘC: trả lời CHỈ trong một khối thẻ <dev_proposal>...</dev_proposal>, bên trong gồm:
+  <overview> 1-2 câu mục tiêu </overview>
+  <architecture> các tầng/thành phần chạm tới, vd Controller -> Service -> Repository; KHÔNG code </architecture>
+  <data_flow> nhiều <step>, mỗi step: <input>...</input><transform>...</transform><output>...</output> </data_flow>
+  <target_files><file>đường/dẫn/file</file>...</target_files>
+  <test_strategy> ý tưởng test ở mức cao </test_strategy>
+CẤM TUYỆT ĐỐI: viết code — thân hàm, câu lệnh có dấu ; hay ngoặc { }, chữ ký hàm/annotation
+(public/private/@GetMapping...), SQL nguyên văn (SELECT ... FROM ...). Nếu định viết code, hãy MÔ TẢ
+biến đổi dữ liệu thay thế. CẤM ký tự Markdown (#, **, -). Không viết gì ngoài khối thẻ.
 </agent_dev>""",
 
     "agent_architect": """<agent_architect>
@@ -96,11 +103,14 @@ Bạn là một kiến trúc sư giải pháp KHÓ TÍNH, chuyên bắt lỗi h�
 của Dev để tìm rủi ro, đặc biệt: SQL Injection, thiếu Rate Limit, nghẽn Database (Connection
 Pool), Memory Leak, và thiếu tầng Cache (Redis/Kafka). Với mỗi rủi ro tìm thấy, nêu rõ vị trí và
 đề xuất biện pháp khắc phục. Nếu một hạng mục không có rủi ro, nói rõ "không phát hiện".
+KIỂM TRA KỶ LUẬT DATA-DRIVEN: <data_flow> có rõ Input -> Transform -> Output không, có bỏ sót biến
+đổi/thực thể nào không; nếu plan LỠ chứa code thì báo rủi ro category="code_leak" và yêu cầu Dev
+bỏ code, mô tả lại bằng dữ liệu.
 Đây là tranh biện NHIỀU VÒNG: nếu đây không phải vòng đầu, bạn đang soi bản đã được Dev sửa —
 chỉ nêu rủi ro CÒN LẠI, đừng lặp lại thứ Dev đã xử lý.
 ĐỊNH DẠNG BẮT BUỘC: trả lời CHỈ trong một khối thẻ <architect_critique>...</architect_critique>,
 bên trong dùng các thẻ con <risk category="sql_injection|rate_limit|connection_pool|memory_leak|
-cache"> ... mô tả + khắc phục ... </risk>, và KẾT THÚC bằng đúng một thẻ
+cache|data_flow|code_leak"> ... mô tả + khắc phục ... </risk>, và KẾT THÚC bằng đúng một thẻ
 <verdict>APPROVE</verdict> (khi mọi rủi ro chặn đã được xử lý — không cần sửa thêm) HOẶC
 <verdict>REVISE</verdict> (khi vẫn còn rủi ro Dev phải sửa). TUYỆT ĐỐI KHÔNG dùng Markdown.
 Không viết gì ngoài khối thẻ.
@@ -109,13 +119,31 @@ Không viết gì ngoài khối thẻ.
     "agent_moderator": """<agent_moderator>
 Bạn là Tech Lead / Thẩm phán. Bạn lắng nghe toàn bộ cuộc tranh luận (đề xuất của Dev, phản biện
 của Architect, phần bảo vệ/sửa đổi của Dev), cân nhắc thiệt hơn giữa tốc độ và độ an toàn/hiệu
-năng, rồi CHỐT phương án cuối cùng — đã hợp nhất các rủi ro hợp lệ mà Architect nêu.
+năng, rồi CHỐT phương án cuối cùng — đã hợp nhất các rủi ro hợp lệ mà Architect nêu, và GIỮ ĐÚNG
+kỷ luật Data-Driven (chỉ luồng dữ liệu + kiến trúc, không code).
 ĐỊNH DẠNG BẮT BUỘC: trả lời CHỈ trong một khối thẻ <final_specification>...</final_specification>,
-bên trong gồm <approach>, <target_files><file>...</file></target_files>, <test_strategy>,
-<risks_addressed><risk>...</risk></risks_addressed>. TUYỆT ĐỐI KHÔNG dùng Markdown. Không viết gì
-ngoài khối thẻ.
+bên trong gồm <overview>, <architecture>, <data_flow> (các <step> input/transform/output),
+<target_files><file>...</file></target_files>, <test_strategy>,
+<risks_addressed><risk>...</risk></risks_addressed>. CẤM code (thân hàm, dấu ; hay { }, chữ ký hàm,
+annotation, SQL nguyên văn) và Markdown. Không viết gì ngoài khối thẻ.
 </agent_moderator>""",
 }
+
+# --- Data-Driven guard: một plan hợp lệ CHỈ mô tả luồng dữ liệu + kiến trúc, KHÔNG code ------
+# Chỉ bắt các tín hiệu code MẠNH (thân/khối lệnh, SQL nguyên văn) để tránh báo nhầm khi plan
+# nhắc tên một hàm/tầng ở mức khái niệm (vd "Service.export()" là tham chiếu, không phải code).
+_PLAN_TAGS = {"dev_proposal", "dev_rebuttal", "final_specification"}
+_CODE_PATTERNS = [
+    ("ngoặc nhọn {…}", re.compile(r"\{[\s\S]*?\}")),
+    ("dấu ; cuối lệnh", re.compile(r";\s*$", re.M)),
+    ("chữ ký hàm", re.compile(r"\b(public|private|protected)\s+[\w.<>\[\]]+\s+\w+\s*\(")),
+    ("SQL nguyên văn", re.compile(r"\bSELECT\b[\s\S]{0,120}\bFROM\b", re.I)),
+]
+
+
+def _detect_code(text: str) -> list:
+    """Trả về danh sách nhãn tín hiệu code tìm thấy trong một plan (rỗng = sạch)."""
+    return [label for label, pat in _CODE_PATTERNS if pat.search(text or "")]
 
 
 # --- Terminal: màu sắc + ký hiệu để người dùng quan sát "cuộc cãi nhau" ----------------------
@@ -348,11 +376,20 @@ class DryRunBackend:
 _MOCK_RESPONSES = {
     "dev_proposal": (
         "<dev_proposal>"
-        "<approach>Thêm endpoint GET /api/report/export đọc thẳng từ bảng orders rồi stream CSV."
-        "</approach>"
+        "<overview>Thêm API xuất báo cáo doanh thu theo khoảng ngày ra CSV.</overview>"
+        "<architecture>Controller nhận request -> Service điều phối -> đọc bảng orders. "
+        "Không đổi Entity.</architecture>"
+        "<data_flow>"
+        "<step><input>GET /api/report/export?from&to</input>"
+        "<transform>đọc tham số khoảng ngày</transform><output>khoảng ngày</output></step>"
+        "<step><input>khoảng ngày</input><transform>đọc toàn bộ bảng orders</transform>"
+        "<output>danh sách OrderRow</output></step>"
+        "<step><input>danh sách OrderRow</input><transform>ghép thành CSV rồi trả về</transform>"
+        "<output>tệp CSV</output></step>"
+        "</data_flow>"
         "<target_files><file>src/main/java/com/x/ReportController.java</file>"
         "<file>src/main/java/com/x/ReportService.java</file></target_files>"
-        "<test_strategy>Unit test ReportService.export() với 100 dòng giả lập.</test_strategy>"
+        "<test_strategy>Unit test ánh xạ OrderRow sang CSV với 100 dòng giả lập.</test_strategy>"
         "</dev_proposal>"
     ),
     "architect_critique": (
@@ -371,8 +408,17 @@ _MOCK_RESPONSES = {
     ),
     "dev_rebuttal": (
         "<dev_rebuttal>"
-        "<approach>Đồng ý PreparedStatement + paging cursor + stream batch. Rate limit và cache "
-        "Redis đưa vào phase sau, giữ MVP gọn nhưng không còn lỗ hổng SQLi/leak.</approach>"
+        "<overview>Đồng ý chống SQLi và tránh giữ kết nối lâu; vẫn giữ MVP gọn.</overview>"
+        "<architecture>Bổ sung tầng Repository đọc theo cursor; rate limit và cache đưa vào "
+        "phase sau.</architecture>"
+        "<data_flow>"
+        "<step><input>khoảng ngày (tham số hoá an toàn)</input>"
+        "<transform>truy vấn orders theo cursor paging</transform>"
+        "<output>luồng OrderRow theo batch</output></step>"
+        "<step><input>luồng OrderRow theo batch</input>"
+        "<transform>ghi CSV từng batch, không giữ toàn bộ trong bộ nhớ</transform>"
+        "<output>luồng CSV trả dần</output></step>"
+        "</data_flow>"
         "<target_files><file>src/main/java/com/x/ReportController.java</file>"
         "<file>src/main/java/com/x/ReportService.java</file>"
         "<file>src/main/java/com/x/ReportRepository.java</file></target_files>"
@@ -380,15 +426,27 @@ _MOCK_RESPONSES = {
     ),
     "final_specification": (
         "<final_specification>"
-        "<approach>GET /api/report/export: PreparedStatement, đọc theo cursor paging, stream CSV "
-        "từng batch 1000 dòng; rate limit 5 req/phút; cache Redis TTL 5 phút.</approach>"
+        "<overview>API xuất báo cáo doanh thu ra CSV, an toàn và không nghẽn tài nguyên.</overview>"
+        "<architecture>Controller -> Service -> Repository đọc theo cursor; thêm rate limit ở "
+        "Controller và cache kết quả ở Redis.</architecture>"
+        "<data_flow>"
+        "<step><input>GET /api/report/export?from&to</input>"
+        "<transform>kiểm tra rate limit rồi tham số hoá khoảng ngày</transform>"
+        "<output>khoảng ngày an toàn hoặc phản hồi 429</output></step>"
+        "<step><input>khoảng ngày an toàn</input>"
+        "<transform>tra cache Redis; nếu trượt thì truy vấn orders theo cursor paging</transform>"
+        "<output>luồng OrderRow theo batch</output></step>"
+        "<step><input>luồng OrderRow theo batch</input>"
+        "<transform>ánh xạ và ghi CSV từng batch 1000 dòng</transform>"
+        "<output>phản hồi text/csv (cache TTL 5 phút)</output></step>"
+        "</data_flow>"
         "<target_files><file>src/main/java/com/x/ReportController.java</file>"
         "<file>src/main/java/com/x/ReportService.java</file>"
         "<file>src/main/java/com/x/ReportRepository.java</file></target_files>"
-        "<test_strategy>Unit test export() theo batch; integration test SQLi với input độc hại; "
-        "test rate-limit trả 429 ở request thứ 6.</test_strategy>"
-        "<risks_addressed><risk>sql_injection: PreparedStatement</risk>"
-        "<risk>connection_pool+memory_leak: cursor paging + stream batch</risk>"
+        "<test_strategy>Unit: ánh xạ theo batch. Integration: input ngày độc hại không gây SQLi; "
+        "request thứ 6 trả 429.</test_strategy>"
+        "<risks_addressed><risk>sql_injection: tham số hoá truy vấn</risk>"
+        "<risk>connection_pool+memory_leak: cursor paging + ghi theo batch</risk>"
         "<risk>rate_limit: bucket 5/phút</risk><risk>cache: Redis TTL 5 phút</risk>"
         "</risks_addressed>"
         "</final_specification>"
@@ -426,6 +484,9 @@ class DebateEngine:
         self.narrator = narrator
         self.max_rounds = max(1, max_rounds)
         self.transcript = {}
+        # Data-Driven guard: True nếu plan chốt VẪN lọt code sau khi đã bắt viết lại.
+        self.code_flagged = False
+        self.code_hits = []
 
     def _round(self, system_prompt_key: str, output_tag: str, who: str, title: str,
                user_content: str) -> str:
@@ -442,6 +503,27 @@ class DebateEngine:
             self.narrator.system(
                 f"[CẢNH BÁO] không tìm thấy thẻ <{output_tag}> trong output của {who}; dùng nguyên văn.")
             content = raw
+        # Data-Driven guard: plan BẮT BUỘC không chứa code. Nếu lọt, yêu cầu viết lại MỘT lần
+        # dưới dạng luồng dữ liệu; nếu vẫn còn code, đánh cờ để gate plan fail (không tự code).
+        if output_tag in _PLAN_TAGS:
+            hits = _detect_code(content)
+            if hits:
+                self.narrator.system(
+                    f"[DATA-DRIVEN] {who} lọt code ({', '.join(hits)}) → yêu cầu viết lại dạng luồng dữ liệu.")
+                fix_system = (
+                    f"{system}\n\nVI PHẠM KỶ LUẬT DATA-DRIVEN: plan của bạn CHỨA CODE "
+                    f"({', '.join(hits)}). Viết lại CHỈ mô tả kiến trúc và luồng dữ liệu "
+                    f"Input -> Transform -> Output; BỎ HẾT code, câu lệnh, chữ ký hàm và SQL nguyên văn.")
+                raw2 = self.backend.complete(fix_system, user_content, output_tag)
+                content2 = agent_parser.extract_tag_content(raw2, output_tag) or raw2
+                content = content2
+                residual = _detect_code(content)
+                if residual:
+                    self.code_flagged = True
+                    self.code_hits = residual
+                    self.narrator.system(
+                        f"[DATA-DRIVEN] {who} VẪN còn code sau khi bắt viết lại ({', '.join(residual)}) "
+                        f"→ đánh cờ code_flagged; gate plan phải fail cho tới khi được viết lại sạch.")
         self.transcript[output_tag] = content
         self.narrator.speech(who, content)
         return content
@@ -523,6 +605,8 @@ class DebateEngine:
             "rounds": rounds,
             "rounds_used": len(rounds),
             "converged": converged,
+            "code_flagged": self.code_flagged,
+            "code_hits": self.code_hits,
         }
 
 
@@ -579,6 +663,11 @@ def cmd_run(args) -> int:
         spec_path = _save_spec(args.task, result["final_specification"])
         narrator.system(f"Đã lưu spec -> {spec_path}")
 
+    if result["code_flagged"]:
+        narrator.system(
+            "[DATA-DRIVEN] Plan chốt vẫn lọt code → gate plan NÊN fail. Yêu cầu viết lại dạng "
+            "luồng dữ liệu trước khi qua checkpoint after_plan / trước khi code.")
+
     print(json.dumps({
         "ok": True,
         "task_id": args.task,
@@ -587,6 +676,8 @@ def cmd_run(args) -> int:
         "max_rounds": engine.max_rounds,
         "rounds_used": result["rounds_used"],
         "converged": result["converged"],
+        "code_flagged": result["code_flagged"],
+        "code_hits": result["code_hits"],
     }, ensure_ascii=False))
     return 0
 

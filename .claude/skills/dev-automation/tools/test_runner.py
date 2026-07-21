@@ -15,8 +15,15 @@ else the current working directory.
 
 Zero external dependencies — Python stdlib only.
 
+Kinds: build · test (UNIT, auto-gated) · lint · integration (*IT/Failsafe, MANUAL) ·
+frontend (UI unit tests in a monolith, MANUAL). Auto-detected Maven/Gradle commands
+prefer the repo's committed wrapper (mvnw/gradlew) when present, to avoid tool-version
+drift — as JHipster pins its build tool. Explicit --cmd / registry commands are used
+verbatim.
+
 Usage:
     python test_runner.py run --project atask --kind test
+    python test_runner.py run --project atask --kind integration   # manual *IT run
     python test_runner.py run --cmd "mvn -B test" --cwd /home/me/work/atask
     python test_runner.py run --cwd . --auto
     python test_runner.py detect --cwd .
@@ -52,27 +59,40 @@ LOG_TAIL_LINES = 60
 DEFAULT_TIMEOUT_SEC = 1800  # 30 min hard cap so a hung build can't block forever.
 
 # Auto-detection table: marker file in cwd -> default commands per kind.
-# Order matters — first marker found wins.
+# Order matters — first marker found wins for a given kind. If the winning
+# marker has no command for the requested kind (e.g. a JHipster monolith has
+# pom.xml first but the "frontend" command lives with package.json), _detect
+# keeps scanning — see below.
+#
+# Kinds:
+#   build / test / lint  — the auto-gated stages (test = UNIT tests only).
+#   integration          — slow *IT / Failsafe suite (Testcontainers on JHipster);
+#                          MANUAL — not run by the auto gate.
+#   frontend             — JS/TS unit tests for the UI in a monolith; MANUAL.
 _DETECT = [
     ("pom.xml", {
-        "build": "mvn -B -q -DskipTests package",
-        "test": "mvn -B test",
-        "lint": "mvn -B -q checkstyle:check",
+        "build": "mvn -B -ntp -q -DskipTests package",
+        "test": "mvn -B -ntp test",              # Surefire → unit tests (*Test) only
+        "lint": "mvn -B -ntp -q checkstyle:check",
+        "integration": "mvn -B -ntp verify",     # Failsafe → integration tests (*IT)
     }),
     ("build.gradle", {
         "build": "gradle build -x test",
         "test": "gradle test",
         "lint": "gradle check -x test",
+        "integration": "gradle integrationTest",
     }),
     ("build.gradle.kts", {
         "build": "gradle build -x test",
         "test": "gradle test",
         "lint": "gradle check -x test",
+        "integration": "gradle integrationTest",
     }),
     ("package.json", {
         "build": "npm run build",
         "test": "npm test",
         "lint": "npm run lint",
+        "frontend": "npm test",
     }),
     ("pyproject.toml", {
         "build": "python -m build",
@@ -126,11 +146,41 @@ def _project_entry(name: str) -> dict | None:
     return reg.get(name)
 
 
+def _prefer_wrapper(command: str, cwd: str) -> str:
+    """Prefer the project's committed build-tool wrapper over a global binary.
+
+    JHipster (and most modern JVM projects) pin their Maven/Gradle version via a
+    wrapper script checked into the repo (`mvnw` / `gradlew`). Using the wrapper
+    avoids version drift between the agent's machine and the project's expected
+    build. Only rewrites a command that STARTS with the bare tool name, and only
+    when the wrapper file actually exists in `cwd`; explicit --cmd / registry
+    commands are never touched (see _resolve).
+    """
+    win = os.name == "nt"
+    swaps = [
+        # (bare prefix, wrapper file to look for, replacement prefix)
+        ("mvn ", "mvnw.cmd" if win else "mvnw", "mvnw.cmd " if win else "./mvnw "),
+        ("gradle ", "gradlew.bat" if win else "gradlew", "gradlew.bat " if win else "./gradlew "),
+    ]
+    for prefix, wrapper_file, repl in swaps:
+        if command.startswith(prefix) and os.path.isfile(os.path.join(cwd, wrapper_file)):
+            return repl + command[len(prefix):]
+    return command
+
+
 def _detect(cwd: str, kind: str) -> str:
-    """Return an auto-detected command for `kind`, or '' if nothing matched."""
+    """Return an auto-detected command for `kind`, or '' if nothing matched.
+
+    A marker that matches but has no command for `kind` does NOT short-circuit —
+    scanning continues so a monolith (e.g. pom.xml + package.json) can still
+    resolve a package.json-only kind such as `frontend`.
+    """
     for marker, cmds in _DETECT:
         if os.path.isfile(os.path.join(cwd, marker)):
-            return cmds.get(kind, "")
+            cmd = cmds.get(kind, "")
+            if cmd:
+                return cmd
+            # marker matched but defines no command for this kind — keep looking
     return ""
 
 
@@ -159,7 +209,7 @@ def _resolve(args) -> tuple[str, str]:
     if args.auto or entry is not None or not args.project:
         detected = _detect(cwd, args.kind)
         if detected:
-            return detected, cwd
+            return _prefer_wrapper(detected, cwd), cwd
 
     raise ValueError(
         f"no command for kind='{args.kind}'. "
@@ -243,12 +293,13 @@ def cmd_detect(args) -> dict:
     cwd = args.cwd or (entry.get("clone_dir") if entry else None) or os.getcwd()
     cwd = os.path.abspath(os.path.expanduser(cwd))
     result = {"cwd": cwd, "registry_found": entry is not None}
-    for kind in ("build", "test", "lint"):
+    for kind in ("build", "test", "lint", "integration", "frontend"):
         key = f"{kind}_cmd"
         from_registry = entry.get(key) if entry else None
+        detected = _detect(cwd, kind)
         result[kind] = {
             "registry": from_registry or None,
-            "detected": _detect(cwd, kind) or None,
+            "detected": _prefer_wrapper(detected, cwd) if detected else None,
         }
     return result
 
@@ -261,7 +312,11 @@ def main() -> int:
     p_run.add_argument("--project", help="Project name to look up in projects.json")
     p_run.add_argument("--cwd", help="Directory to run in (overrides registry clone_dir)")
     p_run.add_argument("--cmd", help="Explicit shell command (overrides registry + auto)")
-    p_run.add_argument("--kind", default="test", choices=["build", "test", "lint"])
+    p_run.add_argument(
+        "--kind", default="test",
+        choices=["build", "test", "lint", "integration", "frontend"],
+        help="test=unit (auto-gated); integration=*IT/Failsafe and frontend=UI unit are MANUAL",
+    )
     p_run.add_argument("--auto", action="store_true", help="Force auto-detect even without a registry entry")
     p_run.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SEC)
 

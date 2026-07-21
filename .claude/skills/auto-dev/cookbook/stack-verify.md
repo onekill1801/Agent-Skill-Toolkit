@@ -174,12 +174,27 @@ cảnh báo "Chờ-nền dưới Telegram bridge" ở đầu file).
 
 Bước Test (xem `pipeline.md` §4) chạy theo thứ tự, dừng ở fail đầu tiên:
 
-1. **Unit/build** — `test_runner.py run --project <P> --kind test` (bắt buộc).
+1. **Unit/build** — `test_runner.py run --project <P> --kind test` (bắt buộc; JHipster: Surefire
+   `*Test` qua `./mvnw` — tự ưu tiên wrapper nếu repo có `mvnw`/`gradlew`, tránh lệch version).
 2. **Integration probe / e2e** — nếu task chạm DB/API/Kafka/Redis: `flow_check.py --file <scenario>`
    hoặc probe lẻ cho phần thay đổi.
 3. **(tuỳ chọn) CI** — `jenkins.py build --job <job> --wait` nếu muốn pipeline Jenkins xanh trước khi tạo MR.
 
 Chỉ qua checkpoint `before_mr` khi **tất cả** cổng trên xanh. Retry-fix tối đa 3 lần như unit test.
+
+### Integration test (`*IT`) + frontend — THỦ CÔNG (không auto-gate)
+
+JHipster giữ integration test nặng (Testcontainers) ở Failsafe (`mvn verify`), và test UI ở
+`package.json`. Cổng test **tự động chỉ chạy unit** để nhanh. Khi task chạm sâu runtime, **đề xuất
+người dùng bấm** chạy thêm — đừng tự chạy vì có thể mất vài phút:
+
+```bash
+python test_runner.py run --project <P> --kind integration   # ./mvnw verify → chạy *IT (Failsafe)
+python test_runner.py run --project <P> --kind frontend      # npm test (kéo từ package.json dù pom.xml thắng)
+```
+
+`detect` liệt kê cả `integration`/`frontend` để biết lệnh sẽ chạy trước khi xác nhận:
+`python test_runner.py detect --project <P>`.
 
 ## Đa project × đa môi trường (multi-project, multi-env)
 

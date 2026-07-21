@@ -21,25 +21,47 @@ Mọi agent trong pipeline PHẢI dùng đúng tên thẻ dưới đây để to
 
 | Phân đoạn | Cấu trúc thẻ |
 |---|---|
-| Kế hoạch | `<plan>` (chứa `<approach>`, `<test_strategy>` tùy chọn) |
+| Kế hoạch (Data-Driven) | `<plan>` chứa `<overview>`, `<architecture>`, `<data_flow>` (nhiều `<step>`, mỗi step có `<input>`/`<transform>`/`<output>`), `<target_files>`, `<test_strategy>` |
 | Danh sách file cần sửa | `<target_files><file>path/đến/file</file>...</target_files>` |
 | Nhật ký / ngữ cảnh lỗi | `<error_context>...log thô...</error_context>` |
 | Lời thoại tranh luận | `<debate><turn agent="...">...</turn>...</debate>` |
 | Agent Debate (xem `tools/debate_engine.py`) | `<dev_proposal>` · `<architect_critique>` (kết bằng `<verdict>APPROVE\|REVISE</verdict>`) · `<dev_rebuttal>` · `<final_specification>` — lặp critique↔rebuttal đến khi APPROVE hoặc hết `--rounds` |
 | Quyết định cuối của một vòng | `<decision>...</decision>` |
 
-Ví dụ một plan hợp lệ (KHÔNG Markdown bên trong):
+Ví dụ một plan hợp lệ (KHÔNG Markdown, KHÔNG code bên trong):
 
 ```
 <plan>
-  <approach>Sửa null-check trong UserService.load() trước khi map DTO.</approach>
+  <overview>Xuất báo cáo doanh thu theo khoảng ngày ra CSV qua một API mới.</overview>
+  <architecture>Controller nhận request; Service điều phối; Repository đọc bảng orders theo cursor. Không đổi Entity.</architecture>
+  <data_flow>
+    <step><input>GET /api/report/export?from&to</input><transform>validate và parse khoảng ngày</transform><output>DateRange</output></step>
+    <step><input>DateRange</input><transform>query orders theo cursor paging</transform><output>luồng OrderRow</output></step>
+    <step><input>luồng OrderRow</input><transform>ánh xạ sang dòng CSV, ghi theo batch</transform><output>phản hồi text/csv</output></step>
+  </data_flow>
   <target_files>
-    <file>src/main/java/com/x/UserService.java</file>
-    <file>src/test/java/com/x/UserServiceTest.java</file>
+    <file>src/main/java/com/x/ReportController.java</file>
+    <file>src/main/java/com/x/ReportService.java</file>
   </target_files>
-  <test_strategy>Thêm test load() với id không tồn tại, fail trước fix, pass sau fix.</test_strategy>
+  <test_strategy>Unit: ánh xạ OrderRow sang CSV đúng cột. Integration: input ngày độc hại không gây SQLi.</test_strategy>
 </plan>
 ```
+
+## Kế hoạch phải DATA-DRIVEN & HIGH-LEVEL — TUYỆT ĐỐI KHÔNG code
+
+Nỗi đau cần chặn: agent viết code quá sớm, hoặc plan chi tiết tới từng dòng gây ngợp và sai ý.
+Vì thế mọi plan (`<dev_proposal>`, `<dev_rebuttal>`, `<final_specification>`, `<plan>`) BẮT BUỘC:
+
+1. Dừng ở mức **tổng quan kiến trúc + biến đổi dữ liệu**. `<data_flow>` là hạt nhân: mỗi `<step>`
+   mô tả **Input → Transform → Output** ở mức ý niệm (kiểu dữ liệu, thực thể, endpoint, hàng đợi)
+   — KHÔNG phải các bước code.
+2. **KHÔNG chứa code**: không thân hàm, không câu lệnh (`;`, `{`, `}`), không chữ ký hàm/annotation
+   (`public`, `@Override`, `void`, `return ...`), không đoạn SQL nguyên văn. Nếu định viết code →
+   hãy mô tả **dữ liệu biến đổi thế nào** thay vì viết ra.
+3. `<target_files>` chỉ liệt kê **đường dẫn file** sẽ chạm, không kèm nội dung code.
+4. Chỉ sau khi con người **duyệt plan ở checkpoint `after_plan`** thì agent Implement mới được viết
+   code. Không code trước khi duyệt. Tool `debate_engine.py` tự soi và cảnh báo nếu plan lọt code
+   (trường `code_flagged` trong JSON) → gate plan phải fail cho tới khi plan được viết lại data-flow.
 
 ## Bóc tách: dùng agent_parser.py, KHÔNG split newline
 

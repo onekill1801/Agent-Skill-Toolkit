@@ -102,7 +102,13 @@ Backend (cờ đã đối chiếu `--help` thực tế; tất cả qua subscript
 - CLI khác / binary tên khác → `--backend custom --cmd-template "<lệnh> {model}"`.
 - Chỉ `--backend api` mới cần `ANTHROPIC_API_KEY`. `--dry-run` = mock, không gọi gì.
 - `<final_specification>` là dữ liệu Agent↔Agent (thẻ HTML/XML, KHÔNG Markdown — xem
-  `auto-dev/prompts/SYSTEM_PROMPT.md`); bên trong có `<approach>`, `<target_files>`, `<test_strategy>`.
+  `auto-dev/prompts/SYSTEM_PROMPT.md`); plan theo tư duy **DATA-DRIVEN, HIGH-LEVEL**: bên trong có
+  `<overview>`, `<architecture>`, `<data_flow>` (các `<step>` với `<input>`/`<transform>`/`<output>`),
+  `<target_files>`, `<test_strategy>`. **Plan KHÔNG chứa code** — chỉ kiến trúc + luồng dữ liệu.
+- **Gate Data-Driven**: JSON của `debate_engine` có `code_flagged`. Nếu `code_flagged=true` (plan lọt
+  code sau khi engine đã bắt viết lại 1 lần) → **stage `plan` PHẢI fail**: `record-gate <RID> clarity
+  --verdict fail` (hoặc không advance) và yêu cầu viết lại dạng luồng dữ liệu trước khi qua `after_plan`.
+  Tuyệt đối không cho Implement viết code khi plan còn code / chưa được duyệt.
 
 Khi bước Implement cần danh sách file cần sửa, **KHÔNG cắt chuỗi Markdown theo dòng** — bóc tách
 cấu trúc từ file spec bằng parser chuẩn (`--file` đặt SAU tên lệnh con):
@@ -110,8 +116,9 @@ cấu trúc từ file spec bằng parser chuẩn (`--file` đặt SAU tên lện
 ```bash
 # Danh sách file cần sửa:
 python ../../fork-terminal/tools/agent_parser.py list target_files file --file ../../../../temp/runs/<task_id>_plan.xml
-# Khối approach / test_strategy:
-python ../../fork-terminal/tools/agent_parser.py tag approach --file ../../../../temp/runs/<task_id>_plan.xml
+# Luồng dữ liệu / kiến trúc / test (đọc để lập trình theo):
+python ../../fork-terminal/tools/agent_parser.py tag data_flow --file ../../../../temp/runs/<task_id>_plan.xml
+python ../../fork-terminal/tools/agent_parser.py tag architecture --file ../../../../temp/runs/<task_id>_plan.xml
 ```
 
 > Worktree của Agent phụ (fork ra qua `fork-terminal`) đọc CHÍNH `temp/runs/<task_id>_plan.xml`
@@ -144,7 +151,7 @@ python run_log.py stage <RID> plan done
 after_plan / before_mr / before_notify / diff của fix_loop):
 ```bash
 python tg_gate.py send --run <RID> --gate after_plan --title "<tiêu đề task>" \
-  --item "PLAN: <tóm tắt approach> || đề xuất: duyệt" \
+  --item "PLAN (data-flow): <overview> + luồng Input->Transform->Output || đề xuất: duyệt" \
   --item "KỊCH BẢN VERIFY <n> step: <tóm tắt> || đề xuất: duyệt" \
   --item "<từng mục needs_review của verify_gen> || đề xuất: <cách xử lý>"
 # Người dùng trả lời MỘT tin nhắn tự do: "<RID> 1: ok; 2: sửa X; 3: ok" (bỏ qua/'ok' = duyệt).
