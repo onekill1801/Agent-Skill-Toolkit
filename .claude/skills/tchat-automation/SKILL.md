@@ -1,10 +1,13 @@
 ---
 name: TChat Automation
 description: >
-  Read-only automation over TChat (internal corporate messenger) via its REST
-  API (base URL in `FCHAT_BASE_API_URL`): list conversations, read message history & shared
-  media, search the user directory, browse todos, check session. Auth is a
-  session Bearer token + x-app/x-lang/x-request-id headers.
+  Automation over TChat (internal corporate messenger) via its REST API (base URL
+  in `FCHAT_BASE_API_URL`): list conversations, read message history & shared media,
+  search the user directory, browse todos, check session. Mostly read; the few
+  [WRITE] tools (`send.py text|recall`, `notify_group.py`, `todos.py create`,
+  `reply_worker.py`) post to a REAL corporate messenger — they dry-run without
+  `--yes` and ALWAYS need explicit confirmation. Auth is a session Bearer token +
+  x-app/x-lang/x-request-id headers.
   Trigger phrases: "tchat", "list my conversations", "đọc tin nhắn tchat",
   "fchat conversations", "tchat todos", "search tchat user", "my tchat groups".
 ---
@@ -14,8 +17,11 @@ description: >
 ## Purpose
 
 Query TChat from the agent: conversations, participants, message history,
-shared files/links/media, todos, and the user directory. **Read-only** — this
-skill does not send messages or mutate data.
+shared files/links/media, todos, and the user directory. **Read-first**: queries are
+free, but this skill DOES have write tools — `send.py text` / `send.py recall`,
+`notify_group.py`, `todos.py create`, and `reply_worker.py` (drafts + sends replies).
+Every one of them is dry-run without `--yes` and needs your explicit confirmation,
+because a real person sees the result.
 
 > Reverse-engineered from an authenticated traffic capture (chrome://net-export)
 > + public JS fingerprinting. Endpoint paths/methods/params are verified;
