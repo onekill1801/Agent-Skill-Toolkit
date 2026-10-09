@@ -63,6 +63,9 @@ python gitlab_api.py my-review-mrs [reviewer|assignee|both]   # MR gắn tên t�
 python mr_watch.py [--who ...] [--interval 300] [--once] [--no-spawn]   # poll MR gắn tên tôi → tự mở Claude review (hỏi trước khi post)
 python daemon_common.py status   # tình trạng các daemon (last event: started/transient/fatal/recovered) từ temp/daemon_health.jsonl
 python status.py [--json] [--section daemons,runs,queue,approvals,feedback]   # BẢNG TRẠNG THÁI tổng hợp: daemon + pipeline run đang mở + queue + approval chờ + feedback stats
+python k8s.py doctor|contexts                       # kubectl (PATH/Lens) + kubeconfig có trên máy — không gọi mạng
+python k8s.py access|pods|deploys|events|describe|logs|get --project P --env E   # READ-ONLY; hoặc --context C --kubeconfig F [-n NS]
+python k8s.py logs ... deploy/NAME [--since 30m] [--errors -C 3] [--grep RE] [--previous]   # gộp log mọi pod của deploy; --errors bắt text/JSON/glog
 python notifier.py started|mr-created|review-done|deploy-done|custom <id> ...   # [WRITE → người thật thấy]
 python feedback.py add|recall|list|search|stats --project <P> ...   # sổ học từ can thiệp người (recall bơm bài học cũ vào prompt run sau)
 ```

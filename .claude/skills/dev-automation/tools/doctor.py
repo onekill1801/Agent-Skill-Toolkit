@@ -47,7 +47,7 @@ CLI_CHECKS = {
     "mysql": "optional — probe_db --engine mysql uses a stdlib socket client (no CLI needed)",
     "kcat": "Kafka CLI (optional; probe_kafka uses REST/HTTP instead)",
     "docker": "local container builds (usually done on CI)",
-    "kubectl": "k8s ops (usually done on CI)",
+    "kubectl": "k8s.py (read-only logs/pods/events); falls back to Lens' bundled kubectl",
 }
 
 # Tools that are pure stdlib (urllib/socket/http) — run on any OS, need only a token.
