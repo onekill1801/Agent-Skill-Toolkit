@@ -1,5 +1,5 @@
 ---
-name: TChat Automation
+name: tchat-automation
 description: >
   Read-only automation over TChat (internal corporate messenger) via its REST
   API (base URL in `FCHAT_BASE_API_URL`): list conversations, read message history & shared

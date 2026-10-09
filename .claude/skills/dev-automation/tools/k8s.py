@@ -29,6 +29,7 @@ else newest).
 Usage:
     python k8s.py doctor                                  # kubectl + kubeconfigs found on this machine
     python k8s.py contexts [--kubeconfig F]               # contexts in a kubeconfig (no network)
+    python k8s.py forwards [--listening]                  # Lens port-forwards: cluster, local port, up/down
     python k8s.py access   --project etask --env dev      # who am I + what may I do (auth can-i)
     python k8s.py pods     --project etask --env dev [-l app=x]
     python k8s.py deploys  --project etask --env dev
@@ -483,6 +484,102 @@ def cmd_get(args) -> dict:
     return _json(t, ["get", args.kind] + ([args.name] if args.name else []))
 
 
+# --------------------------------------------------------------------------- Lens port-forwards
+
+def _lens_kubeconfig_files() -> list:
+    """Every kubeconfig Lens knows: its synced entries (files or dirs) + pasted ones."""
+    files = []
+    for d in lens_dirs():
+        try:
+            with open(os.path.join(d, "lens-user-store.json"), encoding="utf-8") as f:
+                entries = json.load(f).get("preferences", {}).get("syncKubeconfigEntries") or []
+        except (OSError, ValueError):
+            entries = []
+        for e in entries:
+            p = os.path.expanduser(e.get("filePath", ""))
+            if os.path.isdir(p):
+                files += [os.path.join(p, n) for n in sorted(os.listdir(p))
+                          if os.path.isfile(os.path.join(p, n)) and not n.startswith(".")]
+            elif os.path.isfile(p):
+                files.append(p)
+        files += sorted(glob.glob(os.path.join(d, "kubeconfigs", "*")))
+    default = os.path.join(os.path.expanduser("~"), ".kube", "config")
+    return list(dict.fromkeys(files + ([default] if os.path.isfile(default) else [])))
+
+
+def _lens_cluster_map(kubectl: str) -> dict:
+    """Lens clusterId = md5("<kubeconfig path>:<context>") -> {kubeconfig, context, namespace}."""
+    import hashlib
+    out = {}
+    for f in _lens_kubeconfig_files():
+        try:
+            p = subprocess.run([kubectl, "config", "view", "--kubeconfig", f, "-o", "json"],
+                               capture_output=True, text=True, timeout=10)
+            cfg = json.loads(p.stdout or "{}")
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            continue
+        for c in cfg.get("contexts") or []:
+            cid = hashlib.md5(f"{f}:{c['name']}".encode()).hexdigest()
+            out.setdefault(cid, {"kubeconfig": f, "context": c["name"],
+                                 "namespace": (c.get("context") or {}).get("namespace")})
+    return out
+
+
+def _port_open(port: int, host: str = "127.0.0.1", timeout: float = 0.3) -> bool:
+    import socket
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def lens_forwards() -> list:
+    """All port-forwards saved in Lens, with their cluster and whether the local port answers."""
+    try:
+        kubectl = find_kubectl()
+    except K8sError:
+        kubectl = "kubectl"
+    clusters = _lens_cluster_map(kubectl)
+    home = os.path.expanduser("~")
+    rows = []
+    for d in lens_dirs():
+        for f in sorted(glob.glob(os.path.join(d, "persisted-state", "port-forward", "*.json"))):
+            cid = os.path.basename(f)[:-5]
+            try:
+                with open(f, encoding="utf-8") as fh:
+                    items = json.load(fh).get("value") or []
+            except (OSError, ValueError):
+                continue
+            c = clusters.get(cid, {})
+            for it in items:
+                kc = c.get("kubeconfig", "")
+                target = f"{'svc' if it.get('kind') == 'service' else it.get('kind')}/{it.get('name')}"
+                rows.append({
+                    "cluster_id": cid, "context": c.get("context"),
+                    "kubeconfig": kc.replace(home, "~") if kc else None,
+                    "namespace": it.get("namespace"), "target": target,
+                    "remote_port": it.get("port"), "local_port": it.get("forwardPort"),
+                    "lens_status": it.get("status"),            # Active = Lens starts it with the cluster
+                    "listening": _port_open(it.get("forwardPort")),
+                    "note": None if it.get("status") == "Active" else
+                            "Lens forward is Disabled — if the port answers, it is something else (e.g. a local DB)",
+                    "start_cmd": (f"kubectl --kubeconfig {kc.replace(home, '~')} --context {c['context']} "
+                                  f"-n {it.get('namespace')} port-forward {target} "
+                                  f"{it.get('forwardPort')}:{it.get('port')}") if c else None,
+                })
+    return rows
+
+
+def cmd_forwards(args) -> dict:
+    rows = lens_forwards()
+    if args.listening:
+        rows = [r for r in rows if r["listening"]]
+    return {"count": len(rows), "listening": sum(1 for r in rows if r["listening"]),
+            "unresolved_clusters": sorted({r["cluster_id"] for r in rows if not r["context"]}),
+            "forwards": rows}
+
+
 # --------------------------------------------------------------------------- cli
 
 def build_parser() -> argparse.ArgumentParser:
@@ -500,6 +597,8 @@ def build_parser() -> argparse.ArgumentParser:
         return p
 
     sub.add_parser("doctor")
+    p = sub.add_parser("forwards", help="Lens port-forwards + whether the local port answers")
+    p.add_argument("--listening", action="store_true", help="only forwards that are up now")
     p = sub.add_parser("contexts")
     p.add_argument("--kubeconfig")
     target_opts(sub.add_parser("access"))
@@ -529,7 +628,7 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-COMMANDS = {"doctor": cmd_doctor, "contexts": cmd_contexts, "access": cmd_access, "pods": cmd_pods,
+COMMANDS = {"doctor": cmd_doctor, "forwards": cmd_forwards, "contexts": cmd_contexts, "access": cmd_access, "pods": cmd_pods,
             "deploys": cmd_deploys, "events": cmd_events, "describe": cmd_describe,
             "logs": cmd_logs, "get": cmd_get}
 

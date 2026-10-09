@@ -16,6 +16,9 @@ Mục tiêu: giải phóng người dùng khỏi công việc lặp lại (đọ
     atask-automation/       # aTask: task/sprint/checklist/analytics (PAT auth)
     fork-terminal/          # Spawn agent khác (Claude/Codex/Gemini) ra terminal mới
     skill-scaffold/         # Meta-skill: trích tool từ app khác → sinh skill mới
+    mr-review/              # Hàng đợi review MR: worktree đúng diff_refs → review.json → DUYỆT → đăng
+  hooks/guard_write.py      # PreToolUse: lệnh ghi/notify/đọc secret → hỏi (headless → chặn)
+.claude-plugin/ .codex-plugin/   # manifest plugin (Orca/Claude/Codex nhận skill ở .claude/skills)
 .env                        # Token + cấu hình (KHÔNG commit). Mẫu: .env.sample
 temp/                       # Output tạm (đã gitignore)
 ```
@@ -65,10 +68,30 @@ python daemon_common.py status   # tình trạng các daemon (last event: starte
 python status.py [--json] [--section daemons,runs,queue,approvals,feedback]   # BẢNG TRẠNG THÁI tổng hợp: daemon + pipeline run đang mở + queue + approval chờ + feedback stats
 python k8s.py doctor|contexts                       # kubectl (PATH/Lens) + kubeconfig có trên máy — không gọi mạng
 python k8s.py access|pods|deploys|events|describe|logs|get --project P --env E   # READ-ONLY; hoặc --context C --kubeconfig F [-n NS]
+python k8s.py forwards [--listening]               # port-forward đã lưu trong Lens: cluster/context, svc, cổng local, đang mở?
+python dbeaver.py list [--q t] [--folder PROD] | show "Folder/Tên" | forwards   # metadata DBeaver (KHÔNG đọc credential)
+python dbeaver.py probe "Folder/Tên" --sql "select …"   # qua probe_db; user/pass từ env DB_USER/DB_PASSWORD; PROD = chỉ đọc
+python podfwd.py start <pod/x|svc/x|deploy/x|"-l app=db"> <local>:<remote> --project P --env E [--name N]   # forward nền, tự nối lại
+python podfwd.py start-saved --project P --env E | list | stop <name|all> | logs <name>   # PROD cần --allow-prod (hook hỏi)
+python podfwd.py fetch <pod|"-l sel"> <path-trong-pod> [--to DIR]   # oc rsync pod -> work/pods/ (đọc code/config đã deploy)
+python vpn.py status | up | ensure | down | watch    # FortiVPN (macOS/Linux: openfortivpn; Windows: FortiClient). status exit 0 = mạng nội bộ OK
 python k8s.py logs ... deploy/NAME [--since 30m] [--errors -C 3] [--grep RE] [--previous]   # gộp log mọi pod của deploy; --errors bắt text/JSON/glog
 python notifier.py started|mr-created|review-done|deploy-done|custom <id> ...   # [WRITE → người thật thấy]
 python feedback.py add|recall|list|search|stats --project <P> ...   # sổ học từ can thiệp người (recall bơm bài học cũ vào prompt run sau)
 ```
+
+### mr-review (`.claude/skills/mr-review/tools/`) — xem `mr-review/SKILL.md`
+```
+python review_queue.py add --project etask --iid 123 | add-text "<tin có link MR>" | list --brief | next | pending
+python review_ws.py prepare <job> [--with-merge] | diff <job> [--path P] | check-stale <job> | cleanup <job> | gc
+python review_post.py validate|render|request-approval <job>    # agent dừng ở đây
+python review_post.py approve|reject <job>                      # CHỈ người (cần TTY)
+python review_post.py sweep                                     # [WRITE] đăng review đã duyệt + báo FChat
+```
+Orca: automation "Auto review MR" = công tắc (precheck `review_queue.py pending`); listener FChat
+(`tchat-automation/tools/group_watch.py`) chỉ xếp hàng + kích hoạt. `orca_adapter.py` (dev-automation)
+là nơi DUY NHẤT gọi `orca` CLI. Router model/tài khoản: `agent_runner.py --role <r>` theo `work/agents.json`.
+Task nhiều repo: `auto-dev/cookbook/multi-repo.md`.
 
 ### atask-automation (`.claude/skills/atask-automation/tools/`)
 ```

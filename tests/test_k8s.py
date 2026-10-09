@@ -161,3 +161,20 @@ class LogsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PodFwdTest(unittest.TestCase):
+    def test_prod_detection_ignores_api_hostname(self):
+        import podfwd
+        from argparse import Namespace
+        a = Namespace(project=None)
+        uat = {"context": "fis-mbf-econtract-uat/api-prod01-fis-cloud-fpt-com:6443/sa:x", "namespace": ""}
+        self.assertFalse(podfwd._protected(a, uat))
+        self.assertTrue(podfwd._protected(a, {"context": "x", "namespace": "fis-mbf-edrive-prod"}))
+        self.assertTrue(podfwd._protected(a, {"context": "kyta-prd/api:6443/u", "namespace": ""}))
+
+    def test_ports_format(self):
+        import podfwd
+        self.assertTrue(podfwd._ports_ok("13307:3306"))
+        for bad in ("3306", "a:b", "1:2:3", ""):
+            self.assertFalse(podfwd._ports_ok(bad))

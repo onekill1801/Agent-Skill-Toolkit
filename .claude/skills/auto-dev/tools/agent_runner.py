@@ -12,6 +12,7 @@ Backends (no ANTHROPIC_API_KEY needed except `api`):
     cursor   ->  agent  -p --output-format text --model <m> --force --trust (arg prompt)
     agy      ->  agy    --model <m> --print --dangerously-skip-permissions
                  (WARNING: agy does not run headless reliably — see debate_engine notes)
+    codex    ->  codex exec -m <m> -s workspace-write --skip-git-repo-check -   (stdin prompt)
     custom   ->  your own argv via cmd_template "<cmd> {model}"
     api      ->  Claude API via urllib (this one needs ANTHROPIC_API_KEY)
     dry-run  ->  returns dry_run_text, calls nothing (for tests)
@@ -21,6 +22,15 @@ Stdlib only.
 Usage (CLI, mostly for smoke tests):
     python agent_runner.py --backend dry-run --prompt "hi" --dry-run-text "<x>ok</x>"
     echo "review this diff" | python agent_runner.py --backend claude
+    echo "review this diff" | python agent_runner.py --role review --avoid codex
+
+Roles (work/agents.json — gitignored, machine-specific; see agents.sample.json):
+    run_role(prompt, role) tries each "backend:model@account" of the role in order,
+    skipping a backend in `avoid`, an account with no free slot (limits.max_parallel),
+    and moving on when the CLI hits a usage/rate limit or an auth error. Accounts map to
+    per-account config dirs via env (claude: CLAUDE_CONFIG_DIR, codex: CODEX_HOME).
+Every agent started here gets TOOLKIT_HEADLESS=1 (the PreToolUse guard then DENIES
+outward-facing writes instead of asking a human who isn't there).
 """
 
 import argparse
@@ -30,6 +40,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -40,7 +51,7 @@ sys.path.insert(0, os.path.join(_SKILLS, "dev-automation", "tools"))
 import config  # noqa: E402
 
 ANTHROPIC_VERSION = "2023-06-01"
-DEFAULT_API_MODEL = "claude-opus-4-8"
+DEFAULT_API_MODEL = config.get("ANTHROPIC_MODEL") or "claude-opus-5-5"
 DEFAULT_BASE_URL = "https://api.anthropic.com"
 DEFAULT_MAX_TOKENS = 4000
 CLI_TIMEOUT = 600
@@ -59,6 +70,12 @@ CLI_PRESETS = {
                  "--force", "--trust"],
         "default_model": None,
         "prompt_via": "arg",
+    },
+    "codex": {
+        "argv": ["codex", "exec", "-m", "{model}", "-s", "workspace-write",
+                 "--skip-git-repo-check", "-"],
+        "default_model": None,
+        "prompt_via": "stdin",
     },
     "agy": {
         "argv": ["agy", "--model", "{model}", "--print", "--dangerously-skip-permissions"],
@@ -119,7 +136,7 @@ def _build_argv(argv_tmpl: list, model: str, prompt: str, prompt_via: str) -> li
 
 
 def _run_cli(prompt, system, backend, model, cmd_template, prompt_via, timeout,
-             cwd=None) -> str:
+             cwd=None, env_extra=None) -> str:
     if cmd_template:
         argv_tmpl = shlex.split(cmd_template)
         default_model = None
@@ -137,8 +154,10 @@ def _run_cli(prompt, system, backend, model, cmd_template, prompt_via, timeout,
                                      full_prompt, prompt_via))
     stdin_data = full_prompt if prompt_via == "stdin" else None
     try:
+        env = dict(os.environ, TOOLKIT_HEADLESS="1", **(env_extra or {}))
         proc = subprocess.run(argv, input=stdin_data, capture_output=True, text=True,
-                              timeout=timeout, encoding="utf-8", errors="replace", cwd=cwd)
+                              timeout=timeout, encoding="utf-8", errors="replace", cwd=cwd,
+                              env=env)
     except FileNotFoundError:
         raise AgentRunError(
             f"CLI '{argv[0]}' not found on PATH. Install it, change backend, or pass "
@@ -185,7 +204,7 @@ def _run_api(prompt, system, model, max_tokens, timeout) -> str:
 def run_turn(prompt: str, *, system: str = None, backend: str = "claude",
              model: str = None, cmd_template: str = None, prompt_via: str = None,
              timeout: int = CLI_TIMEOUT, max_tokens: int = DEFAULT_MAX_TOKENS,
-             dry_run_text: str = None, cwd: str = None) -> str:
+             dry_run_text: str = None, cwd: str = None, env_extra: dict = None) -> str:
     """Run one headless agent turn; return raw stdout text. Raises AgentRunError.
 
     `dry_run_text` (or backend='dry-run') short-circuits to a canned response so
@@ -200,7 +219,105 @@ def run_turn(prompt: str, *, system: str = None, backend: str = "claude",
     if backend == "api":
         return _run_api(prompt, system, model, max_tokens, timeout)
     return _run_cli(prompt, system, backend, model, cmd_template, prompt_via, timeout,
-                    cwd=cwd)
+                    cwd=cwd, env_extra=env_extra)
+
+
+# --------------------------------------------------------------------------- role routing
+
+RETRYABLE = ("usage limit", "rate limit", "rate_limit", "too many requests", "429", "quota",
+             "overloaded", "credit balance", "not logged in", "please log in", "unauthorized",
+             "authentication", "login", "5 hour limit", "weekly limit")
+
+
+def _agents_config() -> dict:
+    work = os.environ.get("WORK_DIR") or os.path.join(os.path.dirname(_SKILLS.rstrip(os.sep)), "..", "work")
+    for path in (os.path.join(work, "agents.json"), os.path.join(_HERE, "agents.sample.json")):
+        try:
+            with open(os.path.normpath(path), encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            continue
+    return {}
+
+
+def parse_candidate(spec: str) -> dict:
+    """'codex:gpt-5.x@main' -> {backend, model, account}; model/account optional."""
+    head, _, account = spec.partition("@")
+    backend, _, model = head.partition(":")
+    return {"backend": backend.strip(), "model": model.strip() or None,
+            "account": account.strip() or None, "spec": spec}
+
+
+def _account_env(cfg: dict, backend: str, account: str) -> dict:
+    acct = ((cfg.get("accounts") or {}).get(backend) or {}).get(account or "") or {}
+    return {k: os.path.expanduser(str(v)) for k, v in (acct.get("env") or {}).items()}
+
+
+class _Slot:
+    """Cross-process slot for one account (O_EXCL lock files) — caps parallel sessions."""
+
+    def __init__(self, key: str, limit: int):
+        self.key, self.limit, self.path = key, max(1, limit), None
+
+    def __enter__(self):
+        d = os.path.join(os.path.dirname(_SKILLS.rstrip(os.sep)), "..", "temp", "agent_slots")
+        os.makedirs(d, exist_ok=True)
+        for i in range(self.limit):
+            p = os.path.join(d, f"{self.key.replace('/', '_')}.{i}.lock")
+            try:
+                if os.path.exists(p) and time.time() - os.path.getmtime(p) > CLI_TIMEOUT * 3:
+                    os.remove(p)                      # stale slot from a crashed run
+                fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, str(os.getpid()).encode())
+                os.close(fd)
+                self.path = p
+                return self
+            except FileExistsError:
+                continue
+        return None
+
+    def __exit__(self, *exc):
+        if self.path:
+            try:
+                os.remove(self.path)
+            except OSError:
+                pass
+
+
+def run_role(prompt: str, role: str, *, system: str = None, cwd: str = None,
+             timeout: int = CLI_TIMEOUT, avoid: tuple = ()) -> dict:
+    """Run one turn for `role` using the first usable candidate. Returns
+    {"text", "used": spec, "tried": [...]}; raises AgentRunError if all fail."""
+    cfg = _agents_config()
+    roles = cfg.get("roles") or {}
+    specs = roles.get(role) or roles.get("default") or ["claude"]
+    if isinstance(specs, str):
+        specs = [specs]
+    tried = []
+    for spec in specs:
+        c = parse_candidate(spec)
+        if c["backend"] in avoid:
+            tried.append({"spec": spec, "skipped": "avoided"})
+            continue
+        key = f"{c['backend']}@{c['account'] or 'default'}"
+        limit = int(((cfg.get("limits") or {}).get(key) or {}).get("max_parallel", 99))
+        slot = _Slot(key, limit)
+        if slot.__enter__() is None:
+            tried.append({"spec": spec, "skipped": "no free slot"})
+            continue
+        try:
+            text = run_turn(prompt, system=system, backend=c["backend"], model=c["model"],
+                            timeout=timeout, cwd=cwd,
+                            env_extra=_account_env(cfg, c["backend"], c["account"]))
+            return {"text": text, "used": spec, "tried": tried}
+        except AgentRunError as e:
+            msg = str(e)
+            tried.append({"spec": spec, "error": msg[:200]})
+            if not any(k in msg.lower() for k in RETRYABLE):
+                raise AgentRunError(f"{spec}: {msg}")
+        finally:
+            slot.__exit__()
+    raise AgentRunError(f"no candidate could run role '{role}': {tried}")
 
 
 def main() -> int:
@@ -208,7 +325,9 @@ def main() -> int:
     ap.add_argument("--prompt", default=None, help="prompt text (else read from stdin)")
     ap.add_argument("--system", default=None)
     ap.add_argument("--backend", default="claude",
-                    choices=["claude", "cursor", "agy", "custom", "api", "dry-run"])
+                    choices=["claude", "codex", "cursor", "agy", "custom", "api", "dry-run"])
+    ap.add_argument("--role", default=None, help="route via work/agents.json roles")
+    ap.add_argument("--avoid", default="", help="comma list of backends to skip (with --role)")
     ap.add_argument("--cmd-template", default=None, help="for --backend custom; may contain {model}")
     ap.add_argument("--prompt-via", default=None, choices=[None, "stdin", "arg"])
     ap.add_argument("--model", default=config.get("ANTHROPIC_MODEL") or None)
@@ -219,6 +338,16 @@ def main() -> int:
 
     prompt = args.prompt if args.prompt is not None else sys.stdin.read()
     backend = "custom" if args.cmd_template else args.backend
+    if args.role:
+        try:
+            res = run_role(prompt, args.role, system=args.system, timeout=args.timeout,
+                           avoid=tuple(x for x in args.avoid.split(",") if x))
+        except AgentRunError as e:
+            print(json.dumps({"error": True, "message": str(e)}, ensure_ascii=False))
+            return 1
+        print(json.dumps({"used": res["used"], "tried": res["tried"]}, ensure_ascii=False), file=sys.stderr)
+        sys.stdout.write(res["text"].rstrip("\n") + "\n")
+        return 0
     try:
         out = run_turn(prompt, system=args.system, backend=backend, model=args.model,
                        cmd_template=args.cmd_template, prompt_via=args.prompt_via,

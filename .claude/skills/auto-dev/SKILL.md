@@ -1,5 +1,5 @@
 ---
-name: Auto Dev Orchestrator
+name: auto-dev
 description: >
   End-to-end coding pipeline: take a request (Azure DevOps / aTask task, or a direct
   description) and drive it through Plan -> Implement -> Test -> Deliver with human
