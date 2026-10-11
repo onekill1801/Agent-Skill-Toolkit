@@ -528,6 +528,168 @@ class DocsTieringTest(Fixture):
         self.assertEqual(committed["knowledge"]["adr_dir"], ".agent/decisions")
 
 
+class ObservabilityStandardTest(Fixture):
+    """The standard is a policy every repo must meet. These tests pin the two
+    things that make it worth having: it must not pass a repo that cannot
+    actually be watched, and it must not fail one that has nothing to watch."""
+
+    LISTENER = ('@KafkaListener(topics = "t")\n'
+                'public void onMessage(String m) {}\n')
+
+    def _obs(self):
+        return agent_init.scan("demo")["observability"]
+
+    def _mgmt(self, include):
+        self._w("src/main/resources/config/application.yml",
+                "management:\n  endpoints:\n    web:\n      exposure:\n"
+                "        include: [%s]\n" % include)
+
+    # --- OBS-3: the rule that catches "broken but health is green" ---------
+
+    def test_async_intake_without_a_meter_fails(self):
+        self._w("src/main/java/com/acme/demo/L.java", self.LISTENER)
+        obs = self._obs()
+        self.assertIn("OBS-3", obs["fails"])
+        self.assertEqual(obs["async_intake_files"], 1)
+
+    def test_async_intake_with_a_meter_passes(self):
+        self._w("src/main/java/com/acme/demo/L.java", self.LISTENER)
+        self._w("src/main/java/com/acme/demo/M.java",
+                "private final MeterRegistry registry;\n")
+        self.assertNotIn("OBS-3", self._obs()["fails"])
+
+    def test_no_async_intake_is_not_a_violation(self):
+        """A plain REST service has nothing to instrument — passing it
+        vacuously is right; failing it would train people to ignore the gate."""
+        obs = self._obs()
+        self.assertEqual(obs["async_intake_files"], 0)
+        self.assertNotIn("OBS-3", obs["fails"])
+
+    def test_scheduled_job_counts_as_intake(self):
+        self._w("src/main/java/com/acme/demo/S.java",
+                '@Scheduled(cron = "0 * * * * *")\npublic void run() {}\n')
+        self.assertIn("OBS-3", self._obs()["fails"])
+
+    # --- OBS-4: correlation has to be at the boundary, not just anywhere ---
+
+    def test_correlation_away_from_intake_does_not_count(self):
+        """A traceId minted inside some unrelated class proves nothing about
+        an id surviving a hop through Kafka."""
+        self._w("src/main/java/com/acme/demo/L.java", self.LISTENER)
+        self._w("src/main/java/com/acme/demo/Unrelated.java",
+                "String traceId = UUID.randomUUID().toString();\n")
+        obs = self._obs()
+        self.assertGreater(obs["correlation_files"], 0)
+        self.assertEqual(obs["intake_with_correlation"], 0)
+        self.assertIn("OBS-4", obs["fails"])
+
+    def test_correlation_at_intake_counts(self):
+        self._w("src/main/java/com/acme/demo/L.java",
+                'MDC.put("traceId", h);\n' + self.LISTENER)
+        self.assertNotIn("OBS-4", self._obs()["fails"])
+
+    # --- OBS-1/2: read from config, not guessed from dependencies ----------
+
+    def test_health_and_metrics_read_from_exposure_list(self):
+        self._mgmt("'health', 'info', 'prometheus'")
+        obs = self._obs()
+        self.assertTrue(obs["health_endpoint"])
+        self.assertTrue(obs["metrics_endpoint"])
+        self.assertNotIn("OBS-1", obs["fails"])
+        self.assertNotIn("OBS-2", obs["fails"])
+
+    def test_missing_management_block_fails_both(self):
+        obs = self._obs()
+        self.assertIn("OBS-1", obs["fails"])
+        self.assertIn("OBS-2", obs["fails"])
+
+    def test_commented_out_exposure_does_not_count(self):
+        self._w("src/main/resources/config/application.yml",
+                "#        include: ['health', 'prometheus']\n")
+        self.assertIn("OBS-1", self._obs()["fails"])
+
+    # --- OBS-5: the skeleton must not satisfy the requirement -------------
+
+    def test_operations_skeleton_does_not_satisfy_obs5(self):
+        self.draft()
+        agent_init.apply("demo", yes=True, draft_dir=self.draft_dir)
+        ops = os.path.join(self.repo, ".agent", "operations.md")
+        self.assertTrue(os.path.isfile(ops))
+        self.assertIn("OBS-5", self._obs()["fails"])
+
+    def test_filled_operations_satisfies_obs5(self):
+        os.makedirs(os.path.join(self.repo, ".agent"), exist_ok=True)
+        self._w(".agent/operations.md", "# demo — Operations\n\n" + ("day. " * 150))
+        self.assertNotIn("OBS-5", self._obs()["fails"])
+
+    # --- vendored trees must not be mistaken for our instrumentation ------
+
+    def test_vendored_jdk_tree_is_ignored(self):
+        self._w("src/main/java/com/acme/demo/L.java", self.LISTENER)
+        self._w("src/main/java/com/acme/demo/jdk/Vendor.java",
+                "private final MeterRegistry registry;\n")
+        self.assertIn("OBS-3", self._obs()["fails"])
+
+
+class ComplianceReportTest(Fixture):
+    def _applied(self):
+        self.draft()
+        agent_init.apply("demo", yes=True, draft_dir=self.draft_dir)
+
+    def test_compliance_is_reported_separately_from_drift(self):
+        """Two different problems, two different fixes: a repo can be perfectly
+        in sync with its knowledge and still not meet the standard."""
+        self._applied()
+        out = agent_init.check("demo")
+        self.assertEqual(out["status"], "in-sync", out.get("drift"))
+        self.assertFalse(out["compliance"]["ok"])
+        self.assertIn("OBS-5", out["compliance"]["failed_required"])
+
+    def test_failing_requirement_reports_how_to_satisfy_it(self):
+        self._applied()
+        reqs = agent_init.check("demo")["compliance"]["requirements"]
+        self.assertEqual(reqs["OBS-5"]["status"], "fail")
+        self.assertIn("how", reqs["OBS-5"])
+
+    def test_uninstrumented_intake_files_are_named(self):
+        self._w("src/main/java/com/acme/demo/L.java",
+                '@KafkaListener(topics = "t")\npublic void on(String m) {}\n')
+        self._applied()
+        out = agent_init.check("demo")
+        self.assertIn("OBS-3", out["compliance"]["failed_required"])
+        self.assertTrue(any("L.java" in p
+                            for p in out["compliance"]["uninstrumented_intake"]))
+
+    def test_entry_file_carries_the_warning(self):
+        """The entry file is the one thing every agent reads. An unmet
+        requirement has to be visible there, not filed away."""
+        self.draft()
+        with open(os.path.join(self.draft_dir, "AGENTS.md"), encoding="utf-8") as f:
+            md = f.read()
+        self.assertIn("CHƯA đạt chuẩn quan sát", md)
+        self.assertIn("OBS-5", md)
+
+    def test_standard_text_covers_every_rule(self):
+        """Text and gate come from one table, so they cannot disagree."""
+        self.draft()
+        with open(os.path.join(self.draft_dir, ".agent", "standards",
+                               "observability.md"), encoding="utf-8") as f:
+            doc = f.read()
+        for rule in agent_init.OBSERVABILITY_STANDARD:
+            self.assertIn(rule["id"], doc)
+            self.assertIn(rule["title"], doc)
+
+    def test_observability_block_survives_the_yaml_round_trip(self):
+        self._applied()
+        with open(os.path.join(self.repo, ".agent", "project.yml"),
+                  encoding="utf-8") as f:
+            committed = agent_init.yaml_load(f.read())
+        obs = committed["observability"]
+        self.assertEqual(obs["standard_version"],
+                         agent_init.OBSERVABILITY_VERSION)
+        self.assertIn("OBS-5", obs["fails"])
+
+
 class EntryDocTest(Fixture):
     """The entry file is the only thing some agents read. A knowledge file that
     exists on disk but is missing from its table is invisible to them."""

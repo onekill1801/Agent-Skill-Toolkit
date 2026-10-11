@@ -302,6 +302,208 @@ def _registry_block(project):
         return (json.load(f) or {}).get(project, {})
 
 
+# --------------------------------------------------------------------------
+# observability standard
+#
+# One definition, two outputs: the requirement text an agent reads, and the
+# check that decides whether a repo meets it. Keeping them in one structure is
+# the only way they cannot drift apart.
+#
+# "required" means a repo that fails it is reported as non-compliant, and the
+# entry file says so where every agent will see it. "advisory" is reported but
+# does not fail. Editing this table is how the policy changes — no code change.
+# --------------------------------------------------------------------------
+
+OBSERVABILITY_VERSION = "1.0"
+
+OBSERVABILITY_STANDARD = [
+    {
+        "id": "OBS-1", "level": "required",
+        "title": "Có endpoint health",
+        "why": "Không có nó thì orchestrator không biết khi nào service sẵn sàng, "
+               "và không ai biết nó còn sống hay không ngoài việc thử gọi API.",
+        "how": "Actuator (hoặc tương đương) bật, endpoint health lộ ra.",
+    },
+    {
+        "id": "OBS-2", "level": "required",
+        "title": "Có endpoint xuất metric",
+        "why": "Không xuất được thì mọi metric bên dưới đều vô nghĩa.",
+        "how": "Prometheus (hoặc tương đương) nằm trong danh sách endpoint lộ ra.",
+    },
+    {
+        "id": "OBS-3", "level": "required",
+        "title": "Mỗi đầu vào bất đồng bộ phải có ít nhất một metric nghiệp vụ",
+        "why": "Đây là luật bắt được kiểu hỏng nguy hiểm nhất: hỏng mà health vẫn "
+               "xanh. Một consumer Kafka có thân hàm rỗng, một activity định tuyến "
+               "nhầm queue, một job nuốt lỗi — không tín hiệu hạ tầng nào thấy được. "
+               "Một counter 'đã xử lý' thì thấy ngay.",
+        "how": "Có @KafkaListener / @Scheduled / worker Temporal thì phải có "
+               "MeterRegistry, @Timed, Counter/Timer builder hoặc Metrics.* .",
+    },
+    {
+        "id": "OBS-4", "level": "required",
+        "title": "Truyền correlation id qua ranh giới bất đồng bộ",
+        "why": "Không có nó thì một sự cố đi qua Kafka trở thành hai sự cố rời rạc "
+               "ở hai service, và không ai nối lại được.",
+        "how": "MDC / traceId / correlationId xuất hiện ở cả nơi gửi và nơi nhận.",
+    },
+    {
+        "id": "OBS-5", "level": "required",
+        "title": "Đã ghi rõ 'khoẻ' nghĩa là gì",
+        "why": "Bốn luật trên nói repo CÓ THỂ đo. Luật này nói đội đã quyết ĐO GÌ. "
+               "Không có nó thì có metric cũng không ai biết ngưỡng nào là bất thường.",
+        "how": ".agent/operations.md tồn tại và đã được điền (không còn phần khung).",
+    },
+    {
+        "id": "OBS-6", "level": "advisory",
+        "title": "Thư viện tracing đã bật, hoặc đã gỡ",
+        "why": "Thư viện nằm trên classpath mà không bật tạo ảo giác là có tracing.",
+        "how": "Có zipkin/sleuth/otel trong pom thì phải có cấu hình bật tương ứng.",
+    },
+]
+
+_OBS_INTAKE = re.compile(r"@KafkaListener|@Scheduled|@WorkflowImpl|@ActivityImpl"
+                         r"|@RabbitListener|@JmsListener")
+_OBS_METER = re.compile(r"MeterRegistry|@Timed|Counter\.builder|Timer\.builder"
+                        r"|\bMetrics\.(counter|timer|gauge)")
+_OBS_CORR = re.compile(r"\bMDC\b|traceId|correlationId|X-B3-|X-Correlation")
+_OBS_TRACE_LIB = re.compile(r"zipkin|sleuth|opentelemetry|skywalking", re.IGNORECASE)
+_OBS_SRC_EXT = (".java", ".kt", ".py", ".js", ".ts", ".go")
+# Vendored third-party trees must not count as project instrumentation, and
+# must not be walked: eintelligent's com.fis.ai.jdk alone is 283 files.
+_OBS_SKIP_DIRS = {"jdk", "target", "build", "node_modules", ".git", "generated"}
+
+
+def _obs_scan_source(root):
+    """One walk over src/main: where work enters, and what is instrumented."""
+    found = {"intake": 0, "meters": 0, "correlation": 0,
+             "intake_with_corr": 0, "intake_files": []}
+    src = os.path.join(root, "src", "main")
+    if not os.path.isdir(src):
+        src = root
+    for dirpath, dirnames, filenames in os.walk(src):
+        dirnames[:] = [d for d in dirnames if d not in _OBS_SKIP_DIRS]
+        for fn in filenames:
+            if not fn.endswith(_OBS_SRC_EXT):
+                continue
+            path = os.path.join(dirpath, fn)
+            try:
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+            except OSError:
+                continue
+            has_corr = bool(_OBS_CORR.search(text))
+            if _OBS_INTAKE.search(text):
+                found["intake"] += 1
+                rel = os.path.relpath(path, root).replace(os.sep, "/")
+                if len(found["intake_files"]) < 5:
+                    found["intake_files"].append(rel)
+                # OBS-4 asks whether the id crosses the boundary, so it is only
+                # satisfied where work enters. A traceId mentioned anywhere else
+                # proves nothing: a test controller minting its own UUID would
+                # otherwise pass the requirement.
+                if has_corr:
+                    found["intake_with_corr"] += 1
+            if _OBS_METER.search(text):
+                found["meters"] += 1
+            if has_corr:
+                found["correlation"] += 1
+    return found
+
+
+def _obs_scan_config(root):
+    """Management endpoints and tracing, read from config rather than guessed."""
+    out = {"exposed": [], "health": False, "metrics": False,
+           "trace_lib": None, "trace_enabled": None}
+    for rel in ("pom.xml", "build.gradle", "build.gradle.kts", "package.json"):
+        path = os.path.join(root, rel)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                build = fh.read()
+        except OSError:
+            continue
+        m = _OBS_TRACE_LIB.search(build)
+        if m:
+            out["trace_lib"] = m.group(0).lower()
+    for base in (os.path.join(root, "src", "main", "resources"), root):
+        if not os.path.isdir(base):
+            continue
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames[:] = [d for d in dirnames if d not in _OBS_SKIP_DIRS]
+            for fn in filenames:
+                if not (fn.endswith((".yml", ".yaml")) and fn.startswith("application")):
+                    continue
+                try:
+                    with open(os.path.join(dirpath, fn), encoding="utf-8",
+                              errors="replace") as fh:
+                        text = fh.read()
+                except OSError:
+                    continue
+                for line in text.splitlines():
+                    s = line.strip()
+                    if s.startswith("#"):
+                        continue
+                    if "include:" in s:
+                        names = re.findall(r"[a-z][a-z0-9]+", s.split("include:", 1)[1])
+                        out["exposed"] += [n for n in names if n != "include"]
+                    if re.search(r"(zipkin|tracing|sleuth)", s, re.IGNORECASE) \
+                            and "enabled:" in s:
+                        out["trace_enabled"] = "true" in s.lower()
+        break
+    out["exposed"] = sorted(set(out["exposed"]))
+    out["health"] = "health" in out["exposed"]
+    out["metrics"] = any(k in out["exposed"] for k in ("prometheus", "metrics",
+                                                       "jhimetrics"))
+    return out
+
+
+def observability(root):
+    """Facts + per-requirement verdict. Re-derivable, so `check` can gate on it."""
+    src = _obs_scan_source(root)
+    cfg = _obs_scan_config(root)
+    ops = os.path.join(root, ".agent", "operations.md")
+    ops_filled = False
+    if os.path.isfile(ops):
+        try:
+            with open(ops, encoding="utf-8", errors="replace") as fh:
+                body = fh.read()
+            ops_filled = _OPS_PLACEHOLDER not in body and len(body.strip()) > 400
+        except OSError:
+            ops_filled = False
+
+    verdicts = {}
+    verdicts["OBS-1"] = cfg["health"]
+    verdicts["OBS-2"] = cfg["metrics"]
+    # No async intake at all -> nothing to instrument, so the rule is satisfied
+    # rather than vacuously failed. A library or a pure REST service is fine.
+    verdicts["OBS-3"] = src["meters"] > 0 if src["intake"] else True
+    verdicts["OBS-4"] = src["intake_with_corr"] > 0 if src["intake"] else True
+    verdicts["OBS-5"] = ops_filled
+    verdicts["OBS-6"] = (cfg["trace_enabled"] is True) if cfg["trace_lib"] else True
+
+    facts = {
+        "standard_version": OBSERVABILITY_VERSION,
+        "endpoints_exposed": cfg["exposed"],
+        "health_endpoint": cfg["health"],
+        "metrics_endpoint": cfg["metrics"],
+        "async_intake_files": src["intake"],
+        "custom_meter_files": src["meters"],
+        "correlation_files": src["correlation"],
+        "intake_with_correlation": src["intake_with_corr"],
+        "tracing_library": cfg["trace_lib"],
+        "tracing_enabled": cfg["trace_enabled"],
+        "operations_doc": ops_filled,
+    }
+    failed = [r["id"] for r in OBSERVABILITY_STANDARD if not verdicts[r["id"]]]
+    facts["meets"] = sorted(set(verdicts) - set(failed))
+    facts["fails"] = failed
+    facts["compliant"] = not [r for r in OBSERVABILITY_STANDARD
+                              if r["level"] == "required" and not verdicts[r["id"]]]
+    return facts, src["intake_files"]
+
+
 def scan(project, env=None):
     """Facts a machine can derive. Everything here must be re-derivable, so
     `check` can tell stale knowledge apart from an intentional edit."""
@@ -397,6 +599,10 @@ def scan(project, env=None):
             ci = candidate
             break
     facts["verification"] = {"test_files": tests, "ci": ci}
+
+    # observability — can this repo be watched, and does it meet the standard?
+    obs, _intake = observability(root)
+    facts["observability"] = obs
 
     # knowledge — what already exists, so we migrate instead of overwriting
     # "Holds decisions" means it actually contains one, not that the directory
@@ -546,6 +752,16 @@ def draft(project, out_dir=None, env=None):
             _write(os.path.join(agent, fn),
                    _header(project, title) + _skeleton(fn, facts), written)
 
+    # 2b. the observability standard — same text in every repo, regenerated on
+    # every apply so a repo cannot sit on an old version of the policy.
+    # operations.md is the repo's own answer to it, so it is only skeletonised
+    # when absent: the preserve loop above already copied a filled-in one.
+    _write(os.path.join(agent, "standards", "observability.md"),
+           _standard_doc(), written)
+    if not os.path.isfile(os.path.join(agent, "operations.md")):
+        _write(os.path.join(agent, "operations.md"),
+               _operations_doc(project, facts), written)
+
     # 3. decisions — point at existing ADRs instead of duplicating them
     adr = facts["knowledge"].get("adr_dir")
     if adr and not adr.startswith(".agent"):
@@ -585,7 +801,12 @@ def _skeleton(fn, facts):
         title = "Modules" if layout.get("modules") else "Packages"
         return f"## {title}\n\n" + body + "\n"
     if fn == "conventions.md":
-        return "## Rules\n\n- TODO: what code here must do, and must never do.\n"
+        return ("## Rules\n\n"
+                "1. **Thêm đầu vào bất đồng bộ nào (Kafka listener, scheduled job,\n"
+                "   worker) thì phải thêm metric nghiệp vụ cho nó.** Đây là yêu cầu\n"
+                "   bắt buộc dùng chung — `.agent/standards/observability.md` OBS-3.\n"
+                "   Không có nó thì service hỏng mà health vẫn xanh.\n"
+                "2. TODO: what code here must do, and must never do.\n")
     return ("## Gotchas\n\n- TODO: something that surprised someone. "
             "Include `Discovered in: <task>`.\n")
 
@@ -599,12 +820,13 @@ _KNOWLEDGE_BLURB = {
     "conventions.md": "Rules code must follow",
     "learned.md": "Gotchas and known debt",
     "flows.md": "What happens at runtime: lifecycles, events, call paths",
+    "operations.md": "**REQUIRED** — what healthy means, and what to check after a change",
     "glossary.md": "Domain terms and what they mean here",
     "testing.md": "How this repo is tested",
 }
 # Order the known ones sensibly; anything else follows, alphabetically.
 _KNOWLEDGE_ORDER = ["architecture.md", "conventions.md", "flows.md",
-                    "learned.md", "glossary.md", "testing.md"]
+                    "operations.md", "learned.md", "glossary.md", "testing.md"]
 
 
 def _knowledge_rows(agent_dir):
@@ -642,6 +864,107 @@ def _first_heading(path):
     return None
 
 
+_OPS_PLACEHOLDER = "TODO: người điền phần này"
+
+
+def _standard_doc():
+    """The requirement text, generated from OBSERVABILITY_STANDARD so the words
+    an agent reads and the check that gates the repo can never disagree."""
+    lines = [
+        f"# Chuẩn quan sát (observability) — v{OBSERVABILITY_VERSION}",
+        "",
+        "> **Đây là yêu cầu bắt buộc, áp cho mọi repo.** File này được sinh ra từ",
+        "> định nghĩa chuẩn dùng chung — **đừng sửa tay**. Sửa chuẩn ở toolkit rồi",
+        "> chạy lại `agent_init apply`.",
+        "",
+        "Mục tiêu không phải là \"có nhiều biểu đồ\". Mục tiêu là: **khi hệ thống",
+        "hỏng, có tín hiệu cho biết** — thay vì phải đọc code hàng giờ mới phát hiện.",
+        "",
+        "Mức `required` không đạt → repo bị báo **không tuân thủ**, và dòng cảnh báo",
+        "sẽ xuất hiện ngay trong `AGENTS.md` để mọi agent đọc source đều thấy.",
+        "",
+    ]
+    for rule in OBSERVABILITY_STANDARD:
+        badge = "**BẮT BUỘC**" if rule["level"] == "required" else "khuyến nghị"
+        lines += [
+            f"## {rule['id']} — {rule['title']}",
+            "",
+            f"*Mức:* {badge}",
+            "",
+            f"**Vì sao:** {rule['why']}",
+            "",
+            f"**Đạt khi:** {rule['how']}",
+            "",
+        ]
+    lines += [
+        "## Kiểm tra",
+        "",
+        "```",
+        "python agentkit.py agent_init check --project <tên>",
+        "```",
+        "",
+        "Kết quả trả về khối `compliance`: `ok`, `failed_required`, và lý do từng",
+        "mục chưa đạt. Dùng `compliance.ok` để chặn ở CI — nó tách biệt với `status`",
+        "(drift), vì \"repo đã đổi mà tài liệu chưa theo\" và \"repo chưa bao giờ đạt",
+        "chuẩn\" là hai vấn đề khác nhau, cách sửa khác nhau.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _operations_doc(project, facts):
+    """Skeleton for the half a machine cannot derive: what healthy means here."""
+    obs = facts.get("observability") or {}
+    exposed = obs.get("endpoints_exposed") or []
+    lines = [
+        f"# {project} — Operations: đo lường & giám sát",
+        "",
+        "> Bốn luật đầu của chuẩn nói repo **có thể** đo. File này nói đội đã quyết",
+        "> **đo gì** và **ngưỡng nào là bất thường**. Máy không suy ra được phần này.",
+        "",
+        "## Hiện trạng (do `agent_init scan` dò ra, tự cập nhật)",
+        "",
+        "| | |",
+        "|---|---|",
+        f"| Endpoint lộ ra | {', '.join(exposed) if exposed else '**không có**'} |",
+        f"| Health endpoint | {'có' if obs.get('health_endpoint') else '**không**'} |",
+        f"| Metric endpoint | {'có' if obs.get('metrics_endpoint') else '**không**'} |",
+        f"| File có đầu vào bất đồng bộ | {obs.get('async_intake_files', 0)} |",
+        f"| File có metric nghiệp vụ | {obs.get('custom_meter_files', 0)} |",
+        f"| File có correlation id | {obs.get('correlation_files', 0)} |",
+        f"| Thư viện tracing | {obs.get('tracing_library') or 'không có'}"
+        f" (bật: {obs.get('tracing_enabled')}) |",
+        "",
+        "## 'Khoẻ' nghĩa là gì ở service này",
+        "",
+        f"{_OPS_PLACEHOLDER}. Liệt kê **3–5 tín hiệu**, không nhiều hơn. Mỗi tín hiệu",
+        "cần: tên metric, ngưỡng, và điều gì xảy ra với người dùng khi nó vượt ngưỡng.",
+        "",
+        "| Tín hiệu | Ngưỡng bất thường | Ảnh hưởng tới ai |",
+        "|---|---|---|",
+        "| | | |",
+        "",
+        "## Sau khi sửa thì kiểm gì",
+        "",
+        "Phần được dùng nhiều nhất. Với mỗi vùng hay sửa, ghi cách xác nhận thay đổi",
+        "chạy đúng — tên metric hoặc truy vấn log cụ thể, không phải \"kiểm tra log\".",
+        "",
+        "| Sửa vùng nào | Kiểm gì |",
+        "|---|---|",
+        "| | |",
+        "",
+        "## Dashboard & alert",
+        "",
+        "Link tới nơi xem thật. Không có thì ghi \"chưa có\" — đừng để trống.",
+        "",
+        "## Điểm mù đã biết",
+        "",
+        "Thứ hiện **không** đo được, và hệ quả khi nó hỏng.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def _entry_doc(project, facts, agent_dir=None):
     st = facts.get("stack") or {}
     cmds = facts.get("commands") or {}
@@ -658,6 +981,36 @@ def _entry_doc(project, facts, agent_dir=None):
         "changing code: it is the single source of truth, and every other agent",
         "file in this repo is only a pointer to it.",
         "",
+    ]
+    # The compliance banner sits above the table on purpose: the entry file is
+    # the one thing every agent reads, so an unmet requirement has to be
+    # unavoidable rather than filed away in a document nobody opens.
+    obs = facts.get("observability") or {}
+    fails = [r for r in OBSERVABILITY_STANDARD
+             if r["level"] == "required" and r["id"] in (obs.get("fails") or [])]
+    if fails:
+        lines += [
+            f"> ⚠️ **Repo này CHƯA đạt chuẩn quan sát v{OBSERVABILITY_VERSION}** — "
+            f"thiếu {len(fails)} yêu cầu bắt buộc:",
+            ">",
+        ]
+        lines += [f"> - **{r['id']}** — {r['title']}" for r in fails]
+        lines += [
+            ">",
+            "> Nghĩa là service này có thể hỏng mà không phát ra tín hiệu nào. "
+            "Đang thêm/sửa đầu vào bất đồng bộ (Kafka, scheduler, worker) thì "
+            "**xử lý luôn phần đo**, đừng để lần sau.",
+            "> Chi tiết: `.agent/standards/observability.md`",
+            "",
+        ]
+    elif obs:
+        lines += [
+            f"> ✅ Đạt chuẩn quan sát v{OBSERVABILITY_VERSION}. Giữ nguyên trạng thái "
+            "này khi thêm đầu vào bất đồng bộ mới — xem "
+            "`.agent/standards/observability.md`.",
+            "",
+        ]
+    lines += [
         "| File | What it answers |",
         "|---|---|",
         "| `.agent/project.yml` | Machine facts: stack, commands, modules, datastores |",
@@ -828,9 +1181,39 @@ def check(project, env=None):
                           "added": sorted(set(new_list) - set(old_list)),
                           "removed": sorted(set(old_list) - set(new_list))})
 
+    # Compliance is reported beside drift, not folded into it: "the repo moved"
+    # and "the repo never met the standard" need different fixes, and a caller
+    # that gates CI on one must not be tripped by the other.
+    obs = facts.get("observability") or {}
+    intake_files = observability(root)[1]
+    reqs = {}
+    for rule in OBSERVABILITY_STANDARD:
+        passed = rule["id"] in (obs.get("meets") or [])
+        reqs[rule["id"]] = {
+            "level": rule["level"], "title": rule["title"],
+            "status": "pass" if passed else "fail",
+        }
+        if not passed:
+            reqs[rule["id"]]["how"] = rule["how"]
+    failed_required = [r["id"] for r in OBSERVABILITY_STANDARD
+                       if r["level"] == "required"
+                       and reqs[r["id"]]["status"] == "fail"]
+    compliance = {
+        "ok": not failed_required,
+        "standard": f"observability {OBSERVABILITY_VERSION}",
+        "failed_required": failed_required,
+        "failed_advisory": [r["id"] for r in OBSERVABILITY_STANDARD
+                            if r["level"] == "advisory"
+                            and reqs[r["id"]]["status"] == "fail"],
+        "requirements": reqs,
+    }
+    if "OBS-3" in failed_required and intake_files:
+        compliance["uninstrumented_intake"] = intake_files
+
     return {"ok": not drift, "project": project,
             "status": "in-sync" if not drift else "drift",
             "drift": drift,
+            "compliance": compliance,
             "message": "knowledge still matches the code" if not drift else
             "the repo moved and .agent/ did not — reconcile before trusting it"}
 
