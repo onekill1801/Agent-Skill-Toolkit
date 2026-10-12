@@ -41,8 +41,12 @@ Chi tiết: `dev-automation/cookbook/multi-project.md`.
 
 ## Chạy tool Python
 
+- **Cách gọn nhất — một entry point:** `python agentkit.py <tool> [args]` (chạy từ gốc repo, không cần
+  `cd`). `--list [chuỗi]` xem tool có sẵn · `--where <tool>` xem file nào sẽ chạy. Tên trùng giữa các
+  skill (`config`) phải ghi rõ `<skill>:<tool>` — agentkit từ chối đoán. Nó cũng đặt thư mục tools của
+  skill sở hữu **lên đầu** `sys.path` nên tool luôn import đúng `config` của mình.
 - Tool **chỉ dùng stdlib** (`urllib`), không cần `pip install`.
-- `cd` vào thư mục `tools/` của skill rồi chạy. Windows: `python` · macOS/Linux: `python3`.
+- Cách cũ vẫn chạy y nguyên: `cd` vào `tools/` của skill rồi gọi. Windows: `python` · macOS/Linux: `python3`.
 - Config đọc từ `.env` ở gốc repo (tự dò ngược tối đa 5 cấp thư mục).
 - Tool trả JSON; lỗi trả `{"error": true, "status": ..., "message": ...}` — đọc và xử lý, đừng coi là crash.
 
@@ -77,6 +81,7 @@ python podfwd.py fetch <pod|"-l sel"> <path-trong-pod> [--to DIR]   # oc rsync p
 python vpn.py status | up | ensure | down | watch    # FortiVPN (macOS/Linux: openfortivpn; Windows: FortiClient). status exit 0 = mạng nội bộ OK
 python k8s.py logs ... deploy/NAME [--since 30m] [--errors -C 3] [--grep RE] [--previous]   # gộp log mọi pod của deploy; --errors bắt text/JSON/glog
 python notifier.py started|mr-created|review-done|deploy-done|custom <id> ...   # [WRITE → người thật thấy]
+python ../auto-dev/tools/agent_init.py scan|draft|apply|check --project <P>   # chuẩn .agent/ cho repo sản phẩm (apply là [WRITE])
 python feedback.py add|recall|list|search|stats --project <P> ...   # sổ học từ can thiệp người (recall bơm bài học cũ vào prompt run sau)
 ```
 
@@ -122,6 +127,9 @@ Khi tắt SSL verify → cảnh báo người dùng.
 ## Guardrail (BẮT BUỘC)
 
 1. **Hỏi xác nhận trước thao tác `[WRITE]`** lần đầu trong một mạch tự động: tạo branch/MR, đổi state, **mọi `notifier.py`** (người thật sẽ thấy).
+1b. **Mốc duyệt là gate thật, không phải trạng thái.** `run_log.py checkpoint ... --source agent` (mặc định)
+   **không** đủ để `advance deliver` ở `mode=checkpoint` — cần `--source human|telegram`. Đường chuẩn:
+   `tg_gate.py parse` tự ghi checkpoint kèm proof. Đừng tự khai `--source human` khi không có người duyệt thật.
 2. **Luôn confirm** trước thao tác xoá (`delete`, `del-comment`, `delete-branch`) và trước khi chuyển task sang trạng thái cuối (Done/Closed/Cancelled).
 3. **Không hardcode token/URL** — luôn qua `config.py`.
 4. Đọc cookbook liên quan trước khi chạy một workflow nhiều bước.

@@ -116,6 +116,87 @@ class RunLogTest(unittest.TestCase):
         res = self.advance("r1", "test")
         self.assertTrue(res["written"])
 
+    # --- checkpoint provenance: an agent may not approve its own irreversible step ---
+    def cp(self, rid, name, status, source=None, proof=None):
+        return run_log.cmd_checkpoint(ns(run_id=rid, name=name, status=status,
+                                         source=source, proof=proof))
+
+    def _ready_for_deliver(self, rid="r1", mode="checkpoint"):
+        self.init(rid, mode=mode)
+        for st in ("plan", "implement", "test"):
+            self.set_stage(rid, st, "done")
+        self.record(rid, "review", "pass")
+        run_log.cmd_ac_add(ns(run_id=rid, text="AC1 works", id=None))
+        run_log.cmd_ac_map(ns(run_id=rid, id="AC1", evidence="manual", verify_json=None))
+
+    def test_checkpoint_records_provenance(self):
+        self.init()
+        st = self.cp("r1", "before_mr", "approved", source="telegram", proof="p.txt")
+        rec = st["checkpoints"]["before_mr"]
+        self.assertEqual(rec["status"], "approved")
+        self.assertEqual(rec["source"], "telegram")
+        self.assertEqual(rec["proof"], "p.txt")
+        self.assertTrue(rec["at"])
+
+    def test_checkpoint_defaults_to_untrusted_agent_source(self):
+        self.init()
+        st = self.cp("r1", "before_mr", "approved")
+        self.assertEqual(st["checkpoints"]["before_mr"]["source"], "agent")
+
+    def test_deliver_blocked_on_agent_self_approval(self):
+        self._ready_for_deliver()
+        self.cp("r1", "before_mr", "approved")            # agent approves itself
+        res = self.advance("r1", "deliver")
+        self.assertFalse(res["allowed"])
+        self.assertFalse(res["written"])
+        self.assertTrue(any(m.startswith("checkpoint:before_mr") for m in res["missing"]))
+
+    def test_deliver_allowed_on_trusted_approval(self):
+        self._ready_for_deliver()
+        self.cp("r1", "before_mr", "approved", source="telegram")
+        res = self.advance("r1", "deliver")
+        self.assertTrue(res["allowed"], res["reason"])
+        self.assertTrue(res["written"])
+
+    def test_deliver_blocked_when_checkpoint_missing(self):
+        self._ready_for_deliver()
+        res = self.advance("r1", "deliver")
+        self.assertFalse(res["allowed"])
+
+    def test_auto_mode_has_no_human_so_checkpoint_not_required(self):
+        self._ready_for_deliver(mode="auto")
+        res = self.advance("r1", "deliver")
+        self.assertTrue(res["allowed"], res["reason"])
+
+    def test_legacy_string_checkpoint_is_not_trusted(self):
+        self._ready_for_deliver()
+        path = os.path.join(self.tmp, "r1.json")
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+        raw["checkpoints"]["before_mr"] = "approved"       # pre-provenance format
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(raw, f)
+        st = run_log._read("r1")
+        self.assertEqual(st["checkpoints"]["before_mr"]["source"], "legacy")
+        self.assertFalse(self.advance("r1", "deliver")["allowed"])
+
+    def test_legacy_source_cannot_be_recorded(self):
+        self.init()
+        with self.assertRaises(ValueError):
+            self.cp("r1", "before_mr", "approved", source="legacy")
+
+    # --- list: artifacts in the runs dir must not crash the listing ---
+    def test_list_skips_non_run_artifacts(self):
+        self.init("r1")
+        with open(os.path.join(self.tmp, "r1_answers.json"), "w", encoding="utf-8") as f:
+            json.dump([{"q": "?", "answer": "!"}], f)          # a list artifact
+        with open(os.path.join(self.tmp, "r1_verify.json"), "w", encoding="utf-8") as f:
+            json.dump({"steps": [], "passed": True}, f)        # dict, but no run_id
+        with open(os.path.join(self.tmp, "broken.json"), "w", encoding="utf-8") as f:
+            f.write("{not json")
+        rows = run_log.cmd_list(ns(open=False))
+        self.assertEqual([r["run_id"] for r in rows], ["r1"])
+
     # --- policy: checkpoint mode informs but does not block ---
     def test_checkpoint_informs(self):
         self.init(mode="checkpoint")

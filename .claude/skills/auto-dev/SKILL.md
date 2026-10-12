@@ -29,9 +29,12 @@ The three checkpoints (checkpoint mode):
 2. `before_mr` — after tests pass + review, before the merge request.
 3. `before_notify` — before any `notifier.py` call (a real person will see it).
 
-At each checkpoint: present the artifact, ask for approval, record it with
-`run_log.py checkpoint <run_id> <name> approved`, then continue. Never pass a checkpoint
-without explicit approval.
+At each checkpoint: present the artifact, ask for approval, then continue. The approval is
+recorded **by `tg_gate.py parse`**, not by you — it writes `checkpoint <name> approved
+--source telegram --proof <reply-file>`. A checkpoint you record yourself defaults to
+`--source agent`, which `policy()` does NOT trust: in `checkpoint` mode stage `deliver`
+cannot advance until `before_mr` carries a `human`/`telegram` approval. Use
+`--source human` only when a person really approved out of band.
 
 ### Evidence-gated transitions (core principle)
 
@@ -54,6 +57,7 @@ source before first use.
 |------|------------------|
 | `tools/autopilot.py` | **MỘT LỆNH chạy trọn chu trình** — `run --resolve-existing`: resolver review loạt → prep từng task (agent, hỏi Telegram khi cần làm rõ/duyệt; timeout = để nguyên, nhắc người) → worker code tuần tự + merge local. Telegram chỉ chạm người ở: làm rõ · duyệt solution · đóng task FIXED |
 | `tools/task_queue.py` | **Intake queue + SERIAL resolver flow** — `scan/intake` enrich+clarify many tasks up front; `next/done` hand out ONE item at a time under a per-flow lock (owner `task_resolver`, shared with `task_resolver.py` — manual work is never blocked). `answer` syncs the clarified brief back onto the aTask task ([WRITE]) so it can be handed off. See `cookbook/intake.md` § Queue, slash `/atask-queue` |
+| `tools/agent_init.py` | **Chuẩn kiến thức `.agent/` cho repo sản phẩm** — `add --repo <url> --yes` (MỘT lệnh: clone → tra GitLab id/branch → registry → draft) · `scan` (facts tất định: stack/commands/modules/datastores, KHÔNG secret) · `draft` (dựng cây `.agent/` vào `temp/`, migrate `CLAUDE.md` sẵn có theo heading, báo rõ dòng nào bị bỏ) · `apply --yes` [WRITE] (ghi vào clone_dir + sinh con trỏ mỏng AGENTS/CLAUDE/GEMINI/cursor/copilot) · `check` (DRIFT: knowledge vs code; cảnh báo con trỏ bị .gitignore nuốt) · `docs` (xếp kho tài liệu sẵn có thành 4 tầng tin cậy: canon `.agent/decisions/` · `docs/guides/` · `docs/reference/` giữ nguyên chỗ · `docs/archive/` cho plan/progress cũ; `git mv` + rewrite link CẢ trong mã nguồn). Vendor-neutral: agent nào cũng đọc được |
 | `tools/context_pack.py` | **Intake: enrich** — gather description + **comments + checklist + subtasks** (aTask) or **AC/root-cause/solution** (Azure) into `temp/runs/<src>-<id>_context.md`; emits `ac_seeds` + `signals.thin_description`. Feeds clarify/scout/debate as `--desc`. Run FIRST |
 | `tools/clarify.py` | **Intake gate `clarity`** — surface ambiguities (scope/io/acceptance/edge/non-functional) as blocking-vs-assumed questions; `brief` folds answers into `temp/runs/<id>_brief.md`. Heuristic-first, optional `--backend`. Required gate on stage `plan`. Feed it the context pack via `--desc-file` |
 | `tools/triage.py` | **Intake: triage** — classify tier (trivial/standard/complex) + mode (auto/checkpoint); heuristic-first, optional `--backend` agent |
