@@ -587,6 +587,62 @@ class LadderTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("| AC1 |", open(report_file, encoding="utf-8").read())
 
+    def test_stale_junit_report_of_an_earlier_run_does_not_count(self):
+        """Codex F.3 R2 #2: the suite writes no report this time; an old passing one is still there."""
+        self.add_test("    def test_ac1_add(self):\n        self.assertEqual(calc.add(1, 1), 2)\n")
+        spec = self.ac_spec()
+        text = open(spec).read().replace(f"- {self.JUNIT_HELPER}\n", "- -c\n").replace(
+            "- -s\n", "- pass\n", 1)
+        text = "\n".join(l for l in text.split("\n") if l.strip() not in ("- tests", "- -o", "- build/junit.xml"))
+        open(spec, "w").write(text)
+        os.makedirs(os.path.join(self.repo, "build"), exist_ok=True)
+        old = os.path.join(self.repo, "build", "junit.xml")
+        open(old, "w").write('<testsuite><testcase classname="tests.test_calc.T" name="test_ac1_add"/></testsuite>')
+        V.start(self.repo, "main", spec, "implement", False, V.parse_acs(["AC1: cộng đúng"]))
+        ran = V.work("w", once=True, interval=0)["ran"]
+        self.assertEqual(ran[-1]["status"], "blocked")
+        self.assertIn("no JUnit test results", self.task()["last_error"])
+        self.assertFalse(os.path.exists(old))
+
+    def test_junit_glob_on_tracked_files_is_refused(self):
+        os.makedirs(os.path.join(self.repo, "reports"), exist_ok=True)
+        open(os.path.join(self.repo, "reports", "r.xml"), "w").write("<testsuite/>")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "tracked report")
+        self.assertIn("tracked", L.clear_junit(self.repo, "reports/*.xml"))
+        self.assertTrue(os.path.exists(os.path.join(self.repo, "reports", "r.xml")))
+
+    def test_testcase_maps_to_a_file_by_qualified_path_only(self):
+        """Codex F.3 R2 HIGH: same simple class name in another package is not this branch's test."""
+        changed = {"src/test/java/com/new/FooTest.java"}
+        tree = changed | {"src/test/java/com/original/FooTest.java"}
+        self.assertEqual(L.test_case_file({"classname": "com.original.FooTest"}, changed, tree), "")
+        self.assertEqual(L.test_case_file({"classname": "FooTest"}, changed, tree), "")      # ambiguous
+        self.assertEqual(L.test_case_file({"classname": "com.new.FooTest$Inner"}, changed, tree),
+                         "src/test/java/com/new/FooTest.java")
+        self.assertEqual(L.test_case_file({"classname": "x", "file": "FooTest.java"}, changed, tree), "")
+        self.assertEqual(L.test_case_file({"classname": "tests.test_calc.T"}, {"tests/test_calc.py"}),
+                         "tests/test_calc.py")
+
+    def test_report_needs_coverage_from_the_same_suite_run(self):
+        """Codex F.3 R2 #3: coverage checkpoint of commit A + suite checkpoint of commit B -> unchecked."""
+        spec = self.ac_spec()
+        h = L.load_spec(self.repo, "main", spec)["hash"]
+        a_sha, b_sha = "a" * 40, "b" * 40
+
+        class FakeStore:
+            def get(self_, tid):
+                return {"id": tid, "status": "done", "title": "t",
+                        "data": {"repo": self.repo, "base": "main", "spec_file": spec,
+                                 "acs": [{"id": "AC1", "text": "x"}]}}
+
+            def checkpoints(self_, tid, valid_only=False):
+                return [{"step": "suite", "input_key": f"{b_sha}:{h}", "data": {"passed": True, "sha": b_sha}},
+                        {"step": "acs", "input_key": f"{a_sha}:{h}",
+                         "data": {"passed": True, "sha": a_sha, "suite_sha": a_sha,
+                                  "covered": {"AC1": ["t [passed]"]}}}]
+        self.assertEqual(L.evidence_report(FakeStore(), "t1")["acs"][0]["status"], "chưa kiểm")
+
     def test_summary_keeps_errors_and_tail_only(self):
         log = "\n".join(f"line {i}" for i in range(5000)) + "\nAssertionError: 1 != 5\nFAILED (failures=1)"
         s = L.summarize(log)

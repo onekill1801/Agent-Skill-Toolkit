@@ -280,16 +280,42 @@ def _expand(argv: list, tests: list) -> list:
     return out
 
 
+def _junit_patterns(patterns) -> list:
+    return [patterns] if isinstance(patterns, str) else list(patterns or [])
+
+
+def clear_junit(repo: str, patterns) -> str:
+    """Delete report files left by earlier runs, so whatever exists afterwards was written by THIS
+    run (Codex F.3 R2 #2). Refuses globs that match tracked files. Returns an error text or ''."""
+    import glob
+    found = []
+    for pattern in _junit_patterns(patterns):
+        found += [x for x in glob.glob(os.path.join(repo, pattern), recursive=True) if os.path.isfile(x)]
+    if not found:
+        return ""
+    rel = [os.path.relpath(x, repo).replace("\\", "/") for x in found]
+    tracked = [x for x in git(repo, "ls-files", "-z", "--", *rel).split("\0") if x]
+    if tracked:
+        return f"`junit:` matches tracked files {tracked[:5]} — point it at build output only"
+    for x in found:
+        try:
+            os.remove(x)
+        except OSError as e:
+            return f"cannot remove an old JUnit report {x}: {e}"
+    return ""
+
+
 def parse_junit(repo: str, patterns, since: float, cap: int = 20000) -> list:
-    """Executed test cases from JUnit XML files written by THIS run (mtime >= since).
+    """Executed test cases from JUnit XML files written by THIS run (old ones are removed first by
+    clear_junit; the mtime check is a second guard).
     [{"id", "classname", "name", "file", "status": passed|failure|error|skipped}]"""
     import glob
     import xml.etree.ElementTree as ET
     out = []
-    for pattern in ([patterns] if isinstance(patterns, str) else list(patterns or [])):
+    for pattern in _junit_patterns(patterns):
         for path in sorted(glob.glob(os.path.join(repo, pattern), recursive=True)):
             try:
-                if os.path.getmtime(path) < since - 1 or os.path.getsize(path) > 50 * 2 ** 20:
+                if os.path.getmtime(path) < since - 2 or os.path.getsize(path) > 50 * 2 ** 20:
                     continue                     # a report from an earlier run proves nothing about this one
                 root = ET.parse(path).getroot()
             except (OSError, ET.ParseError):
@@ -310,6 +336,10 @@ def parse_junit(repo: str, patterns, since: float, cap: int = 20000) -> list:
 
 
 def rung_cmd(ctx, rung: dict, job: dict) -> dict:
+    if rung.get("junit"):
+        err = clear_junit(job["repo"], rung["junit"])
+        if err:
+            return {"passed": False, "fixable": False, "summary": err}
     t0 = time.time()
     res = _exec(ctx, job["repo"], argv_of(rung["run"]), int(rung.get("timeout", 3600)))
     if rung.get("junit"):
@@ -445,21 +475,36 @@ def _changed_test_files(repo: str, base: str) -> set:
             if TEST_FILE.search(p.replace("\\", "/")) and TEST_CODE.search(p)}
 
 
-def test_case_file(tc: dict, changed: set) -> str:
-    """Which changed test file a JUnit test case comes from ('' if it cannot be tied to one)."""
+def _tree_test_files(repo: str) -> set:
+    return {p for p in git(repo, "ls-files", "-z").split("\0")
+            if p and TEST_FILE.search(p) and TEST_CODE.search(p)}
+
+
+def test_case_file(tc: dict, changed: set, files: set = None) -> str:
+    """Which changed test file a JUnit test case comes from ('' if it cannot be tied to exactly one).
+    The candidate must be the ONLY test file of the whole tree (`files`) matching the testcase's
+    qualified path (package + class / module path) — never a bare class name; an unchanged test
+    elsewhere with the same name makes it ambiguous, which counts as no match (Codex F.3 R2)."""
+    pool = set(files or ()) | set(changed)
+
+    def unique(pred):
+        hits = sorted(c for c in pool if pred(c))
+        return hits[0] if len(hits) == 1 and hits[0] in changed else ""
+
+    def stem_of(c):
+        return re.sub(r"\.\w+$", "", c)
+
     if tc.get("file"):
-        f = tc["file"].lstrip("./")
-        return next((c for c in changed if c == f or c.endswith("/" + f) or f.endswith("/" + c)), "")
+        f = tc["file"].replace("\\", "/").lstrip("./")
+        return unique(lambda c: c == f or c.endswith("/" + f) or f.endswith("/" + c))
     cls = re.sub(r"\$.*$", "", tc.get("classname", ""))
-    parts = cls.split(".")
+    parts = [x for x in cls.split(".") if x]
     for n in range(len(parts), 0, -1):            # python: tests.test_calc.T -> tests/test_calc.py
-        stem = "/".join(parts[:n])
-        hit = next((c for c in changed if re.sub(r"\.\w+$", "", c) == stem or
-                    re.sub(r"\.\w+$", "", c).endswith("/" + stem)), "")
+        stem = "/".join(parts[:n])                # java: com.x.FooTest -> .../com/x/FooTest.java
+        hit = unique(lambda c: stem_of(c) == stem or stem_of(c).endswith("/" + stem))
         if hit:
             return hit
-    last = parts[-1] if parts else ""             # java/kotlin: com.x.FooTest -> .../FooTest.java
-    return next((c for c in changed if re.search(rf"(^|/){re.escape(last)}\.(java|kt|scala|groovy)$", c)), "") if last else ""
+    return ""
 
 
 def rung_ac_coverage(ctx, rung: dict, job: dict) -> dict:
@@ -476,12 +521,16 @@ def rung_ac_coverage(ctx, rung: dict, job: dict) -> dict:
         return {"passed": False, "fixable": False, "missing": [a["id"] for a in acs],
                 "summary": f"`{rung['from']}` produced no JUnit test results — per-AC evidence is impossible "
                            f"(check its `junit:` glob)"}
+    if src.get("sha") and src["sha"] != head(job["repo"]):
+        return {"passed": False, "fixable": False, "missing": [a["id"] for a in acs],
+                "summary": f"`{rung['from']}` results are for {src['sha'][:8]}, not HEAD — run it again"}
     rx = re.compile(rung.get("marker") or AC_MARKER, re.I)
     changed = _changed_test_files(job["repo"], job["base"])
+    tree = _tree_test_files(job["repo"])
     covered, not_run = {}, {}
     for tc in tests:
         ids = {f"AC{int(m.group(1))}" for m in rx.finditer(f"{tc['classname']} {tc['name']}")}
-        if not ids or not test_case_file(tc, changed):
+        if not ids or not test_case_file(tc, changed, tree):
             continue
         for aid in ids:
             (covered if tc["status"] == "passed" else not_run).setdefault(aid, []).append(f"{tc['id']} [{tc['status']}]")
@@ -748,7 +797,13 @@ def evidence_report(st, task_id: str) -> dict:
     ac_rung = next((r for r in spec["rungs"] if r.get("kind") == "ac_coverage"), None)
     ac_cp = cps.get(ac_rung["name"]) if ac_rung else None
     ac_data = (ac_cp or {}).get("data") or {}
-    usable = bool(ac_rung) and current(ac_cp)
+    suite_cp = cps.get(ac_rung.get("from")) if ac_rung else None
+    suite_data = (suite_cp or {}).get("data") or {}
+    # coverage counts only if computed from THIS suite checkpoint: same HEAD + spec identity, and the
+    # suite sha it recorded is that checkpoint's sha (Codex F.3 R2 #3)
+    usable = (bool(ac_rung) and current(ac_cp) and current(suite_cp) and bool(suite_data.get("passed"))
+              and ac_cp.get("input_key") == suite_cp.get("input_key")
+              and bool(ac_data.get("suite_sha")) and ac_data.get("suite_sha") == suite_data.get("sha"))
     acs = []
     for a in d.get("acs") or []:
         aid = a["id"].upper()
