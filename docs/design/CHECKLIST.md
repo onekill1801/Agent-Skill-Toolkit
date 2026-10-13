@@ -1,7 +1,7 @@
 # Checklist triển khai — Agent-Skill-Toolkit
 
 > Theo dõi tiến độ kế hoạch trong [`agent-ecosystem.md`](agent-ecosystem.md). Cập nhật **mỗi lần** xong một phần.
-> Cập nhật lần cuối: 2026-10-13. Test: 351 xanh, 1 skip (Windows).
+> Cập nhật lần cuối: 2026-10-13. Test: 368 xanh, 1 skip (Windows).
 
 ## Quy trình mỗi phần
 
@@ -45,7 +45,7 @@ Ký hiệu: ✅ xong + Codex đồng thuận · 🔁 đã code, đang review/s�
 | # | Việc | Trạng thái | Commit | Codex | Ghi chú |
 |---|---|---|---|---|---|
 | F.4a | Store bền + engine checkpoint + quota pause/resume + handoff | ✅ | `8520548` → `980412a` → `4a847a0` → `199a6f5` | GO (vòng 3) | lease token, heartbeat, input key, kill cây tiến trình; mẫu limit vẫn tự viết — cần câu thông báo thật |
-| F.4b | Gắn store/engine vào luồng review MR (M5) | ⬜ | | | |
+| F.4b | Gắn store/engine vào luồng review MR (`review_flow.py`) | ✅ | `65f923d` → `01fdbae` → `b336e7f` | GO (vòng 3) | quota → dừng; MR đổi head → review lại; chờ duyệt → blocked + reconcile; phát hiện giả mạo → quarantine (chỉ người gỡ). Cô lập OS thật = F.6b |
 | F.4c | Chạy thử review 1 MR thật (shadow) | ⛔ | | | **cần project + số MR** |
 | F.6a | Luật tự đăng comment GitLab (`review_rules.py`) | ✅ | `20cb944` | — | mặc định `shadow`; cần `REVIEW_AUTO_POST_PROJECTS` |
 | F.6b | Executor tách biệt + duyệt Telegram gắn hash | ⛔ | | | **cần user Windows chuẩn + token GitLab chỉ đọc** |
@@ -81,4 +81,7 @@ Ký hiệu: ✅ xong + Codex đồng thuận · 🔁 đã code, đang review/s�
 | 2026-10-12 | Kiến trúc repo | 2 | đồng thuận (Phụ lục C) |
 | 2026-10-13 | F.4a store/engine/quota (`8520548`) + 0.7 winexec (`317a381`) | 1 | **NO-GO**: 1 HIGH (thiếu claim token) + 6 MED (heartbeat, quota runner→engine, LeaseLost lọt, checkpoint không gắn SHA, quota bắt nhầm, reset bị cắt 6 h) — đồng ý cả 7, sửa ở `980412a` |
 | 2026-10-13 | F.4a + 0.7 (`980412a`) | 2 | **NO-GO**: xác nhận sửa 4/7; HIGH mới (claim đọc sau commit nhận nhầm token), MED key_fn, migration race, winexec quoting, quota còn bắt nhầm — sửa ở `4a847a0` |
+| 2026-10-13 | F.4b (`65f923d`) + xác nhận `199a6f5` | 1 | **NO-GO**: 2 HIGH (agent thừa hưởng token/quyền ghi; reaper Orca lấy lại job đang pause) + 3 MED (reconcile thiếu ca stale/head mới, Telegram gửi trùng khi crash, timeout trong không kill cây). `199a6f5` xác nhận FIXED cả 4 |
+| 2026-10-13 | F.4b (`01fdbae`) | 2 | **NO-GO**: chấp nhận hoãn cô lập OS sang F.6b; HIGH mới (lời duyệt giả có hash khớp được reconcile tự mở chặn), MED (khoá gửi duyệt chỉ ở flow) — sửa ở `b336e7f` |
+| 2026-10-13 | F.4b (`b336e7f`) | 3 | **GO**: quarantine + khoá gửi duyệt chung đều FIXED; không có lỗi mới. Gợi ý thêm test tranh chấp đồng thời flow/direct |
 | 2026-10-13 | F.4a + 0.7 (`4a847a0`) | 3 | **GO**: chấp nhận 2 phản biện (finish khi lease hết hạn an toàn nhờ token; dừng hợp tác cho Python thuần). MED còn: kill cây tiến trình, quota JSON nhúng, tham số rỗng — sửa ở `199a6f5` (sẽ được xác nhận trong vòng review F.4b) |
