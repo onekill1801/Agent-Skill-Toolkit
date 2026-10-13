@@ -228,10 +228,10 @@ def week_label(now: float = None) -> str:
     return f"{y}-W{w:02d}"
 
 
-def _inert(text, limit: int) -> str:
+def _inert(text_in, limit: int) -> str:
     """Repo-derived text in the digest: one line, markdown / links neutralised (Codex F.9 #8)."""
-    from agent_skill_toolkit.workflows.intake import lanes
-    return lanes.literal(" ".join(str(text).split()))[:limit]
+    from agent_skill_toolkit.core import text
+    return text.one_line(text_in, limit)
 
 
 def digest(repo_name: str, findings: list, week: str = "") -> str:

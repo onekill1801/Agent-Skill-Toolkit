@@ -175,7 +175,7 @@ def cycles(nodes: list, edges: dict) -> list:
 
 
 def markdown(s: dict) -> str:
-    from agent_skill_toolkit.workflows.intake import lanes
+    from agent_skill_toolkit.core import text as lanes
     lit = lambda t: lanes.literal(" ".join(str(t).split()))                     # noqa: E731
     lines = [f"# Khảo sát refactor — {lit(os.path.basename(s['repo']))}", "",
              "| Module | File | Phụ thuộc ra | Bị phụ thuộc | File test |", "|---|---|---|---|---|"]

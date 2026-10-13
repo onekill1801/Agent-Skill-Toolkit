@@ -25,7 +25,7 @@ import time
 from agent_skill_toolkit.core import paths
 from agent_skill_toolkit.workflows import engine as E
 from agent_skill_toolkit.workflows.execution import agent_call
-from agent_skill_toolkit.workflows.intake import lanes
+from agent_skill_toolkit.core import text as lanes
 
 KIND = "proposal"
 WAIT_GO = "candidate: "        # last_error prefix while a scan candidate waits for [Làm]

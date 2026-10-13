@@ -25,7 +25,7 @@ import uuid
 from agent_skill_toolkit.core import paths
 from agent_skill_toolkit.workflows import engine as E
 from agent_skill_toolkit.workflows.execution import agent_call
-from agent_skill_toolkit.workflows.intake import lanes
+from agent_skill_toolkit.core import text as lanes
 
 PROGRAM, SLICE, PUBLISH = "refactor_program", "refactor_slice", "refactor_publish"
 WAIT_PLAN = "plan: "            # last_error prefix while the plan waits for your approval

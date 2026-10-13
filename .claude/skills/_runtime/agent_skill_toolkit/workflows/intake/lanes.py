@@ -10,6 +10,8 @@ Pure functions, no I/O.
 
 import re
 
+from agent_skill_toolkit.core.text import clean, literal, quoted  # noqa: F401
+
 LANES = ("nho", "vua", "lon", "de_xuat")
 CODE_ORDER = ("nho", "vua", "lon")
 KINDS = ("code", "review_mr", "investigate", "atask_draft", "tchat_draft", "proposal")
@@ -115,32 +117,7 @@ def upgrade(lane: str, *, diff_lines: int = 0, files: int = 0, red_twice: bool =
             "needs_clarify_again": bool(new_blocking) or stricter}
 
 
-_CTRL = re.compile(r"[\x00-\x1f\x7f  ]+")
-
-
-def clean(text, limit: int = 300) -> str:
-    """Untrusted text on ONE line: control chars / newlines collapsed, length bounded, so a title
-    cannot fake a section, an AC line or an approval instruction."""
-    t = _CTRL.sub(" ", str(text or ""))
-    t = re.sub(r"\s{2,}", " ", t).strip()
-    return (t[:limit] + "…") if len(t) > limit else t
-
-
-# only what CREATES markup: emphasis / code / strike / tables, and `[` (no link or image without it)
-_MARKUP = re.compile(r"([\\`*_\[\]~|])")
-
-
-def literal(text: str) -> str:
-    """Neutralize markup so task text renders literally whether the destination treats the
-    message as Markdown, MarkdownV2 or HTML: markdown punctuation is backslash-escaped, angle
-    brackets / ampersands become look-alikes (no tags, no entities)."""
-    t = text.replace("&", "＆").replace("<", "‹").replace(">", "›")
-    return _MARKUP.sub(r"\\\1", t)
-
-
-def quoted(text, limit: int = 300) -> str:
-    """Untrusted task text: one line, bounded, markup neutralized, inside «…»."""
-    return "«" + literal(clean(text, limit).replace("«", "‹").replace("»", "›")) + "»"
+# moved to core.text (R.M3); re-exported here: lanes.clean / literal / quoted keep working
 
 
 def bundle(title: str, questions: list, assumptions: list = None, ac: list = None, lane: str = "") -> dict:
