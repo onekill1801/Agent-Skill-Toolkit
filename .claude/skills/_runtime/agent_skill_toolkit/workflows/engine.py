@@ -1,33 +1,36 @@
 """Checkpointed step engine — "resume from the exact step" (design §7, §B.4-M5).
 
-A workflow is an ordered list of named steps. Each step is a function
-    step(ctx: StepContext) -> dict | None
-whose return value is saved as that step's checkpoint. On the next run of the same task
-(after a quota pause, a crash, a reboot, or by a different backend/account) completed steps are
-skipped and their saved outputs are available in ctx.outputs.
+A workflow is an ordered list of steps:
+    (name, fn)            or    (name, fn, key_fn)
+    fn(ctx) -> dict | None      its return value is saved as the step's checkpoint
+    key_fn(ctx) -> str          identity of the step's INPUTS (e.g. the MR head SHA, the worktree
+                                HEAD). A saved checkpoint is reused only while its key still matches.
 
-"Exact step" means the last DURABLE checkpoint: a model call cut off mid-turn is re-run from
-its saved inputs (design §B.4). Steps must therefore be idempotent — check before you create.
+On the next run of the same task (after a quota pause, crash, reboot, or by another backend /
+account) steps whose checkpoint is valid and whose key matches are skipped, outputs in ctx.outputs.
+Once a step actually runs, every LATER step's checkpoint is invalidated and they run again —
+a repair after a green build means the build/test steps run again on the new code.
+
+"Exact step" = the last DURABLE checkpoint: a model call cut off mid-turn is re-run from its
+saved inputs (§B.4). Steps must be idempotent — check before you create.
+
+While a step runs, a background heartbeat keeps the lease alive; if the lease is lost anyway,
+ctx.should_stop() turns True and the step's result is discarded (never checkpointed).
 
 Raise from a step:
-    QuotaExceeded(resume_at, backend, reason)  -> task paused_quota, resumed later, no attempt used
-    NeedsHuman(reason)                          -> task blocked
-    any other exception                         -> attempt counted; requeued or failed
+    quota.QuotaExceeded (incl. agent_runner.AgentQuotaError) -> paused_quota, no attempt used
+    NeedsHuman(reason)                                        -> blocked
+    any other exception                                       -> attempt counted; requeued or failed
 """
 
+import threading
 import time
 import traceback
 
 from ..core import store as store_mod
 from .execution import handoff, quota
 
-DONE = "__done__"
-
-
-class QuotaExceeded(Exception):
-    def __init__(self, resume_at: float, backend: str = "", reason: str = ""):
-        super().__init__(reason or "provider limit")
-        self.resume_at, self.backend, self.reason = float(resume_at), backend, reason
+QuotaExceeded = quota.QuotaExceeded          # one exception type for runners and engine
 
 
 class NeedsHuman(Exception):
@@ -35,16 +38,19 @@ class NeedsHuman(Exception):
 
 
 class StepContext:
-    def __init__(self, st: store_mod.Store, task: dict, owner: str, outputs: dict, lease_s: int):
-        self.store, self.task, self.owner, self.outputs, self.lease_s = st, task, owner, outputs, lease_s
+    def __init__(self, st: store_mod.Store, task: dict, outputs: dict, lease_s: int):
+        self.store, self.task, self.outputs, self.lease_s = st, task, outputs, lease_s
+        self.lease = task["lease_token"]
         self.step = ""
+        self._lost = threading.Event()
 
     @property
     def data(self) -> dict:
         return self.task.get("data") or {}
 
-    def heartbeat(self):
-        self.store.heartbeat(self.task["id"], self.owner, self.lease_s)
+    def should_stop(self) -> bool:
+        """True once the lease is lost — a long step should stop and return."""
+        return self._lost.is_set()
 
     def handoff(self, **sections):
         return handoff.write(self.task["id"], sections)
@@ -59,44 +65,98 @@ class StepContext:
             raise QuotaExceeded(c["resume_at"], backend, f"{c['limit']}: {output.strip()[-200:]}")
 
 
-def completed_steps(st: store_mod.Store, task_id: str) -> dict:
-    """{step: output} for every checkpointed step (latest wins)."""
+class _Heartbeat:
+    """Renews the lease from a separate connection while a step blocks the main thread."""
+
+    def __init__(self, path: str, task_id: str, lease: str, lease_s: int, lost: threading.Event):
+        self.args, self.lost = (path, task_id, lease, lease_s), lost
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self):
+        path, task_id, lease, lease_s = self.args
+        interval = max(0.2, lease_s / 3)
+        with store_mod.Store(path) as st:
+            while not self.stop.wait(interval):
+                try:
+                    st.heartbeat(task_id, lease, lease_s)
+                except store_mod.LeaseLost:
+                    self.lost.set()
+                    return
+                except Exception:  # noqa: BLE001 — a transient DB error: try again next tick
+                    continue
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.stop.set()
+        self.thread.join(timeout=5)
+
+
+def _step(spec):
+    name, fn = spec[0], spec[1]
+    return name, fn, (spec[2] if len(spec) > 2 else None)
+
+
+def reusable_outputs(st: store_mod.Store, task_id: str) -> dict:
+    """{step: checkpoint} — latest VALID checkpoint per step."""
     out = {}
-    for cp in st.checkpoints(task_id):
-        out[cp["step"]] = cp["data"]
+    for cp in st.checkpoints(task_id, valid_only=True):
+        out[cp["step"]] = cp
     return out
 
 
-def run(st: store_mod.Store, task: dict, owner: str, steps: list, lease_s: int = store_mod.DEFAULT_LEASE_S) -> dict:
-    """Run `task` (already claimed by `owner`) through `steps` = [(name, fn), ...].
-    Returns {"status": done|paused_quota|blocked|queued|failed, "step": last step, ...}."""
+def run(st: store_mod.Store, task: dict, steps: list, lease_s: int = store_mod.DEFAULT_LEASE_S) -> dict:
+    """Run a CLAIMED `task` (it carries lease_token) through `steps`.
+    Returns {"status": done|paused_quota|blocked|queued|failed|lease_lost, "step": ...}."""
     tid = task["id"]
-    outputs = completed_steps(st, tid)
-    ctx = StepContext(st, task, owner, outputs, lease_s)
-    for name, fn in steps:
-        if name in outputs:
-            continue
-        ctx.step = name
-        t0 = time.time()
-        try:
-            st.heartbeat(tid, owner, lease_s)
-            result = fn(ctx) or {}
-        except QuotaExceeded as q:
-            st.pause_quota(tid, owner, q.resume_at, q.backend, q.reason)
-            return {"status": "paused_quota", "step": name, "resume_at": q.resume_at}
-        except NeedsHuman as h:
-            st.block(tid, owner, str(h))
-            return {"status": "blocked", "step": name, "reason": str(h)}
-        except store_mod.LeaseLost:
-            return {"status": "lease_lost", "step": name}
-        except Exception as e:  # noqa: BLE001 — every other failure counts an attempt
-            status = st.fail(tid, owner, f"{name}: {type(e).__name__}: {e}\n{traceback.format_exc()[-1500:]}")
-            return {"status": status, "step": name, "error": f"{type(e).__name__}: {e}"}
-        outputs[name] = result
-        st.checkpoint(tid, owner, name, result, sha=str(result.get("sha", "")) if isinstance(result, dict) else "")
-        st.record_usage(tid, name, "step", seconds=round(time.time() - t0, 3))
-    st.complete(tid, owner)
-    return {"status": "done", "step": steps[-1][0] if steps else "", "outputs": outputs}
+    saved = reusable_outputs(st, tid)
+    outputs = {}
+    ctx = StepContext(st, task, outputs, lease_s)
+    names = [_step(s)[0] for s in steps]
+    rerun_from = None
+    try:
+        for i, spec in enumerate(steps):
+            name, fn, key_fn = _step(spec)
+            ctx.step = name
+            key = str(key_fn(ctx)) if key_fn else ""
+            cp = saved.get(name)
+            if rerun_from is None and cp and (cp.get("input_key") or "") == key:
+                outputs[name] = cp["data"]
+                continue
+            if rerun_from is None:
+                rerun_from = name
+                later = names[i + 1:]
+                if later:
+                    st.invalidate(tid, later, reason=f"{name} re-ran")
+            t0 = time.time()
+            try:
+                st.heartbeat(tid, ctx.lease, lease_s)
+                with _Heartbeat(st.path, tid, ctx.lease, lease_s, ctx._lost):
+                    result = fn(ctx) or {}
+            except QuotaExceeded as q:
+                st.pause_quota(tid, ctx.lease, q.resume_at, q.backend, q.reason or str(q))
+                return {"status": "paused_quota", "step": name, "resume_at": q.resume_at}
+            except NeedsHuman as h:
+                st.block(tid, ctx.lease, str(h))
+                return {"status": "blocked", "step": name, "reason": str(h)}
+            except store_mod.LeaseLost:
+                raise
+            except Exception as e:  # noqa: BLE001 — every other failure counts an attempt
+                status = st.fail(tid, ctx.lease, f"{name}: {type(e).__name__}: {e}\n{traceback.format_exc()[-1500:]}")
+                return {"status": status, "step": name, "error": f"{type(e).__name__}: {e}"}
+            if ctx.should_stop():
+                raise store_mod.LeaseLost(f"task {tid}: lease lost during {name}")
+            outputs[name] = result
+            sha = str(result.get("sha", "")) if isinstance(result, dict) else ""
+            st.checkpoint(tid, ctx.lease, name, result, sha=sha, input_key=key)
+            st.record_usage(tid, name, "step", seconds=round(time.time() - t0, 3))
+        st.complete(tid, ctx.lease)
+    except store_mod.LeaseLost as e:
+        return {"status": "lease_lost", "step": ctx.step, "error": str(e)}
+    return {"status": "done", "step": names[-1] if names else "", "outputs": outputs}
 
 
 def work_once(st: store_mod.Store, owner: str, registry: dict, kinds: tuple = (),
@@ -107,6 +167,9 @@ def work_once(st: store_mod.Store, owner: str, registry: dict, kinds: tuple = ()
         return {"status": "idle"}
     steps = registry.get(task["kind"])
     if steps is None:
-        st.block(task["id"], owner, f"no workflow registered for kind {task['kind']!r}")
+        try:
+            st.block(task["id"], task["lease_token"], f"no workflow registered for kind {task['kind']!r}")
+        except store_mod.LeaseLost:
+            return {"status": "lease_lost", "task": task["id"]}
         return {"status": "blocked", "task": task["id"]}
-    return {"task": task["id"], **run(st, task, owner, steps, lease_s)}
+    return {"task": task["id"], **run(st, task, steps, lease_s)}

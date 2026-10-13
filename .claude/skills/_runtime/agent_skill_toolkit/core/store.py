@@ -2,15 +2,18 @@
 
 Design §5.1 / §7 / §B.4-M5. Workflows own what a task MEANS (kind, steps, data); this module
 only guarantees:
-  * one owner at a time (lease, claimed atomically with BEGIN IMMEDIATE)
-  * a crashed owner's lease expires and the task becomes claimable again
-  * progress = checkpoints (step + data + optional SHA); resume reads the last one
+  * one holder at a time: every claim mints a fresh LEASE TOKEN; every mutation must present the
+    current token of an unexpired lease (a stalled worker — even with the same name — whose lease
+    was reclaimed gets LeaseLost, never overwrites the new holder)
+  * a crashed holder's lease expires and the task becomes claimable again
+  * progress = checkpoints (step + data + input key); resume reads the valid ones; they can be
+    invalidated when their inputs change (new MR revision, code repaired after a green build)
   * a quota stop is a PAUSE with a resume time, not a failure (attempts unchanged)
   * every transition is an event (audit, "minutes of human involvement", status board)
 
 Statuses:  queued -> running -> done
                        |-> paused_quota (resume_at) -> running ...
-                       |-> blocked (needs a human)     -> queued (released)
+                       |-> blocked (needs a human)     -> queued (unblock)
                        |-> queued (retry, attempts+1)  -> ... -> failed (attempts exhausted)
            any open -> cancelled
 """
@@ -32,13 +35,13 @@ SCHEMA = """
 create table if not exists tasks (
   id text primary key, kind text not null, ref text not null, title text default '',
   status text not null, step text default '', attempts integer default 0, max_attempts integer default 3,
-  priority integer default 5, lease_owner text, lease_until real, resume_at real, last_error text,
-  backend text, data text default '{}', created real not null, updated real not null);
+  priority integer default 5, lease_owner text, lease_token text, lease_until real, resume_at real,
+  last_error text, backend text, data text default '{}', created real not null, updated real not null);
 create index if not exists tasks_pick on tasks(status, priority, created);
 create index if not exists tasks_ref on tasks(kind, ref);
 create table if not exists checkpoints (
   id integer primary key autoincrement, task_id text not null, step text not null,
-  data text default '{}', sha text, ts real not null);
+  data text default '{}', sha text, input_key text, valid integer default 1, ts real not null);
 create index if not exists cp_task on checkpoints(task_id, id);
 create table if not exists events (
   id integer primary key autoincrement, task_id text, ts real not null, kind text not null, data text);
@@ -47,10 +50,13 @@ create table if not exists usage (
   id integer primary key autoincrement, task_id text, step text, backend text, model text,
   tokens_in integer, tokens_out integer, seconds real, ts real not null);
 """
+# columns added after the first release of the schema (ALTER for existing databases)
+_MIGRATIONS = {"tasks": {"lease_token": "text"},
+               "checkpoints": {"input_key": "text", "valid": "integer default 1"}}
 
 
 class LeaseLost(Exception):
-    """The caller no longer owns the task (lease expired and someone else claimed it)."""
+    """The caller no longer holds the task (lease expired, or the task was claimed again)."""
 
 
 def default_path() -> str:
@@ -73,6 +79,11 @@ class Store:
         self.db.execute("pragma journal_mode=wal")
         self.db.execute("pragma busy_timeout=30000")
         self.db.executescript(SCHEMA)
+        for table, cols in _MIGRATIONS.items():
+            have = {r["name"] for r in self.db.execute(f"pragma table_info({table})")}
+            for col, decl in cols.items():
+                if col not in have:
+                    self.db.execute(f"alter table {table} add column {col} {decl}")
 
     def close(self):
         self.db.close()
@@ -132,7 +143,8 @@ class Store:
 
     def claim(self, owner: str, kinds: tuple = (), lease_s: int = DEFAULT_LEASE_S) -> dict:
         """Atomically take the next runnable task: queued, paused_quota whose time has come,
-        or running with an expired lease (crashed owner). Highest priority (lowest number) first."""
+        or running with an expired lease (crashed holder). Highest priority (lowest number) first.
+        The returned task carries `lease_token` — pass it to every later call."""
         now = time.time()
         kind_sql = f" and kind in ({','.join('?' * len(kinds))})" if kinds else ""
         with self._tx():
@@ -145,52 +157,82 @@ class Store:
             if not r:
                 return {}
             prev = r["status"]
-            self.db.execute("update tasks set status='running', lease_owner=?, lease_until=?, resume_at=null, "
-                            "updated=? where id=?", (owner, now + lease_s, now, r["id"]))
+            token = uuid.uuid4().hex
+            self.db.execute("update tasks set status='running', lease_owner=?, lease_token=?, lease_until=?, "
+                            "resume_at=null, updated=? where id=?", (owner, token, now + lease_s, now, r["id"]))
             self._event(r["id"], "claimed", owner=owner, previous=prev,
                         reclaimed_from=r["lease_owner"] if prev == "running" else None)
         return self.get(r["id"])
 
-    def _owned(self, task_id: str, owner: str):
-        r = self.db.execute("select status, lease_owner, lease_until from tasks where id=?", (task_id,)).fetchone()
-        if not r or r["status"] != "running" or r["lease_owner"] != owner:
-            raise LeaseLost(f"task {task_id} is not held by {owner}")
+    def _held(self, task_id: str, lease: str, allow_expired: bool = False):
+        r = self.db.execute("select status, lease_token, lease_until from tasks where id=?", (task_id,)).fetchone()
+        if not r or r["status"] != "running" or not lease or r["lease_token"] != lease:
+            raise LeaseLost(f"task {task_id}: lease is no longer held")
+        if not allow_expired and (r["lease_until"] or 0) < time.time():
+            raise LeaseLost(f"task {task_id}: lease expired")
 
-    def heartbeat(self, task_id: str, owner: str, lease_s: int = DEFAULT_LEASE_S):
+    def holds(self, task_id: str, lease: str) -> bool:
+        try:
+            self._held(task_id, lease)
+            return True
+        except LeaseLost:
+            return False
+
+    def heartbeat(self, task_id: str, lease: str, lease_s: int = DEFAULT_LEASE_S):
+        """Extend the lease. Allowed just after expiry as long as nobody re-claimed (same token)."""
         with self._tx():
-            self._owned(task_id, owner)
+            self._held(task_id, lease, allow_expired=True)
             self.db.execute("update tasks set lease_until=?, updated=? where id=?",
                             (time.time() + lease_s, time.time(), task_id))
 
-    def checkpoint(self, task_id: str, owner: str, step: str, data: dict = None, sha: str = ""):
+    # ------------------------------------------------------------------ checkpoints
+    def checkpoint(self, task_id: str, lease: str, step: str, data: dict = None, sha: str = "",
+                   input_key: str = ""):
         with self._tx():
-            self._owned(task_id, owner)
+            self._held(task_id, lease)
             now = time.time()
-            self.db.execute("insert into checkpoints(task_id, step, data, sha, ts) values (?,?,?,?,?)",
-                            (task_id, step, json.dumps(data or {}, ensure_ascii=False), sha or None, now))
+            self.db.execute("insert into checkpoints(task_id, step, data, sha, input_key, valid, ts) "
+                            "values (?,?,?,?,?,1,?)",
+                            (task_id, step, json.dumps(data or {}, ensure_ascii=False), sha or None,
+                             input_key or None, now))
             self.db.execute("update tasks set step=?, updated=? where id=?", (step, now, task_id))
-            self._event(task_id, "checkpoint", step=step, sha=sha or None)
+            self._event(task_id, "checkpoint", step=step, sha=sha or None, input_key=input_key or None)
 
-    def checkpoints(self, task_id: str) -> list:
-        return [{**dict(r), "data": json.loads(r["data"] or "{}")}
-                for r in self.db.execute("select * from checkpoints where task_id=? order by id", (task_id,))]
+    def checkpoints(self, task_id: str, valid_only: bool = False) -> list:
+        q = "select * from checkpoints where task_id=?" + (" and valid=1" if valid_only else "") + " order by id"
+        return [{**dict(r), "data": json.loads(r["data"] or "{}")} for r in self.db.execute(q, (task_id,))]
 
     def last_checkpoint(self, task_id: str) -> dict:
-        cps = self.checkpoints(task_id)
+        cps = self.checkpoints(task_id, valid_only=True)
         return cps[-1] if cps else {}
 
-    def update_data(self, task_id: str, owner: str, **fields):
+    def invalidate(self, task_id: str, steps: list = None, reason: str = "") -> int:
+        """Mark checkpoints invalid (all, or only `steps`) — e.g. the MR got a new revision.
+        No lease needed: invalidating can only make work re-run, never skip it."""
         with self._tx():
-            self._owned(task_id, owner)
+            if steps:
+                n = self.db.execute(f"update checkpoints set valid=0 where task_id=? and valid=1 and step in "
+                                    f"({','.join('?' * len(steps))})", (task_id, *steps)).rowcount
+            else:
+                n = self.db.execute("update checkpoints set valid=0 where task_id=? and valid=1",
+                                    (task_id,)).rowcount
+            if n:
+                self._event(task_id, "invalidated", steps=steps or "all", count=n, reason=reason or None)
+        return n
+
+    # ------------------------------------------------------------------ data / transitions
+    def update_data(self, task_id: str, lease: str, **fields):
+        with self._tx():
+            self._held(task_id, lease)
             data = self.get(task_id)["data"]
             data.update(fields)
             self.db.execute("update tasks set data=?, updated=? where id=?",
                             (json.dumps(data, ensure_ascii=False), time.time(), task_id))
 
-    def _finish(self, task_id, owner, status, event, error=None, **extra):
+    def _finish(self, task_id, lease, status, event, error=None, **extra):
         with self._tx():
-            self._owned(task_id, owner)
-            sets = ["status=?", "lease_owner=null", "lease_until=null", "updated=?"]
+            self._held(task_id, lease, allow_expired=True)   # token match = nobody else took it
+            sets = ["status=?", "lease_owner=null", "lease_token=null", "lease_until=null", "updated=?"]
             args = [status, time.time()]
             if error is not None:
                 sets.append("last_error=?")
@@ -202,29 +244,31 @@ class Store:
             self._event(task_id, event, error=str(error)[:300] if error else None,
                         **{k: v for k, v in extra.items() if k != "attempts"})
 
-    def pause_quota(self, task_id: str, owner: str, resume_at: float, backend: str = "", reason: str = ""):
-        """Provider limit hit: stop now, resume later from the last checkpoint. Not a failure."""
-        self._finish(task_id, owner, "paused_quota", "paused_quota", error=reason or None,
+    def pause_quota(self, task_id: str, lease: str, resume_at: float, backend: str = "", reason: str = ""):
+        """Provider limit hit: stop now, resume later from the last valid checkpoint. Not a failure."""
+        self._finish(task_id, lease, "paused_quota", "paused_quota", error=reason or None,
                      resume_at=float(resume_at), backend=backend or None)
 
-    def block(self, task_id: str, owner: str, reason: str):
+    def block(self, task_id: str, lease: str, reason: str):
         """Needs a human (decision, missing info, budget exceeded)."""
-        self._finish(task_id, owner, "blocked", "blocked", error=reason)
+        self._finish(task_id, lease, "blocked", "blocked", error=reason)
 
-    def release(self, task_id: str, owner: str):
-        self._finish(task_id, owner, "queued", "released")
+    def release(self, task_id: str, lease: str):
+        self._finish(task_id, lease, "queued", "released")
 
-    def complete(self, task_id: str, owner: str, **result):
+    def complete(self, task_id: str, lease: str, **result):
         if result:
-            self.update_data(task_id, owner, result=result)
-        self._finish(task_id, owner, "done", "done")
+            self.update_data(task_id, lease, result=result)
+        self._finish(task_id, lease, "done", "done")
 
-    def fail(self, task_id: str, owner: str, error: str) -> str:
+    def fail(self, task_id: str, lease: str, error: str) -> str:
         """Count an attempt; requeue while attempts remain, else failed. Returns the new status."""
-        t = self.get(task_id)
+        with self._tx():
+            self._held(task_id, lease, allow_expired=True)
+            t = self.get(task_id)
         attempts = int(t.get("attempts") or 0) + 1
         status = "queued" if attempts < int(t.get("max_attempts") or 3) else "failed"
-        self._finish(task_id, owner, status, "failed_attempt" if status == "queued" else "failed",
+        self._finish(task_id, lease, status, "failed_attempt" if status == "queued" else "failed",
                      error=error, attempts=attempts)
         return status
 
@@ -239,8 +283,9 @@ class Store:
     def cancel(self, task_id: str, by: str = ""):
         with self._tx():
             n = self.db.execute(
-                f"update tasks set status='cancelled', lease_owner=null, lease_until=null, updated=? "
-                f"where id=? and status in ({','.join('?' * len(OPEN))})", (time.time(), task_id, *OPEN)).rowcount
+                f"update tasks set status='cancelled', lease_owner=null, lease_token=null, lease_until=null, "
+                f"updated=? where id=? and status in ({','.join('?' * len(OPEN))})",
+                (time.time(), task_id, *OPEN)).rowcount
             if n:
                 self._event(task_id, "cancelled", by=by)
         return bool(n)

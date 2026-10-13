@@ -94,17 +94,18 @@ class AgentRunError(Exception):
     """Unrecoverable error invoking the agent (missing CLI, timeout, refusal, ...)."""
 
     def __init__(self, message: str, classification: dict = None):
-        super().__init__(message)
+        Exception.__init__(self, message)   # not super(): AgentQuotaError's MRO continues into QuotaExceeded
         self.classification = classification or quota.classify(message)
 
 
-class AgentQuotaError(AgentRunError):
-    """The provider refused for a limit (usage / rate / overloaded). `resume_at` is an epoch
-    time to try again; a workflow should PAUSE (not fail) — see workflows/engine.QuotaExceeded."""
+class AgentQuotaError(AgentRunError, quota.QuotaExceeded):
+    """The provider refused for a limit (usage / rate / overloaded). Also a
+    quota.QuotaExceeded, so the step engine PAUSES the task (no attempt used) until resume_at."""
 
-    @property
-    def resume_at(self) -> float:
-        return float(self.classification.get("resume_at") or 0)
+    def __init__(self, message: str, classification: dict = None, backend: str = ""):
+        AgentRunError.__init__(self, message, classification)
+        self.resume_at = float(self.classification.get("resume_at") or 0)
+        self.backend, self.reason = backend, message
 
 
 def _cli_failure(message: str, output: str) -> AgentRunError:
