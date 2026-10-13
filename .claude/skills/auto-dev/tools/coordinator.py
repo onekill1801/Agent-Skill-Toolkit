@@ -39,7 +39,8 @@ import probe_common as pc  # noqa: E402,F401  (UTF-8 stdout on Windows)
 def load_registry(kinds: list = None) -> tuple:
     """(registry, hooks, warnings) from every workflow that can be loaded on this machine."""
     from agent_skill_toolkit.workflows.proposal import flow as proposal_flow
-    reg, hooks, warn = {**atask_flow.REGISTRY, **proposal_flow.REGISTRY}, [], []
+    from agent_skill_toolkit.workflows.refactor import program as refactor_program
+    reg, hooks, warn = {**atask_flow.REGISTRY, **proposal_flow.REGISTRY, **refactor_program.REGISTRY}, [], []
     try:
         import verify
         reg.update(verify.REGISTRY)

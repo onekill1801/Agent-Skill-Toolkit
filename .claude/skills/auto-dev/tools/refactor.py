@@ -5,6 +5,13 @@
     python refactor.py ratchet check   --repo DIR [--base REF]          # new violations vs the baseline
     python refactor.py ratchet init    --repo DIR                       # first baseline = today's violations
     python refactor.py ratchet tighten --repo DIR                       # shrink the baseline (never grows)
+    python refactor.py program new --repo DIR --goal "..." --invariants "..." --slices FILE.json [--base develop]
+    python refactor.py program approve <program_id>                     # YOU approve the plan -> slices start
+    python refactor.py program status <program_id>
+
+slices.json: [{"id": "s1", "title": "...", "desc": "...", "acs": ["..."], "depends_on": []}, ...]
+Each slice: own worktree + branch refactor/<goal>-<id>, the implement agent codes it, the verify ladder
+proves it (`coordinator.py work` runs both); merging = your MR.
 
 Rules: .agent/architecture.json, baseline: .agent/ratchet-baseline.json (commit both). In the verify
 ladder use a rung `kind: ratchet` — it reads both from the BASE ref. `init` / `tighten` only write
@@ -20,6 +27,8 @@ from pathlib import Path
 
 runpy.run_path(str(Path(__file__).resolve().parents[2] / "_runtime" / "bootstrap.py"))["activate"]()
 from agent_skill_toolkit.core import paths  # noqa: E402
+from agent_skill_toolkit.core import store as store_mod  # noqa: E402
+from agent_skill_toolkit.workflows.refactor import program as P  # noqa: E402
 from agent_skill_toolkit.workflows.refactor import ratchet as R  # noqa: E402
 from agent_skill_toolkit.workflows.refactor import survey  # noqa: E402
 
@@ -87,6 +96,29 @@ def ratchet(action: str, repo: str, base: str = "") -> dict:
             "new": cmp["new"], "fixed": len(cmp["fixed"]), "by_rule": R.by_rule(now)}
 
 
+def program(action: str, a) -> dict:
+    import json
+    with store_mod.Store() as st:
+        if action == "new":
+            with open(a.slices, encoding="utf-8") as f:
+                slices = json.load(f)
+            return P.create(st, a.repo, a.goal, a.invariants, slices, a.base, a.spec)
+        t = st.get(a.program_id)
+        if not t or t["kind"] != P.PROGRAM:
+            raise ValueError(f"{a.program_id} is not a refactor program")
+        if action == "approve":
+            if t["status"] != "blocked" or not str(t.get("last_error") or "").startswith(P.WAIT_PLAN):
+                raise ValueError(f"{a.program_id} is not waiting for plan approval (status {t['status']})")
+            if not st.patch_data(a.program_id, ("blocked",), approved=True):
+                raise ValueError("the program changed meanwhile — look again")
+            st.unblock(a.program_id, by="human:approve")
+            return {"program": a.program_id, "approved": True, "next": "coordinator.py work"}
+        kids = st.children(a.program_id)
+        done = sum(1 for k in kids if k["status"] == "done")
+        return {"program": a.program_id, "status": t["status"], "progress": f"{done}/{len(kids)}",
+                "tasks": [{k2: k.get(k2) for k2 in ("id", "kind", "title", "status", "last_error")} for k in kids]}
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="refactor.py")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -94,6 +126,15 @@ def main(argv=None) -> int:
     p.add_argument("--repo", required=True)
     p.add_argument("--depth", type=int, default=1)
     p.add_argument("--out", default="")
+    p = sub.add_parser("program")
+    p.add_argument("action", choices=["new", "approve", "status"])
+    p.add_argument("program_id", nargs="?", default="")
+    p.add_argument("--repo", default="")
+    p.add_argument("--goal", default="")
+    p.add_argument("--invariants", default="")
+    p.add_argument("--slices", default="")
+    p.add_argument("--base", default="")
+    p.add_argument("--spec", default="", help="trusted verify spec file (else .agent/project.yml on the base)")
     p = sub.add_parser("ratchet")
     p.add_argument("action", choices=["check", "init", "tighten"])
     p.add_argument("--repo", required=True)
@@ -106,11 +147,17 @@ def main(argv=None) -> int:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(survey.markdown(s))
             out = {**s, "report": path}
+        elif a.cmd == "program":
+            if a.action == "new" and not (a.repo and a.goal and a.slices):
+                raise ValueError("program new needs --repo, --goal and --slices")
+            if a.action != "new" and not a.program_id:
+                raise ValueError("program approve/status needs the program id")
+            out = program(a.action, a)
         else:
             if a.action != "check" and a.base:
                 raise ValueError("--base only applies to `check`")
             out = ratchet(a.action, a.repo, a.base)
-    except (ValueError, RuntimeError, TimeoutError) as e:
+    except (ValueError, RuntimeError, TimeoutError, PermissionError, OSError) as e:
         out = {"error": True, "message": str(e)}
     rc = pc.emit(out)
     return 1 if out.get("passed") is False else rc      # a failed check fails the shell step (Codex F.10a #7)

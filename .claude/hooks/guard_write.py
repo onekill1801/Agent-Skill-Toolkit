@@ -44,6 +44,7 @@ WRITE_RULES = [
     (r"\b(curl|Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b[^|]*(PRIVATE-TOKEN|Authorization)", "raw authenticated API call"),
     # decisions that belong to a human (an agent must never start or accept its own proposal)
     (tool("proposals") + r"\s+(go|decide)\b", "proposal decision"),
+    (tool("refactor") + r"\s+program\s+approve\b", "refactor plan approval"),
     (tool("coordinator") + r"\s+(accept|capacity|usage|budget)\b", "coordinator decision / policy"),
 ]
 ALWAYS_DENY = [
