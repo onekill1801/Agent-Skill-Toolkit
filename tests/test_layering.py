@@ -204,12 +204,19 @@ def dynamic_loaders() -> dict:
     return out
 
 
+def _spawns(name: str) -> bool:
+    """subprocess / os launchers, `ctx.run`, and the runtime's own runner however it is imported
+    (`proc.run`, `proc_mod.run`, `from agent_skill_toolkit.core.proc import run`) — Codex R R3."""
+    return (name in SPAWN_CALLS or name.startswith("agent_skill_toolkit.core.proc.") or name.startswith("subprocess.")
+            or (name.endswith(".run") and name.split(".")[-2] in ("proc", "proc_mod", "ctx")))
+
+
 def spawners() -> set:
     out = set()
     for mod, path, _ in modules():
         with open(path, encoding="utf-8") as f:
             tree = ast.parse(f.read())
-        if any(name in SPAWN_CALLS for _, name in _calls(tree)):
+        if any(_spawns(name) for _, name in _calls(tree)):
             out.add(mod)
     return out
 
@@ -276,7 +283,9 @@ class LayeringTest(unittest.TestCase):
         old_keys = {k for k in old}
         grown = [k for k in EXCEPTIONS if k not in old_keys and
                  (k[0], k[1]) not in {(a.split(".")[-1], b) for a, b in old_keys}]
-        if old and all(isinstance(k[0], str) and k[0].startswith("agent_skill_toolkit.") for k in old):
+        # enforced EVEN when main's list is empty (it may never grow back — Codex R R3); the old area-keyed
+        # format (first round) is the only bootstrap exemption
+        if all(isinstance(k[0], str) and k[0].startswith("agent_skill_toolkit.") for k in old):
             self.assertEqual(grown, [], f"exceptions added since {base} — they may only shrink")
 
     def test_dynamic_loaders_are_declared(self):
@@ -300,6 +309,8 @@ class LayeringTest(unittest.TestCase):
                                  "sys.path.insert(0, 'y')\nsubprocess.run(['python', 'tools/review_common.py'])\n",
                   "core/alias.py": "from importlib import import_module as im\nimport runpy as r\nimport sys\n"
                                    "im('x')\nr.run_path('y')\nsys.path += ['z']\n",
+                  "workflows/sp1.py": "from agent_skill_toolkit.core import proc\nproc.run(argv)\n",
+                  "workflows/sp2.py": "from agent_skill_toolkit.core.proc import run as go\ngo(x)\n",
                   "workflows/engine_extra.py": "", "workflows/a/z.py": "from agent_skill_toolkit.workflows import engine_extra\n"}
         for rel, body in files2.items():
             p = os.path.join(tmp, rel)
@@ -322,6 +333,21 @@ class LayeringTest(unittest.TestCase):
                                         ("agent_skill_toolkit.core.alias", "runpy.run_path"),
                                         ("agent_skill_toolkit.core.alias", "sys.path.extend")})
         self.assertIn(("agent_skill_toolkit.core.dyn", "tools/review_common.py"), scripts)
+        with mock.patch(f"{__name__}.PKG_DIR", tmp):
+            spawn = spawners()
+        self.assertTrue({"agent_skill_toolkit.workflows.sp1", "agent_skill_toolkit.workflows.sp2",
+                         "agent_skill_toolkit.core.dyn"} <= spawn, spawn)
+
+    def test_empty_baseline_on_main_is_still_enforced(self):
+        """Codex R R3: once main has no exceptions, adding one fails."""
+        import subprocess
+        from unittest import mock
+        fake = subprocess.CompletedProcess([], 0, "EXCEPTIONS = {}\n", "")
+        with mock.patch("subprocess.run", return_value=fake):
+            with mock.patch.dict(f"{__name__}.EXCEPTIONS", {("agent_skill_toolkit.workflows.a.x", "y"): "a reason long enough"},
+                                 clear=True):
+                with self.assertRaises(AssertionError):
+                    self.test_exceptions_never_grow_beyond_main()
         self.assertEqual(area("agent_skill_toolkit.core.store"), "core")
         self.assertEqual(area("agent_skill_toolkit.workflows.engine"), "workflows")
         self.assertEqual(area("agent_skill_toolkit.workflows.verify.ladder"), "workflows.verify")
