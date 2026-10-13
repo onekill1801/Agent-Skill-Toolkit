@@ -72,7 +72,7 @@ class GateTest(unittest.TestCase):
         self.assertTrue(gate.host_ok("gitlab.example.vn", ours))
         self.assertTrue(gate.host_ok("GitLab.Example.VN", ours))
         for bad in ("gitlab.example.vn:pw@evil.example.com", "evil.example.com", "gitlab.example.vn.evil.com",
-                    "gitlab.example.vn:8443", "x.gitlab.example.vn", "", "gitlab.example.vn\@evil"):
+                    "gitlab.example.vn:8443", "x.gitlab.example.vn", "", "gitlab.example.vn\\@evil"):
             self.assertFalse(gate.host_ok(bad, ours), bad)
         self.assertTrue(gate.host_ok("gitlab.example.vn:8443", "https://gitlab.example.vn:8443/"))
         self.assertFalse(gate.host_ok("gitlab.example.vn", ""))
@@ -142,3 +142,49 @@ class MrWatchEnqueueTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+GW_PROBE = r'''
+import json, sys
+sys.argv = ["x"]
+import group_watch as g
+calls, posts = [], []
+g._invoke_agent = lambda *a, **k: (calls.append(k.get("readonly")), ("ok", False))[1]
+g._post_tagged = lambda *a: posts.append(a[-1])
+g._post_results = lambda *a: None
+g._send_group = lambda *a, **k: None
+g.listen._fetch_history = lambda *a, **k: []
+g.rccfg.get = lambda k, d="": {"FCHAT_REVIEW_ALLOWED": "U1", "FCHAT_WATCH_FREEFORM": "1"}.get(k, d)
+out = {}
+for who, text in (("U1", "fix the reviewing errors and push the patch"), ("U1", "deploy etask lên dev"),
+                  ("U1", "hàm tính lương nằm ở đâu?"), ("ME", "build etask")):
+    calls.clear(); posts.clear()
+    g._process_one("G", 1, "n", who, text, "ME")
+    out[text] = {"agent": list(calls), "denied": bool(posts) and posts[-1].startswith("⛔")}
+argv = g.readonly_argv(["claude", "-p", "x"])
+out["argv"] = argv
+print(json.dumps(out, ensure_ascii=False))
+'''
+
+
+class GroupWatchReadOnlyTest(unittest.TestCase):
+    """Codex F.5 R2 #1: group members get a READ-ONLY agent; change requests are refused up front."""
+
+    def test_group_requests(self):
+        import subprocess
+        tools = os.path.join(_ROOT, ".claude", "skills", "tchat-automation", "tools")
+        tmp = tempfile.mkdtemp(prefix="gw-")
+        env = dict(os.environ, WORK_DIR=tmp, TOOLKIT_STATE_DIR=tmp, PYTHONIOENCODING="utf-8")
+        p = subprocess.run([sys.executable, "-c", GW_PROBE], cwd=tools, env=env, capture_output=True,
+                           text=True, encoding="utf-8", timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr[-1500:])
+        out = json.loads(p.stdout.strip().splitlines()[-1])
+        self.assertEqual(out["fix the reviewing errors and push the patch"], {"agent": [], "denied": True})
+        self.assertEqual(out["deploy etask lên dev"]["agent"], [])
+        self.assertEqual(out["hàm tính lương nằm ở đâu?"], {"agent": [True], "denied": False})   # read-only
+        self.assertEqual(out["build etask"]["agent"], [False])                                  # the owner
+        argv = out["argv"]
+        denied = argv[argv.index("--disallowedTools") + 1].split(",")
+        for tool in ("Bash", "Edit", "Write", "WebFetch", "Task"):
+            self.assertIn(tool, denied)
+        self.assertIn("--strict-mcp-config", argv)

@@ -171,8 +171,34 @@ def _primary_account():
     return accts[0] if accts else ("default", None)
 
 
-def _invoke_agent(text, history_block, gid, group_type, sender_id, sender_name):
-    """Chạy một lượt `claude -p` cho yêu cầu này. Trả (result_text, is_error)."""
+# Lượt "investigate" từ người khác trong group (nguồn fchat, tin cậy thấp — F.5): agent CHỈ ĐỌC.
+# Chặn cứng ở CLI (không phụ thuộc lời dặn trong prompt): không Bash, không ghi file, không mạng,
+# không sub-agent; hook duyệt Telegram vẫn gắn và chỉ tự duyệt nhóm 'read'.
+READONLY_DENY = ["Bash", "PowerShell", "Edit", "MultiEdit", "Write", "NotebookEdit", "WebFetch", "WebSearch",
+                 "Task", "Agent", "KillShell", "BashOutput"]
+READONLY_ALLOW = ["Read", "Grep", "Glob"]
+READONLY_SYS = ("\n\nCHẾ ĐỘ CHỈ ĐỌC: yêu cầu đến từ một thành viên group (không phải chủ tài khoản). Chỉ được "
+                "đọc/tra cứu code và trả lời. KHÔNG sửa file, KHÔNG chạy lệnh, KHÔNG build/deploy/commit/push, "
+                "KHÔNG đọc .env hay bí mật. Nếu yêu cầu cần thay đổi gì, trả lời rằng cần chủ tài khoản làm.")
+_MUTATING = re.compile(r"\b(fix|push|commit|merge|deploy|build|release|delete|drop|revert|rollback|restart|"
+                       r"approve|close|run|execute|install|update|create|apply)\b|"
+                       r"(sửa|xo[áa]|đẩy|tạo|cập nhật|chạy|triển khai|khởi động|gộp|duyệt|đóng)", re.I)
+
+
+def looks_mutating(text: str) -> bool:
+    """Lọc sớm (không phải hàng rào chính — hàng rào là READONLY_DENY): yêu cầu nghe như đòi thay đổi."""
+    return bool(_MUTATING.search(text or ""))
+
+
+def readonly_argv(argv: list) -> list:
+    # --strict-mcp-config without --mcp-config = no MCP servers (their tools could write / reach out)
+    return argv + ["--disallowedTools", ",".join(READONLY_DENY), "--allowedTools", ",".join(READONLY_ALLOW),
+                   "--strict-mcp-config"]
+
+
+def _invoke_agent(text, history_block, gid, group_type, sender_id, sender_name, readonly=True):
+    """Chạy một lượt `claude -p` cho yêu cầu này. Trả (result_text, is_error).
+    readonly=True (mặc định, mọi nguồn fchat): công cụ chỉ đọc, không tự duyệt gì ngoài 'read'."""
     settings_path = tb._write_bridge_settings()      # gắn hook duyệt Telegram
     label, home = _primary_account()
     chat = (tg_api.allowed_chats(tg_api.approval_bot()) or [""])[0]   # chat nhận yêu cầu duyệt (bot ops)
@@ -184,8 +210,10 @@ def _invoke_agent(text, history_block, gid, group_type, sender_id, sender_name):
 
     argv = [tb._claude_bin(), "-p", prompt,
             "--output-format", "json",
-            "--append-system-prompt", WATCH_SYS,
+            "--append-system-prompt", WATCH_SYS + (READONLY_SYS if readonly else ""),
             "--settings", settings_path]
+    if readonly:
+        argv = readonly_argv(argv)
     if rccfg.get("TELEGRAM_AGENT_MODEL"):
         argv += ["--model", rccfg.get("TELEGRAM_AGENT_MODEL")]
 
@@ -195,7 +223,7 @@ def _invoke_agent(text, history_block, gid, group_type, sender_id, sender_name):
     # Chỉ tự duyệt nhóm 'read': tin trong group do NHIỀU người gõ → không để agent tự
     # chạy bash/ghi file theo nội dung tin (prompt injection). Build vẫn chạy được, chỉ
     # là hiện nút Duyệt trên Telegram. Đè bằng FCHAT_WATCH_AUTO_APPROVE nếu chấp nhận rủi ro.
-    env["CLAUDE_TG_AUTO_APPROVE"] = rccfg.get("FCHAT_WATCH_AUTO_APPROVE") or "read"
+    env["CLAUDE_TG_AUTO_APPROVE"] = "read" if readonly else (rccfg.get("FCHAT_WATCH_AUTO_APPROVE") or "read")
     # Context để bg_notify.py báo kết quả build (chạy nền) VỀ TChat + tag người
     # yêu cầu, thay vì chỉ về Telegram. Truyền qua env → kế thừa xuống tiến trình
     # bg_notify tách rời.
@@ -364,6 +392,8 @@ def _process_one(gid, group_type, sender_name, sender_id, text, me):
     kind = "build" if intent == "build" else "investigate"
     try:
         gate.admit(source, kind)
+        if source != "self" and looks_mutating(text):
+            raise PermissionError("request asks for a change; group members may only ask read-only questions")
     except PermissionError as e:
         print(f"[{_now()}] [DENY] {sender_name} ({sender_id}): {e}")
         _post_tagged(gid, group_type, sender_name, sender_id,
@@ -375,7 +405,8 @@ def _process_one(gid, group_type, sender_name, sender_id, text, me):
     ack_inc = _send_group(gid, group_type, _ACK[_guess_intent(text)])
     hist = listen._fetch_history(gid, me, limit=15)
     history_block = "\n".join(hist[:-1]) if len(hist) > 1 else ""  # bỏ chính tin vừa tới
-    result, is_error = _invoke_agent(text, history_block, gid, group_type, sender_id, sender_name)
+    result, is_error = _invoke_agent(text, history_block, gid, group_type, sender_id, sender_name,
+                                     readonly=(source != "self"))
     result = (result or "").strip()
     if not is_error and result.upper().startswith("SKIP"):
         print(f"[{_now()}]        -> agent đánh giá KHÔNG phải yêu cầu (SKIP).")
