@@ -72,6 +72,7 @@ python gitlab_api.py whoami                         # user GitLab hiện tại
 python gitlab_api.py my-review-mrs [reviewer|assignee|both]   # MR gắn tên tôi (toàn project)
 python mr_watch.py [--who ...] [--interval 300] [--once] [--no-spawn]   # poll MR gắn tên tôi → tự mở Claude review (hỏi trước khi post)
 python daemon_common.py status   # tình trạng các daemon (last event: started/transient/fatal/recovered) từ temp/daemon_health.jsonl
+python ../auto-dev/tools/verify.py plan|start --repo DIR [--base B] [--spec F] | work [--once] | status   # THANG KIỂM: build→test liên quan→suite→review chéo, tự sửa tới xanh (spec đọc từ base ref; không chạy trên nhánh mặc định)
 python taskstore.py summary | list [--status ...] | show <id> | events [<id>] | add <kind> <ref> | unblock|cancel <id>   # store bền (temp/toolkit.db): task, lease, checkpoint, dừng khi hết quota → chạy tiếp
 python status.py [--json] [--section daemons,runs,queue,approvals,feedback]   # BẢNG TRẠNG THÁI tổng hợp: daemon + pipeline run đang mở + queue + approval chờ + feedback stats
 python k8s.py doctor|contexts                       # kubectl (PATH/Lens) + kubeconfig có trên máy — không gọi mạng

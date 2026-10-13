@@ -192,6 +192,15 @@ def work_once(st: store_mod.Store, owner: str, registry: dict, kinds: tuple = ()
     if not task:
         return {"status": "idle"}
     steps = registry.get(task["kind"])
+    if callable(steps):                    # per-task steps (e.g. a ladder built from the repo's spec)
+        try:
+            steps = steps(task)
+        except Exception as e:  # noqa: BLE001 — bad spec / repo: a human must look
+            try:
+                st.block(task["id"], task["lease_token"], f"cannot build steps: {type(e).__name__}: {e}")
+            except store_mod.LeaseLost:
+                return {"status": "lease_lost", "task": task["id"]}
+            return {"status": "blocked", "task": task["id"]}
     if steps is None:
         try:
             st.block(task["id"], task["lease_token"], f"no workflow registered for kind {task['kind']!r}")
