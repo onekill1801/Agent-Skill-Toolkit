@@ -255,6 +255,36 @@ class LadderTest(unittest.TestCase):
         git(self.repo, "commit", "-qam", "prod")
         self.assertEqual(L.protected_changes(self.repo, before, "HEAD"), [])   # production code is fine
 
+    def test_interpreter_scripts_are_protected_but_not_module_runs(self):
+        """Codex F.2 R3 HIGH: `python checks/run.py` -> checks/run.py may not be weakened."""
+        spec = {"rungs": [{"run": ["python", "checks/run.py", "--fast"]}, {"run": ["node", "scripts/t.js"]},
+                          {"run": ["python", "-m", "unittest", "discover"]},
+                          {"run": ["python", "-m", "py_compile", "src/calc.py"]}]}
+        pats = L.spec_launchers(spec)
+        import re as _re
+        self.assertTrue(any(_re.search(p, "checks/run.py") for p in pats))
+        self.assertTrue(any(_re.search(p, "scripts/t.js") for p in pats))
+        self.assertFalse(any(_re.search(p, "src/calc.py") for p in pats))     # production code stays fixable
+
+    def test_protection_fails_closed_on_git_errors(self):
+        """Codex F.2 R3 NEW HIGH."""
+        from agent_skill_toolkit.workflows import engine as E
+        with self.assertRaises(E.NeedsHuman):
+            L.protected_changes(self.repo, "deadbeef" * 5, "HEAD")
+
+    def test_covered_by_requires_a_declared_full_suite(self):
+        """Codex F.2 R3 MED: `compile -DskipTests` must not count as coverage."""
+        base = "verify:\n  ladder:\n    t:\n      kind: affected_tests\n      covered_by: {cov}\n      run: x\n" \
+               "    compile:\n      run: mvn -DskipTests package\n    suite:\n      run: mvn test\n{flag}"
+        for cov, flag, ok in (("compile", "", False), ("suite", "", False), ("suite", "      full_suite: true\n", True)):
+            f = os.path.join(self.tmp, f"c_{cov}_{ok}.yml")
+            open(f, "w").write(base.format(cov=cov, flag=flag))
+            if ok:
+                L.load_spec(self.repo, "main", f)
+            else:
+                with self.assertRaises(ValueError, msg=(cov, flag)):
+                    L.load_spec(self.repo, "main", f)
+
     def test_finding_schema_and_covered_by_must_be_a_cmd_rung(self):
         self.assertEqual(L.parse_verdict('{"verdict":"GO","findings":["HIGH: broken authentication"]}'), {})
         self.assertEqual(L.parse_verdict('{"verdict":"GO","findings":[{"severity":"BAD"}]}'), {})
