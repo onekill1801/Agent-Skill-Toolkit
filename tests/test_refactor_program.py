@@ -309,6 +309,24 @@ class Round1Test(ProgramTest):
         self.assertIn("moved after it was verified", pub["last_error"])
         self.assertNotIn(out["slices"][0]["branch"], git(self.repo, "branch", "--list"))   # nothing published
 
+    def test_round3_published_sibling_branch_is_guarded(self):              # Codex F.10b R3 HIGH
+        def agent(ctx, role, prompt, cwd="", timeout=900, read_only=False):
+            sid = ctx.data["slice"]["id"]
+            with open(os.path.join(cwd, "src", f"{sid}.py"), "w") as f:
+                f.write(f"# {sid}\n")
+            if sid == "s2":                                        # damages s1's PUBLISHED branch
+                b1 = ctx.data["branch"].replace("-s2", "-s1")
+                git(self.repo, "update-ref", f"refs/heads/{b1}", git(self.repo, "rev-parse", "main"))
+            return "done"
+        mock.patch.object(P.agent_call, "run", side_effect=agent).start()
+        out = self.new()
+        self.run_all(out["program"])
+        with S.Store() as st:
+            s2 = st.get(out["slices"][1]["implement"])
+        self.assertEqual(s2["status"], "blocked")
+        self.assertIn("changed your clone", s2["last_error"])
+        self.assertIn("-s1", s2["last_error"])
+
     def test_round2_open_verifications_keep_the_program_running(self):     # Codex F.10b R2 #2
         out = self.new()
         with S.Store() as st:

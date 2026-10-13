@@ -147,10 +147,11 @@ def create(st, repo: str, goal: str, invariants: str, slices: list, base: str, s
     if out.get("duplicate"):
         return {"program": out["duplicate"], "duplicate": True}
     t = out["tasks"]
-    for sl in slices:                   # dependencies by task id (never searched for later — Codex F.10b R2)
-        if sl["depends_on"]:
-            st.patch_data(t[f"impl:{sl['id']}"], ("queued", "blocked"),
-                          dep_publish={d: t[f"publish:{d}"] for d in sl["depends_on"]})
+    publish_ids = {sl["id"]: t[f"publish:{sl['id']}"] for sl in slices}
+    for sl in slices:                   # every cross-task link by id — never searched for (Codex F.10b R2/R3)
+        st.patch_data(t[f"impl:{sl['id']}"], ("queued", "blocked"), publish_ids=publish_ids,
+                      dep_publish={d: publish_ids[d] for d in sl["depends_on"]})
+        st.patch_data(t[f"publish:{sl['id']}"], ("queued", "blocked"), verify_id=t[f"verify:{sl['id']}"])
     return {"program": t["program"], "duplicate": False, "run": run, "base": base_sha,
             "slices": [{"slice": s["id"], "implement": t[f"impl:{s['id']}"], "verify": t[f"verify:{s['id']}"],
                         "publish": t[f"publish:{s['id']}"], "branch": branches[s["id"]]} for s in slices]}
@@ -185,13 +186,33 @@ def _verified_sha(ctx, dep: str) -> str:
     return cp["data"]["sha"]
 
 
-def _snapshot(repo: str, run: str) -> dict:
-    """Your clone's refs + working tree, minus this program's own branches (their publication by the
-    publish step is the only authorised change — concurrent slices must not alarm each other)."""
-    own = f"refs/heads/refactor/{run}-"
-    refs = [ln for ln in _git(repo, "for-each-ref", "--format=%(refname) %(objectname)").splitlines()
-            if not ln.startswith(own)]
+def _snapshot(repo: str) -> dict:
+    refs = dict(ln.split(" ", 1)[::-1] for ln in
+                _git(repo, "for-each-ref", "--format=%(objectname) %(refname)").splitlines() if " " in ln)
     return {"refs": refs, "status": _git(repo, "status", "--porcelain", "--untracked-files=normal")}
+
+
+def _published(ctx) -> dict:
+    """{branch: sha} this program legitimately published so far (publish checkpoints, by task id)."""
+    out = {}
+    for sid, tid in (ctx.data.get("publish_ids") or {}).items():
+        cp = next((c for c in reversed(ctx.store.checkpoints(tid, valid_only=True)) if c["step"] == "publish"), None)
+        if cp and (cp.get("data") or {}).get("sha"):
+            out[f"refs/heads/{cp['data']['branch']}"] = cp["data"]["sha"]
+    return out
+
+
+def _unauthorised(before: dict, after: dict, published: dict) -> list:
+    """Ref / working-tree changes in your clone other than a publication by this program (a concurrent
+    slice's publish step moving ITS branch to ITS verified commit) — Codex F.10b R3."""
+    bad = []
+    for ref in sorted(set(before["refs"]) | set(after["refs"])):
+        old, new = before["refs"].get(ref), after["refs"].get(ref)
+        if old != new and not (new is not None and published.get(ref) == new):
+            bad.append(f"{ref}: {(old or '-')[:10]} -> {(new or 'deleted')[:10]}")
+    if before["status"] != after["status"]:
+        bad.append("working tree changed")
+    return bad
 
 
 def step_worktree(ctx) -> dict:
@@ -245,15 +266,16 @@ def step_implement(ctx) -> dict:
             raise E.NeedsHuman(f"{when}: {branch} no longer descends from its start {start[:10]}")
     check("before the agent")
     before_head = _git(clone, "rev-parse", "HEAD")
-    shared_before = _snapshot(repo, d["run"])
+    shared_before = _snapshot(repo)
     q = lambda t, n=600: lanes.quoted(t, n)                                    # noqa: E731
     prompt = IMPLEMENT.format(worktree=clone, branch=branch, goal=q(d.get("goal")), invariants=q(d.get("invariants") or "-"),
                               title=q(s["title"], 200), desc=q(s.get("desc") or "-", 3000),
                               acs=q("; ".join(s.get("acs") or []) or "-", 1500), slice=s["id"])
     text = agent_call.run(ctx, d.get("implement_role") or "implement", prompt, cwd=clone,
                           timeout=int(d.get("implement_timeout") or 3600))
-    if _snapshot(repo, d["run"]) != shared_before:
-        raise E.NeedsHuman(f"the agent changed your clone {repo} (refs or working tree) — check it by hand")
+    bad = _unauthorised(shared_before, _snapshot(repo), _published(ctx))
+    if bad:
+        raise E.NeedsHuman(f"the agent changed your clone {repo} — check it by hand: " + "; ".join(bad[:5]))
     check("after the agent")
     if _git(clone, "status", "--porcelain"):
         _git(clone, "add", "-A")
@@ -271,9 +293,7 @@ def step_publish(ctx) -> dict:
     from agent_skill_toolkit.workflows.verify import ladder as L
     d = ctx.data
     clone, branch, repo = d["worktree"], d["branch"], d["repo"]
-    vt = next((t for t in ctx.store.list(kind=L.KIND, limit=1000)
-               if (t.get("data") or {}).get("program_run") == d["run"] and t["data"].get("slice") == d["slice"]["id"]),
-              None)
+    vt = ctx.store.get(d.get("verify_id") or "") or None              # by id (Codex F.10b R3)
     if not vt or vt["status"] != "done":
         raise E.NeedsHuman(f"slice {d['slice']['id']}: its verification is not done")
     spec = L.load_spec(clone, d["base"], d.get("spec_file") or "")
