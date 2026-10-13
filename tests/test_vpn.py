@@ -19,6 +19,7 @@ class VpnTest(unittest.TestCase):
              mock.patch.object(vpn, "internal_up", return_value={"reachable": True, "probes": {}}):
             self.assertTrue(vpn.up()["already"])
 
+    @unittest.skipIf(os.name == "nt", "openfortivpn path is macOS/Linux only (Windows uses FortiClient)")
     def test_password_not_in_argv_and_temp_config_removed(self):
         seen = {}
 

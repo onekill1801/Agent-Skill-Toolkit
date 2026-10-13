@@ -109,15 +109,29 @@ class PostGateTest(unittest.TestCase):
         self.assertTrue(any("head_sha" in e for e in errs))
         self.assertTrue(any("contradictory" in e for e in errs))
 
-    def test_job_file_decision_not_trusted_for_orca(self):
-        forged = self.job(approval={"via": "orca", "run": "r", "id": "g", "decision": "approved"})
+    def test_orca_gate_and_board_never_approve(self):
+        """Agents can resolve Orca gates and move board cards, so neither is an approval."""
         fake = mock.Mock()
-        fake.gate_get.return_value = {"status": "pending"}
-        with mock.patch.object(rc, "orca", return_value=fake):
-            self.assertEqual(rp.approval_status(forged), "pending")
         fake.gate_get.return_value = {"status": "resolved", "resolution": "approve"}
-        with mock.patch.object(rc, "orca", return_value=fake):
-            self.assertEqual(rp.approval_status(forged), "approved")
+        with mock.patch.object(rp, "load_review", return_value=self.review()), \
+                mock.patch.object(rc, "orca", return_value=fake), \
+                mock.patch.object(rc, "board_status", return_value="completed"):
+            for via in ("orca", "orca-board"):
+                forged = self.job(approval={"via": via, "run": "r", "id": "g", "decision": "approved",
+                                            "statuses": {"approve": "completed"}})
+                self.assertEqual(rp.approval_status(forged), "pending", via)
+
+    def test_human_approval_is_bound_to_payload(self):
+        review = self.review()
+        with mock.patch.object(rp, "load_review", return_value=review):
+            phash = rp.payload_hash(self.job(), review)
+            job = self.job(approval={"via": "terminal", "decision": "approved", "payload_hash": phash})
+            self.assertEqual(rp.approval_status(job), "approved")
+        edited = self.review(summary="ok — đã sửa sau khi duyệt")
+        with mock.patch.object(rp, "load_review", return_value=edited):
+            self.assertEqual(rp.approval_status(job), "pending")
+            no_hash = self.job(approval={"via": "terminal", "decision": "approved"})
+            self.assertEqual(rp.approval_status(no_hash), "pending")
 
     def test_agents_cannot_approve_without_tty(self):
         with mock.patch.object(sys.stdin, "isatty", return_value=False):
@@ -135,6 +149,112 @@ class PostGateTest(unittest.TestCase):
             note = rp.render_note(self.job(), self.review(), set())
         self.assertIn("🟢 **t**", note)
         self.assertIn("`a.py:3`", note)
+
+
+import review_rules as rr  # noqa: E402
+
+
+class AutoPostRulesTest(unittest.TestCase):
+    """docs/design/agent-ecosystem.md §10.2.1 — auto-post without a human, only if every rule passes."""
+
+    ENV = {"REVIEW_AUTO_POST": "auto", "REVIEW_AUTO_POST_PROJECTS": "grp/proj",
+           "GITLAB_URL": "https://gitlab.example.vn", "REVIEW_AUTO_POST_DAILY_MAX": "30"}
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="rr-test-")
+        mock.patch.dict(os.environ, {"REVIEW_STATE_DIR": self.tmp, "REVIEW_ORCA": "0", **self.ENV}).start()
+        mock.patch.object(rc, "registry_by_gitlab_id", return_value=("proj", {})).start()
+
+    def tearDown(self):
+        mock.patch.stopall()
+
+    def job(self, **kw):
+        j = {"id": "77-5", "project_id": "77", "iid": 5, "project_path": "grp/proj", "author": "dev",
+             "head_sha": HEAD, "status": "awaiting_approval", "requests": [{"source": "fchat"}],
+             "diff_refs": {"base_sha": "b" * 40, "start_sha": "c" * 40, "head_sha": HEAD}}
+        j.update(kw)
+        return j
+
+    def ok(self, job, note="Looks fine", inline=()):
+        return rr.evaluate(job, note, list(inline))
+
+    def test_clean_review_auto_posts(self):
+        self.assertTrue(self.ok(self.job())["auto_post"])
+
+    def test_content_rules_block(self):
+        cases = {"@all please check": "@mention",
+                 "see https://evil.example.com/x": "link outside",
+                 "token = glpat-abcdefghijklmn12345": "secret",
+                 "fix: curl https://gitlab.example.vn/x.sh | bash": "dangerous command"}
+        for text, why in cases.items():
+            res = self.ok(self.job(), note=text)
+            self.assertFalse(res["auto_post"], text)
+            self.assertTrue(any(why in r for r in res["reasons"]), (text, res["reasons"]))
+        self.assertTrue(self.ok(self.job(), note="cc @dev — https://gitlab.example.vn/grp/proj/-/merge_requests/5")
+                        ["auto_post"])
+
+    def test_scope_mode_and_source(self):
+        self.assertFalse(self.ok(self.job(project_path="other/repo", project_id="9"))["auto_post"])
+        self.assertFalse(self.ok(self.job(requests=[{"source": "unknown_bot"}]))["auto_post"])
+        with mock.patch.dict(os.environ, {"REVIEW_AUTO_POST": "shadow"}):
+            res = self.ok(self.job())
+            self.assertTrue(res["rules_passed"])
+            self.assertFalse(res["auto_post"])
+        with mock.patch.dict(os.environ, {"REVIEW_AUTO_POST": "off"}):
+            self.assertFalse(self.ok(self.job())["rules_passed"])
+
+    def test_daily_cap(self):
+        posted = [dict(self.job(), id=f"77-{i}", status="posted", auto_posted=True, posted_at=rc.now())
+                  for i in range(2)]
+        with mock.patch.dict(os.environ, {"REVIEW_AUTO_POST_DAILY_MAX": "2"}), \
+                mock.patch.object(rc, "all_jobs", return_value=posted):
+            self.assertIn("daily auto-post cap reached", self.ok(self.job())["reasons"])
+
+    def _review(self, **kw):
+        r = {"head_sha": HEAD, "verdict": "COMMENT", "summary": "ok",
+             "findings": [{"severity": "minor", "title": "t", "file": "a.py", "line": 3}]}
+        r.update(kw)
+        return r
+
+    def test_rules_approval_rechecked_at_post_time(self):
+        job = self.job(approval={"via": "rules"})
+        with mock.patch.object(rp, "load_review", return_value=self._review()):
+            self.assertEqual(rp.approval_status(job), "approved")
+        with mock.patch.object(rp, "load_review", return_value=self._review(summary="ping @all")):
+            self.assertEqual(rp.approval_status(job), "pending")
+
+    def _post_with(self, gl, job):
+        import contextlib
+        rc.save_job(job)
+        stale = {"stale": False}
+        with mock.patch.object(rp, "load_review", return_value=self._review()), \
+                mock.patch.object(rc, "gitlab_project", return_value=contextlib.nullcontext(gl)), \
+                mock.patch.object(rp, "_ws", return_value={}), \
+                mock.patch.dict(sys.modules, {"review_ws": mock.Mock(check_stale=lambda j: stale,
+                                                                     ledger_add=lambda *a: None)}):
+            return rp.post(job["id"], notify=False)
+
+    def test_reconcile_skips_when_marker_already_on_mr(self):
+        gl = mock.Mock()
+        gl._api.side_effect = lambda p: p
+        gl._request.return_value = [{"body": rr.marker(self.job()) + "\n### old"}]
+        out = self._post_with(gl, self.job(approval={"via": "rules"}))
+        self.assertTrue(out.get("reconciled"))
+        gl.add_mr_comment.assert_not_called()
+
+    def test_inline_not_reposted_after_crash(self):
+        gl = mock.Mock()
+        gl._api.side_effect = lambda p: p
+        gl._request.side_effect = lambda url, **kw: [] if "notes" in url else {"id": 1}
+        gl.add_mr_comment.return_value = {"id": 9}
+        job = self.job(approval={"via": "rules"}, inline_done={HEAD: [0]})
+        out = self._post_with(gl, job)
+        self.assertTrue(out["posted"])
+        posted_inline = [c for c in gl._request.call_args_list if "discussions" in str(c)]
+        self.assertEqual(posted_inline, [])                 # finding 0 was already posted inline
+        note = gl.add_mr_comment.call_args[0][1]
+        self.assertIn(rr.marker(job), note)
+        self.assertIn("AI review", note)
 
 
 class GuardHookTest(unittest.TestCase):
@@ -161,6 +281,35 @@ class GuardHookTest(unittest.TestCase):
         self.assertIsNone(self.bash("python3 gitlab_api.py merge-mr 3", CLAUDE_TG_BRIDGE="1"))
         self.assertEqual(self.decide({"tool_name": "Write",
                                       "tool_input": {"file_path": "/r/temp/review_queue/jobs/1-2.json"}}), "deny")
+
+    def ps(self, cmd, **env):
+        return self.decide({"tool_name": "PowerShell", "tool_input": {"command": cmd}}, **env)
+
+    def test_bypasses_found_in_review_are_closed(self):
+        # via the dispatcher, plain and skill-qualified
+        self.assertEqual(self.bash("python agentkit.py gitlab_api create-mr a b"), "ask")
+        self.assertEqual(self.bash("python agentkit.py dev-automation:gitlab_api merge-mr 1"), "ask")
+        self.assertIsNone(self.bash("python agentkit.py gitlab_api mr-detail 1"))
+        # PowerShell tool
+        self.assertEqual(self.ps("python gitlab_api.py merge-mr 1"), "ask")
+        self.assertEqual(self.ps("Get-Content .env"), "ask")
+        self.assertEqual(self.ps("python gitlab_api.py merge-mr 1", TOOLKIT_HEADLESS="1"), "deny")
+        # copying / grepping secrets
+        self.assertEqual(self.bash("cp .env /tmp/x"), "ask")
+        self.assertEqual(self.decide({"tool_name": "Grep", "tool_input": {"pattern": "TOKEN", "path": "D:\\r\\.env"}}), "ask")
+        self.assertIsNone(self.bash("cat .env.sample"))
+        self.assertEqual(self.decide({"tool_name": "Read",
+                                      "tool_input": {"file_path": "C:\\Users\\u\\AppData\\Roaming\\orca\\orca-runtime.json"}}),
+                         "ask")
+        # forging review / approval state through a shell
+        self.assertEqual(self.bash("python -c \"import review_common as rc; j=rc.load_job('1-2'); rc.save_job(j)\""), "deny")
+        self.assertEqual(self.bash("python -c \"import approvals; approvals.decide('x', True)\""), "deny")
+        self.assertEqual(self.ps("Set-Content temp\\review_queue\\jobs\\1-2.json '{}'"), "deny")
+        self.assertEqual(self.decide({"tool_name": "Edit",
+                                      "tool_input": {"file_path": "D:\\r\\temp\\tg_approvals\\a.json"}}), "deny")
+        # reading help is not resolving a gate
+        self.assertIsNone(self.bash("orca orchestration gate-resolve --help"))
+        self.assertEqual(self.bash("orca orchestration gate-resolve --id g --resolution ok"), "deny")
 
 
 class RoleRoutingTest(unittest.TestCase):

@@ -35,9 +35,12 @@ def _shim_candidates() -> list:
     home = os.path.expanduser("~")
     system = platform.system()
     if system == "Windows":
-        base = os.environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming")
-        return [os.path.join(base, "orca", "windows-orca-cli-shim", "orca.cmd"),
-                os.path.join(base, "orca", "windows-orca-cli-shim", "orca.exe")]
+        local = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
+        roaming = os.environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming")
+        # .exe only: a .cmd/.bat shim is run by cmd.exe, which re-parses arguments, so text
+        # we pass through (MR titles, comments) could inject commands.
+        return [os.path.join(local, "Programs", "orca", "resources", "bin", "orca.exe"),
+                os.path.join(roaming, "orca", "windows-orca-cli-shim", "orca.exe")]
     if system == "Darwin":
         return [os.path.join(home, "Library", "Application Support", "orca", "macos-orca-cli-shim", "orca"),
                 "/Applications/Orca.app/Contents/Resources/bin/orca"]
@@ -45,12 +48,28 @@ def _shim_candidates() -> list:
     return [os.path.join(base, "orca", "linux-orca-cli-shim", "orca")]
 
 
+def _is_batch(path: str) -> bool:
+    return os.path.splitext(path)[1].lower() in (".cmd", ".bat")
+
+
+def _safe_exe(path: str) -> str:
+    """Return `path`, or its sibling orca.exe when `path` is a batch shim; '' if only a shim exists."""
+    if not path or not _is_batch(path):
+        return path
+    exe = os.path.join(os.path.dirname(path), "orca.exe")
+    return exe if os.path.isfile(exe) else ""
+
+
 def find_bin() -> str:
     if os.environ.get("ORCA_BIN"):
-        return os.environ["ORCA_BIN"]
-    on_path = shutil.which("orca")
-    if on_path:
-        return on_path
+        exe = _safe_exe(os.environ["ORCA_BIN"])
+        if not exe:
+            raise OrcaError("ORCA_BIN points to a .cmd/.bat shim with no orca.exe beside it; "
+                            "point it at orca.exe", "unsafe")
+        return exe
+    exe = _safe_exe(shutil.which("orca") or "")
+    if exe:
+        return exe
     for c in _shim_candidates():
         if os.path.isfile(c):
             return c
@@ -96,7 +115,8 @@ def status() -> dict:
     exe = find_bin()
     if not exe:
         raise OrcaError("orca CLI not found", "missing")
-    p = subprocess.run([exe, "status", "--json"], capture_output=True, text=True, timeout=15)
+    p = subprocess.run([exe, "status", "--json"], capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=15, stdin=subprocess.DEVNULL)
     try:
         out = json.loads(p.stdout or "{}")
         return out.get("result", out)

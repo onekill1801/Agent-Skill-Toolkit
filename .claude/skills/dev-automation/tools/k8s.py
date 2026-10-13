@@ -233,6 +233,8 @@ def _kubectl(t: dict, args: list, namespaced: bool = True, timeout: int = DEFAUL
         raise K8sError("usage", f"refusing non-read kubectl verb '{verb}' (read-only tool)")
     if verb == "config" and args[1:2] not in (["view"], ["get-contexts"]):
         raise K8sError("usage", "only `config view|get-contexts` are allowed")
+    if verb == "auth" and args[1:2] not in (["whoami"], ["can-i"]):     # `auth reconcile` writes RBAC
+        raise K8sError("usage", "only `auth whoami|can-i` are allowed")
     cmd = _base_cmd(t, namespaced) + ["--request-timeout", f"{max(timeout - 5, 5)}s"] + args
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
@@ -472,16 +474,36 @@ def cmd_logs(args) -> dict:
             "lines": lines[-MAX_LOG_LINES_OUT:]}
 
 
+_LAST_APPLIED = "kubectl.kubernetes.io/last-applied-configuration"
+
+
+def redact_secrets(obj):
+    """Redact every Secret anywhere in a kubectl JSON result, whatever was asked for
+    (`secret/x`, `secrets,configmaps`, `all`, `secret.v1`, a List …). Values only — keys stay."""
+    if isinstance(obj, list):
+        return [redact_secrets(x) for x in obj]
+    if not isinstance(obj, dict):
+        return obj
+    if obj.get("kind") == "Secret":
+        for field in ("data", "stringData"):
+            if isinstance(obj.get(field), dict):
+                obj[field] = {k: "<redacted>" for k in obj[field]}
+        ann = (obj.get("metadata") or {}).get("annotations") or {}
+        if _LAST_APPLIED in ann:          # `kubectl apply` keeps the whole manifest, data included
+            ann[_LAST_APPLIED] = "<redacted>"
+    for k, v in obj.items():
+        if isinstance(v, (dict, list)):
+            obj[k] = redact_secrets(v)
+    return obj
+
+
 def cmd_get(args) -> dict:
     t = resolve_target(args)
-    if args.kind.lower() in ("secret", "secrets") and not args.show_secrets:
-        q = ["get", "secrets"] + ([args.name] if args.name else [])
-        obj = _json(t, q)
-        for it in obj.get("items", [obj]):
-            if "data" in it:
-                it["data"] = {k: "<redacted>" for k in it["data"]}
-        return obj
-    return _json(t, ["get", args.kind] + ([args.name] if args.name else []))
+    for v in (args.kind, args.name or ""):
+        if v.startswith("-"):
+            raise ValueError(f"kind/name must not look like a flag: {v!r} (target is fixed by --project/--env)")
+    obj = _json(t, ["get", args.kind] + ([args.name] if args.name else []))
+    return obj if args.show_secrets else redact_secrets(obj)
 
 
 # --------------------------------------------------------------------------- Lens port-forwards

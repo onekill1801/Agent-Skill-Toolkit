@@ -159,9 +159,6 @@ class LogsTest(unittest.TestCase):
         self.assertEqual(out["stats"]["errors"], 1)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class PodFwdTest(unittest.TestCase):
     def test_prod_detection_ignores_api_hostname(self):
@@ -178,3 +175,46 @@ class PodFwdTest(unittest.TestCase):
         self.assertTrue(podfwd._ports_ok("13307:3306"))
         for bad in ("3306", "a:b", "1:2:3", ""):
             self.assertFalse(podfwd._ports_ok(bad))
+
+
+class SecretRedactionTest(unittest.TestCase):
+    """Bypasses found in review: `secret/x`, `secrets,configmaps`, last-applied annotation."""
+
+    SECRET = {"kind": "Secret", "metadata": {"name": "db", "annotations": {
+        "kubectl.kubernetes.io/last-applied-configuration": '{"data":{"pw":"c2VjcmV0"}}'}},
+        "data": {"pw": "c2VjcmV0"}, "stringData": {"tok": "plain"}}
+
+    def get(self, kind, name="", show=False, payload=None):
+        args = Namespace(kind=kind, name=name, show_secrets=show)
+        out = json.dumps(payload if payload is not None else {"kind": "List", "items": [json.loads(json.dumps(self.SECRET))]})
+        with mock.patch.object(k8s, "resolve_target", return_value=T),                 mock.patch("subprocess.run", return_value=done(out)):
+            return k8s.cmd_get(args)
+
+    def test_any_spelling_is_redacted(self):
+        for kind in ("secret", "secret/db", "secrets,configmaps", "all", "secret.v1"):
+            res = json.dumps(self.get(kind))
+            self.assertNotIn("c2VjcmV0", res, kind)
+            self.assertNotIn("plain", res, kind)
+            self.assertIn('"pw": "<redacted>"', res, kind)
+
+    def test_single_object_and_show_flag(self):
+        single = json.loads(json.dumps(self.SECRET))
+        self.assertNotIn("c2VjcmV0", json.dumps(self.get("secret", "db", payload=single)))
+        self.assertIn("c2VjcmV0", json.dumps(self.get("secret", "db", show=True,
+                                                      payload=json.loads(json.dumps(self.SECRET)))))
+
+    def test_flag_like_kind_or_name_refused(self):
+        with self.assertRaises(ValueError):
+            self.get("--context=prod")
+        with self.assertRaises(ValueError):
+            self.get("pods", "--namespace=kube-system")
+
+    def test_auth_only_whoami_and_can_i(self):
+        with self.assertRaises(k8s.K8sError):
+            k8s._kubectl(T, ["auth", "reconcile", "-f", "x"])
+        with mock.patch("subprocess.run", return_value=done("{}")):
+            k8s._kubectl(T, ["auth", "can-i", "get", "pods"])
+
+
+if __name__ == "__main__":
+    unittest.main()

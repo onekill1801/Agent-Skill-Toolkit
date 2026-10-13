@@ -91,7 +91,8 @@ python feedback.py add|recall|list|search|stats --project <P> ...   # sổ học
 python review_queue.py add --project etask --iid 123 | add-text "<tin có link MR>" | list --brief | next | pending
 python review_ws.py prepare <job> [--with-merge] | diff <job> [--path P] | check-stale <job> | cleanup <job> | gc
 python review_post.py validate|render|request-approval <job>    # agent dừng ở đây
-python review_post.py approve|reject <job>                      # CHỈ người (cần TTY)
+python review_post.py approve|reject <job>                      # CHỈ người (cần TTY), duyệt gắn với đúng nội dung
+python review_rules.py check <job>                              # luật tự đăng (REVIEW_AUTO_POST=off|shadow|auto)
 python review_post.py sweep                                     # [WRITE] đăng review đã duyệt + báo FChat
 ```
 Orca: automation "Auto review MR" = công tắc (precheck `review_queue.py pending`); listener FChat
@@ -128,6 +129,8 @@ Khi tắt SSL verify → cảnh báo người dùng.
 ## Guardrail (BẮT BUỘC)
 
 1. **Hỏi xác nhận trước thao tác `[WRITE]`** lần đầu trong một mạch tự động: tạo branch/MR, đổi state, **mọi `notifier.py`** (người thật sẽ thấy).
+   Ngoại lệ duy nhất: comment review MR do `review_post.py sweep` tự đăng khi `REVIEW_AUTO_POST=auto` và
+   review qua mọi luật của `mr-review/tools/review_rules.py` (agent vẫn không tự gọi `gitlab_api.py mr-comment`).
 1b. **Mốc duyệt là gate thật, không phải trạng thái.** `run_log.py checkpoint ... --source agent` (mặc định)
    **không** đủ để `advance deliver` ở `mode=checkpoint` — cần `--source human|telegram`. Đường chuẩn:
    `tg_gate.py parse` tự ghi checkpoint kèm proof. Đừng tự khai `--source human` khi không có người duyệt thật.

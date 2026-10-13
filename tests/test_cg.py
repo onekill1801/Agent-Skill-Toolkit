@@ -51,6 +51,28 @@ class CgTest(unittest.TestCase):
         syms = cg.changed_symbols(self.d, self.base, self.head)
         self.assertEqual([s["qualified"] for s in syms], ["p::A::b"])
 
+    def test_bad_refs_give_no_hunks(self):
+        self.assertEqual(cg._hunks(self.d, "--output=/tmp/x", self.head), {})
+
+    def test_windows_cmd_shim_resolved_to_node_script(self):
+        """npm's codegraph.cmd cannot be run without cmd.exe, which would re-parse MR titles."""
+        from unittest import mock
+        nodedir = tempfile.mkdtemp(prefix="cg-node-")
+        shim = os.path.join(nodedir, "codegraph.cmd")
+        with open(shim, "w") as f:
+            f.write('@ECHO off\n"%_prog%"  "%dp0%\\node_modules\\@colbymchenry\\codegraph\\npm-shim.js" %*\n')
+        script = os.path.join(nodedir, "node_modules", "@colbymchenry", "codegraph", "npm-shim.js")
+        os.makedirs(os.path.dirname(script))
+        open(script, "w").close()
+        open(os.path.join(nodedir, "node.exe"), "w").close()
+        with mock.patch("shutil.which", return_value=shim):
+            self.assertEqual(cg._cmd(), [os.path.normpath(os.path.join(nodedir, "node.exe")),
+                                         os.path.normpath(script)])
+        os.remove(script)
+        with mock.patch("shutil.which", return_value=shim):
+            self.assertEqual(cg._cmd(), [])          # shim without its script: treat as not installed
+            self.assertEqual(cg.prepare(self.d, 1)["status"], "unavailable")
+
     def test_no_index_degrades(self):
         os.remove(os.path.join(self.d, ".codegraph", "codegraph.db"))
         self.assertEqual(cg.changed_symbols(self.d, self.base, self.head), [])

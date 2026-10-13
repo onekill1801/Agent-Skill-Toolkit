@@ -3,9 +3,16 @@
 
 Hard gate (enforced here, whichever agent/provider drafted the review):
   1. review.json must validate and be for the head the workspace was prepared at
-  2. a human must approve (Orca gate · Telegram button · terminal) — agents cannot,
-     `approve` needs an interactive TTY
+  2. EITHER the exact payload passes the auto-post rules (review_rules.py, REVIEW_AUTO_POST=auto)
+     OR a human approved THIS payload (Telegram button · terminal TTY). Every approval is bound
+     to a hash of the text to post — edit the review after approving and the approval is void.
+     Orca board status / gates are display only: agents can set them, so they never approve.
   3. the MR must not have moved since (stale -> requeued, nothing posted)
+  4. our marker for this head is not already on the MR (reconcile before any retry)
+
+Interim limit (until the isolated executor, design §10.2): the job and approval files are
+still writable by a process running as the same OS user, so a determined local agent could
+forge a human approval. The auto-post rules do not depend on those files.
 
     python review_post.py validate <job_id> [--file F]
     python review_post.py render <job_id>                  # preview the GitLab note
@@ -29,12 +36,15 @@ review.json (default: <worktree>.review.json):
 """
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 
 import review_common as rc
+import review_rules as rr
 
 VERDICTS = ("APPROVE", "REQUEST_CHANGES", "COMMENT")
 SEVERITIES = ("blocker", "major", "minor", "nit")
@@ -68,6 +78,12 @@ def validate(job: dict, review: dict) -> list:
         errs.append("findings must be a list")
         findings = []
     for i, f in enumerate(findings):
+        if not isinstance(f, dict):
+            errs.append(f"findings[{i}] must be an object")
+            continue
+        for k in ("title", "body", "suggestion", "file"):
+            if f.get(k) is not None and not isinstance(f.get(k), str):
+                errs.append(f"findings[{i}].{k} must be a string")
         if f.get("severity") not in SEVERITIES:
             errs.append(f"findings[{i}].severity must be one of {SEVERITIES}")
         if not f.get("title"):
@@ -76,7 +92,8 @@ def validate(job: dict, review: dict) -> list:
             errs.append(f"findings[{i}].line must be an integer")
         if f.get("side", "new") not in ("new", "old"):
             errs.append(f"findings[{i}].side must be new|old")
-    if review.get("verdict") == "APPROVE" and any(f.get("severity") == "blocker" for f in findings):
+    if review.get("verdict") == "APPROVE" and any(isinstance(f, dict) and f.get("severity") == "blocker"
+                                                 for f in findings):
         errs.append("verdict APPROVE with a blocker finding is contradictory")
     return errs
 
@@ -88,7 +105,7 @@ def _counts(findings: list) -> str:
 
 def render_note(job: dict, review: dict, inline_ok: set, approver: str = "") -> str:
     findings = review.get("findings", [])
-    lines = [f"### 🤖 Review — {VERDICT_ICON[review['verdict']]}", "", review["summary"].strip(), "",
+    lines = [rr.marker(job), f"### 🤖 AI review — {VERDICT_ICON[review['verdict']]}", "", review["summary"].strip(), "",
              f"**Findings:** {_counts(findings)}" + (f" ({len(inline_ok)} comment inline)" if inline_ok else "")]
     rest = [(i, f) for i, f in enumerate(findings) if i not in inline_ok]
     if rest:
@@ -122,6 +139,24 @@ def render_inline(f: dict) -> str:
     return body
 
 
+def inline_candidates(review: dict) -> list:
+    findings = review.get("findings", [])
+    return [i for i, f in enumerate(findings) if f.get("file") and f.get("line")][:MAX_INLINE]
+
+
+def payload(job: dict, review: dict) -> tuple:
+    """(note, inline bodies) — the superset of text that can reach GitLab for this review."""
+    findings = review.get("findings", [])
+    return render_note(job, review, set()), [render_inline(findings[i]) for i in inline_candidates(review)]
+
+
+def payload_hash(job: dict, review: dict) -> str:
+    note, inline = payload(job, review)
+    head = (job.get("diff_refs") or {}).get("head_sha") or job.get("head_sha") or ""
+    blob = json.dumps({"head": head, "note": note, "inline": inline}, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
 def _ws(job: dict) -> dict:
     try:
         with open(job.get("ws_path", ""), encoding="utf-8") as fh:
@@ -145,22 +180,28 @@ def request_approval(job: dict, via: str = "auto") -> dict:
     errs = validate(job, review)
     if errs:
         raise ValueError("review.json invalid: " + "; ".join(errs))
+    note, inline = payload(job, review)
+    rules = rr.evaluate(job, note, inline)
+    phash = payload_hash(job, review)
     question = _preview(job, review)
-    approval = {"via": None, "requested_at": rc.now()}
-    if via in ("auto", "orca") and rc.orca():
-        st = rc.board_statuses()
-        note = (f"{VERDICT_ICON[review['verdict']]} · {_counts(review.get('findings', []))} — CHỜ DUYỆT. "
-                f"Kéo sang '{st['approve']}' = đăng, '{st['reject']}' = bỏ. "
-                f"Xem: python review_post.py render {job['id']}")
-        if rc.board_card(job, status=st["pending"], note=note):
-            approval.update(via="orca-board", card=job["worktree"], statuses=st)
-    if not approval["via"] and via in ("auto", "telegram"):
+    if rules["mode"] == "shadow":
+        question += ("\n🤖 Auto-post (shadow): " + ("SẼ tự đăng" if rules["rules_passed"]
+                     else "KHÔNG tự đăng — " + "; ".join(rules["reasons"][:3])))
+    approval = {"via": None, "requested_at": rc.now(), "payload_hash": phash, "rules": rules}
+    if via == "auto" and rules["auto_post"]:
+        approval["via"] = "rules"                  # no human: the rules are re-checked at post time
+    if not approval["via"] and via in ("auto", "telegram", "orca"):
         approval.update(_telegram_request(job, question) or {})
     if not approval["via"]:
         approval["via"] = "terminal"   # human runs: review_post.py approve <job>
+    if rc.orca():                       # Orca board = display only, never an approval source
+        st = rc.board_statuses()
+        state = "tự đăng theo luật" if approval["via"] == "rules" else f"CHỜ DUYỆT qua {approval['via']}"
+        rc.board_card(job, status=st["pending"], note=(f"{VERDICT_ICON[review['verdict']]} · "
+                      f"{_counts(review.get('findings', []))} — {state}. Xem: python review_post.py render {job['id']}"))
     job.update(status="awaiting_approval", approval=approval, verdict=review["verdict"],
                review_file=review_path(job))
-    rc.log_event(job, "approval_requested", via=approval["via"])
+    rc.log_event(job, "approval_requested", via=approval["via"], rules_passed=rules["rules_passed"])
     rc.save_job(job)
     return {"job_id": job["id"], "approval": approval, "preview": question}
 
@@ -184,44 +225,51 @@ def _telegram_request(job: dict, question: str) -> dict:
         return {}
 
 
+def _current_payload(job: dict):
+    try:
+        review = load_review(job, job.get("review_file", ""))
+    except (OSError, ValueError):
+        return None, None
+    if validate(job, review):
+        return None, None
+    return review, payload_hash(job, review)
+
+
 def approval_status(job: dict) -> str:
-    """'pending' | 'approved' | 'rejected'."""
+    """'pending' | 'approved' | 'rejected' — for the payload as it is NOW."""
     a = job.get("approval") or {}
-    # Orca / Telegram: always re-read the source of truth (the job file is writable by
-    # agents, so a "decision" stored there is only trusted for the terminal channel).
+    review, phash = _current_payload(job)
+    if review is None:
+        return "pending"
+    if a.get("via") == "rules":
+        note, inline = payload(job, review)
+        return "approved" if rr.evaluate(job, note, inline)["auto_post"] else "pending"
     if a.get("via") == "terminal":
-        return a.get("decision") if a.get("decision") in ("approved", "rejected") else "pending"
-    if a.get("via") == "orca-board":
-        st, cur = a.get("statuses") or rc.board_statuses(), rc.board_status(job)
-        if cur == st.get("approve"):
-            return "approved"
-        if cur == st.get("reject"):
-            return "rejected"
-        return "pending"
-    if a.get("via") == "orca":
-        o = rc.orca()
-        if not o:
-            return "pending"
-        g = o.gate_get(a.get("run"), a.get("id"))
-        if g.get("status") == "resolved":
-            res = (g.get("resolution") or "").strip().lower()
-            return "approved" if res in ("approve", "approved", "yes", "ok", "duyệt") else "rejected"
-        return "pending"
-    if a.get("via") == "telegram":
+        decision = a.get("decision")
+    elif a.get("via") == "telegram":
         sys.path.insert(0, os.path.normpath(os.path.join(rc.tools_dir(), "..", "..", "remote-control", "tools")))
         import approvals
-        st = approvals.get(a.get("id")).get("status")
-        return {"approved": "approved", "denied": "rejected"}.get(st, "pending")
-    return "pending"
+        decision = {"approved": "approved", "denied": "rejected"}.get(approvals.get(a.get("id")).get("status"))
+    else:
+        return "pending"   # orca-board / orca gate / unknown: agents can set these, never trusted
+    if decision == "rejected":
+        return "rejected"
+    # an approval counts only for the exact payload the human saw
+    return "approved" if decision == "approved" and a.get("payload_hash") == phash else "pending"
 
 
 def human_decide(job: dict, approved: bool) -> dict:
     if not sys.stdin.isatty():
         raise PermissionError("approve/reject needs an interactive terminal (a human) — agents cannot approve")
-    ans = input(f"{'APPROVE' if approved else 'REJECT'} review {job['id']} ({job.get('title', '')[:60]})? [y/N] ")
+    review, phash = _current_payload(job)
+    if review is None:
+        raise ValueError("review.json missing or invalid — nothing to approve")
+    print(render_note(job, review, set()))
+    ans = input(f"\n{'APPROVE' if approved else 'REJECT'} THIS text for {job['id']} ({job.get('title', '')[:60]})? [y/N] ")
     if ans.strip().lower() not in ("y", "yes"):
         return {"job_id": job["id"], "changed": False}
-    job.setdefault("approval", {}).update(decision="approved" if approved else "rejected",
+    job.setdefault("approval", {}).update(via="terminal", decision="approved" if approved else "rejected",
+                                          payload_hash=phash,
                                           by=os.environ.get("USER") or os.environ.get("USERNAME") or "terminal")
     rc.log_event(job, "decided", decision=job["approval"]["decision"])
     rc.save_job(job)
@@ -234,7 +282,7 @@ def _inline(gl, job: dict, f: dict) -> bool:
     refs = job["diff_refs"]
     side_new = f.get("side", "new") == "new"
     pos = {"position_type": "text", "base_sha": refs["base_sha"], "start_sha": refs["start_sha"],
-           "head_sha": refs["head_sha"], "new_path": f["file"], "old_path": f["file"]}
+           "head_sha": refs["head_sha"], "new_path": f["file"], "old_path": f.get("old_file") or f["file"]}
     pos["new_line" if side_new else "old_line"] = f["line"]
     url = gl._api(f"/merge_requests/{job['iid']}/discussions")
     res = gl._request(url, method="POST", data={"body": render_inline(f), "position": pos})
@@ -242,11 +290,21 @@ def _inline(gl, job: dict, f: dict) -> bool:
 
 
 def post(jid: str, dry_run: bool = False, notify: bool = True) -> dict:
+    # one poster per job across processes (several group_watch sweepers may run)
+    with rc.file_lock(f"post-{jid}", timeout=5 if not dry_run else 0.5, stale_after=1800):
+        return _post_locked(jid, dry_run, notify)
+
+
+def _safe_name(s: str) -> str:
+    return re.sub(r"[^\w.-]", "", s or "")[:40]
+
+
+def _post_locked(jid: str, dry_run: bool, notify: bool) -> dict:
     job = rc.load_job(jid)
     if not job:
         raise ValueError(f"no job {jid}")
-    if job.get("status") == "posted":
-        return {"job_id": jid, "skipped": "already posted"}
+    if job.get("status") in ("posted", "cancelled", "rejected"):
+        return {"job_id": jid, "skipped": f"status {job.get('status')}"}
     decision = approval_status(job)
     if decision != "approved":
         raise PermissionError(f"not approved (approval: {decision}) — nothing posted")
@@ -264,25 +322,39 @@ def post(jid: str, dry_run: bool = False, notify: bool = True) -> dict:
         return {"job_id": jid, "stale": True, "requeued": job["status"] == "queued", "posted": False}
 
     findings = review.get("findings", [])
-    inline_cands = [i for i, f in enumerate(findings) if f.get("file") and f.get("line")][:MAX_INLINE]
-    approver = (job.get("approval") or {}).get("by") or (job.get("approval") or {}).get("via", "")
+    inline_cands = inline_candidates(review)
+    a = job.get("approval") or {}
+    auto = a.get("via") == "rules"
+    approver = "luật tự đăng" if auto else _safe_name(a.get("by") or a.get("via", ""))
     if dry_run:
-        return {"job_id": jid, "dry_run": True, "inline_candidates": len(inline_cands),
+        return {"job_id": jid, "dry_run": True, "auto": auto, "inline_candidates": len(inline_cands),
                 "note": render_note(job, review, set(), approver)}
 
-    inline_ok = set()
+    head = (job.get("diff_refs") or {}).get("head_sha") or ""
+    done = set(job.get("inline_done", {}).get(head, []))   # survives a crash between inline and note
+    inline_ok = set(done)
     with rc.gitlab_project(job["project_id"]) as gl:
+        if rr.already_posted(gl, job):                      # reconcile: lost response on a previous try
+            job.update(status="posted", posted_at=rc.now(), auto_posted=auto, reconciled=True)
+            rc.log_event(job, "posted_reconciled")
+            rc.save_job(job)
+            return {"job_id": jid, "posted": True, "reconciled": True}
         for i in inline_cands:
+            if i in done:
+                continue
             if _inline(gl, job, findings[i]):
                 inline_ok.add(i)
+                job.setdefault("inline_done", {})[head] = sorted(inline_ok)
+                rc.save_job(job, sync=False)
         note = rc.gl_check(gl.add_mr_comment(job["iid"], render_note(job, review, inline_ok, approver)),
                            "post note")
     ws = _ws(job)
     import review_ws as rw
     reviewed = [c for c in (ws.get("commits") or {}).get("list", []) if not c.get("merge")]
     rw.ledger_add(job["project_id"], job["iid"], reviewed)
-    job.update(status="posted", posted_at=rc.now(), note_id=note.get("id"), inline_posted=len(inline_ok))
-    rc.log_event(job, "posted", verdict=review["verdict"], inline=len(inline_ok))
+    job.update(status="posted", posted_at=rc.now(), note_id=note.get("id"), inline_posted=len(inline_ok),
+               auto_posted=auto)
+    rc.log_event(job, "posted", verdict=review["verdict"], inline=len(inline_ok), auto=auto)
     rc.save_job(job)
     out = {"job_id": jid, "posted": True, "verdict": review["verdict"], "inline": len(inline_ok),
            "note_id": note.get("id")}
@@ -351,7 +423,7 @@ def sweep(dry_run: bool = False) -> dict:
         if decision == "approved":
             try:
                 actions.append(post(job["id"], dry_run=dry_run))
-            except (PermissionError, ValueError, RuntimeError) as e:
+            except (PermissionError, ValueError, RuntimeError, TimeoutError) as e:
                 actions.append({"job_id": job["id"], "error": str(e)})
         elif decision == "rejected" and not dry_run:
             rc.board_card(job, note="❌ Review bị từ chối — không đăng.")

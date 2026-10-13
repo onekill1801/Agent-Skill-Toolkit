@@ -170,7 +170,7 @@ def _up_openfortivpn(c: dict, wait: int) -> dict:
     os.chmod(conf, 0o600)
     log = os.path.join(_state_dir(), "openfortivpn.log")
     argv = [exe, "-c", conf]
-    if os.geteuid() != 0:
+    if getattr(os, "geteuid", lambda: 0)() != 0:
         argv = ["sudo", "-n"] + argv            # -n: fail instead of prompting (agents have no TTY)
     try:
         with open(log, "a") as lf:
@@ -196,7 +196,7 @@ def _up_openfortivpn(c: dict, wait: int) -> dict:
 
 def _down_openfortivpn() -> dict:
     cmd = ["pkill", "-f", "openfortivpn"]
-    if os.geteuid() != 0:
+    if getattr(os, "geteuid", lambda: 0)() != 0:
         cmd = ["sudo", "-n"] + cmd
     p = subprocess.run(cmd, capture_output=True, text=True)
     return {"stopped": p.returncode == 0, "detail": (p.stderr or "").strip()[-200:] or None}

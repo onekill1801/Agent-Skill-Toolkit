@@ -69,6 +69,34 @@ class DbeaverTest(unittest.TestCase):
         fwd[5432]["lens_status"] = "Disabled"
         self.assertFalse(dbeaver.with_forward(dbeaver.find("SIT/superset"), fwd)["protected"])
 
+    def test_prod_bypasses_from_review_are_refused(self):
+        bypasses = ["select 1; do $$ begin execute 'dr'||'op table t'; end $$",   # multi-statement
+                    "select 1; copy t to program 'x'",
+                    "select pg_terminate_backend(123)",
+                    "select * from t into outfile '/tmp/x'",
+                    "select setval('s', 1)",
+                    "select * from t for update"]
+        for sql in bypasses:
+            with self.assertRaises(PermissionError, msg=sql):
+                dbeaver.probe("PROD/kyta prd", sql, [])
+        with mock.patch("subprocess.run") as run:
+            run.return_value.stdout = '{"rows": []}'
+            dbeaver.probe("PROD/kyta prd", "select id, name from t where a = 'x';", [])
+            run.assert_called_once()
+
+    def test_retarget_flags_refused(self):
+        for extra in (["--host", "prod-db"], ["--port=5432"], ["--name", "other"], ["--engine", "mysql"]):
+            with self.assertRaises(PermissionError, msg=extra):
+                dbeaver.probe("Dev/superset", "drop table t", extra)
+
+    def test_prd_name_outside_prod_folder_is_protected(self):
+        conns = dict(CONNS, **{"my-2": {"name": "kyta prd", "folder": "Misc", "provider": "mysql",
+                                        "configuration": {"configurationType": "MANUAL", "host": "h",
+                                                          "port": "3306", "database": "k", "type": "dev"}}})
+        with mock.patch.dict(os.environ, {"DBEAVER_WORKSPACE": _ws(conns)}):
+            self.assertTrue(dbeaver.find("Misc/kyta prd")["protected"])
+            self.assertFalse(dbeaver.find("SIT/superset")["protected"])
+
     def test_no_credentials_in_output(self):
         blob = json.dumps(dbeaver.connections())
         self.assertNotIn("password", blob.lower())

@@ -37,15 +37,67 @@ import project_config
 
 DB_FILES = ("codegraph.db", "codegraph.db-wal", "codegraph.db-shm")
 CODE_KINDS = ("method", "function", "constructor")
+_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
+
+
+def _cmd() -> list:
+    """argv prefix for codegraph, or [] if not installed.
+
+    Windows npm installs a `codegraph.cmd` shim: subprocess cannot run it without a shell, and
+    running it through cmd.exe would re-parse arguments (MR titles!) — command injection. So
+    we call node on the script the shim points at."""
+    found = shutil.which("codegraph")
+    if not found:
+        return []
+    if os.path.splitext(found)[1].lower() not in (".cmd", ".bat"):
+        return [found]
+    try:
+        with open(found, encoding="utf-8", errors="replace") as f:
+            m = re.search(r'"%dp0%\\([^"]+?\.js)"', f.read())
+    except OSError:
+        return []
+    if not m:
+        return []
+    base = os.path.dirname(found)
+    script = os.path.normpath(os.path.join(base, m.group(1)))
+    node = os.path.normpath(os.path.join(base, "node.exe"))
+    node = node if os.path.isfile(node) else shutil.which("node")
+    return [node, script] if node and os.path.isfile(script) else []
+
+
+def _env() -> dict:
+    # code is company code: no usage telemetry, whatever the user-level codegraph setting is
+    return {**os.environ, "CODEGRAPH_TELEMETRY": "0", "DO_NOT_TRACK": "1"}
 
 
 def available() -> bool:
-    return shutil.which("codegraph") is not None
+    return bool(_cmd())
 
 
-def _run(args, cwd=None, timeout=120):
-    return subprocess.run(["codegraph", *args], cwd=cwd, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", timeout=timeout, stdin=subprocess.DEVNULL)
+def _run(args, cwd=None, timeout=120, input=None):
+    cmd = _cmd()
+    if not cmd:
+        raise FileNotFoundError("codegraph not installed")
+    return subprocess.run([*cmd, *args], cwd=cwd, capture_output=True, text=True, input=input,
+                          encoding="utf-8", errors="replace", timeout=timeout, env=_env(),
+                          stdin=None if input is not None else subprocess.DEVNULL)
+
+
+def _exclude_index(worktree: str) -> None:
+    """Keep `.codegraph/` (hundreds of MB) out of `git add -A` in this worktree and its siblings."""
+    try:
+        common = subprocess.run(["git", "-C", worktree, "rev-parse", "--git-common-dir"], capture_output=True,
+                                text=True, timeout=30).stdout.strip()
+        if not common:
+            return
+        path = os.path.join(common if os.path.isabs(common) else os.path.join(worktree, common), "info", "exclude")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        cur = open(path, encoding="utf-8", errors="replace").read() if os.path.isfile(path) else ""
+        if ".codegraph/" not in cur.split():
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(("" if cur.endswith("\n") or not cur else "\n") + ".codegraph/\n")
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def _seed_store(project_id) -> str:
@@ -112,6 +164,7 @@ def prepare(worktree: str, project_id, clone_dir: str = "", seed: str = "") -> d
     t0 = time.time()
     local = os.path.join(worktree, ".codegraph")
     src = "" if _has_db(local) else find_seed(project_id, clone_dir, seed)
+    _exclude_index(worktree)
     try:
         if src:
             _copy_db(src, local)
@@ -126,6 +179,8 @@ def prepare(worktree: str, project_id, clone_dir: str = "", seed: str = "") -> d
     except subprocess.TimeoutExpired:
         shutil.rmtree(local, ignore_errors=True)             # never leave a half-built index behind
         return {"status": "timeout", "seconds": round(time.time() - t0, 1)}
+    except OSError as e:                                     # review must go on without the graph
+        return {"status": "unavailable", "message": str(e)[:200]}
     if p.returncode != 0 or not _has_db(local):
         return {"status": "error", "message": (p.stderr or p.stdout).strip()[-300:]}
     saved = save_seed(worktree, project_id)
@@ -136,8 +191,10 @@ def prepare(worktree: str, project_id, clone_dir: str = "", seed: str = "") -> d
 # --------------------------------------------------------------------------- diff analysis
 
 def _hunks(worktree: str, base: str, head: str) -> dict:
-    out = subprocess.run(["git", "-C", worktree, "diff", "-U0", "-M", base, head], capture_output=True,
-                         text=True, encoding="utf-8", errors="replace").stdout
+    if not (_SHA.match(base or "") and _SHA.match(head or "")):
+        return {}
+    out = subprocess.run(["git", "-C", worktree, "diff", "-U0", "-M", base, head, "--"], capture_output=True,
+                         text=True, encoding="utf-8", errors="replace", timeout=120).stdout
     ranges, f = {}, None
     for ln in out.splitlines():
         if ln.startswith("+++ "):
@@ -175,7 +232,10 @@ def changed_symbols(worktree: str, base: str, head: str, limit: int = 200) -> li
 def external_callers(worktree: str, syms: list, changed_files: set, per_symbol: int = 10, max_symbols: int = 25) -> list:
     out = []
     for s in syms[:max_symbols]:
-        p = _run(["callers", s["qualified"], "-p", worktree, "-j", "-l", str(per_symbol * 2)], timeout=60)
+        try:
+            p = _run(["callers", s["qualified"], "-p", worktree, "-j", "-l", str(per_symbol * 2)], timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
         try:
             data = json.loads(p.stdout or "[]")
         except ValueError:
@@ -189,8 +249,10 @@ def external_callers(worktree: str, syms: list, changed_files: set, per_symbol: 
 
 
 def affected_tests(worktree: str, files: list) -> list:
-    p = subprocess.run(["codegraph", "affected", "--stdin", "-j", "-p", worktree], input="\n".join(files),
-                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+    try:
+        p = _run(["affected", "--stdin", "-j", "-p", worktree], input="\n".join(files), timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
     try:
         return (json.loads(p.stdout or "{}").get("affectedTests") or [])[:50]
     except ValueError:
@@ -205,9 +267,12 @@ def analyze(worktree: str, base: str, head: str, title: str = "", out: str = "")
     callers = external_callers(worktree, syms, set(files))
     tests = affected_tests(worktree, files)
     ctx = ""
-    if title:
-        p = _run(["context", title, "-p", worktree, "-n", "20", "-c", "3"], timeout=90)
-        ctx = (p.stdout or "")[:6000]
+    if title:   # `--` : an MR title starting with "-" must not be read as an option
+        try:
+            p = _run(["context", "-p", worktree, "-n", "20", "--", title], timeout=90)
+            ctx = (p.stdout or "")[:6000] if p.returncode == 0 else ""
+        except (OSError, subprocess.TimeoutExpired):
+            ctx = ""
     res = {"status": "ready", "changed_files": len(files), "changed_methods": len(syms),
            "methods_with_external_callers": len(callers), "affected_tests": tests,
            "external_callers": callers}

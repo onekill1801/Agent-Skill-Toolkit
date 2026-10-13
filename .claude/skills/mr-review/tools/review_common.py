@@ -133,10 +133,18 @@ def save_job(job: dict, sync: bool = True) -> dict:
         orca_sync(job)
         job["_synced_status"] = job.get("status")
     path = job_path(job["id"])
-    tmp = path + ".tmp"
+    tmp = f"{path}.{os.getpid()}.{time.monotonic_ns()}.tmp"   # unique per writer: no shared .tmp race
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(job, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    for attempt in range(20):        # Windows: replace fails while a reader holds the file open
+        try:
+            os.replace(tmp, path)
+            break
+        except PermissionError:
+            if attempt == 19:
+                os.remove(tmp)
+                raise
+            time.sleep(0.05)
     return job
 
 

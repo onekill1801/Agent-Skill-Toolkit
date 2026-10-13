@@ -35,7 +35,39 @@ import probe_common as pc
 
 ENGINES = {"postgresql": "postgres", "postgres": "postgres", "mysql": "mysql", "mariadb": "mysql"}
 READ_ONLY_SQL = re.compile(r"^\s*(select|show|explain|with|describe|desc|values)\b", re.I)
-WRITE_WORDS = re.compile(r"\b(insert|update|delete|merge|alter|drop|truncate|create|grant|revoke|call)\b", re.I)
+WRITE_WORDS = re.compile(
+    r"\b(insert|update|delete|merge|upsert|alter|drop|truncate|create|grant|revoke|call|exec|execute|do|copy|"
+    r"set|reset|rename|replace|lock|unlock|vacuum|analyze|reindex|cluster|refresh|load|handler|prepare|"
+    r"into|outfile|dumpfile|for\s+update|for\s+share)\b", re.I)
+# SELECT-able functions with side effects (not exhaustive — the real guard is a read-only DB user)
+SIDE_EFFECT_FN = re.compile(
+    r"\b(pg_terminate_backend|pg_cancel_backend|pg_reload_conf|pg_rotate_logfile|pg_promote|setval|nextval|"
+    r"lo_import|lo_export|lo_unlink|dblink\w*|pg_read_file|pg_read_binary_file|pg_ls_dir|pg_sleep|"
+    r"sys_exec|sys_eval|sleep|benchmark|get_lock|release_lock|load_file)\s*\(", re.I)
+PROD_RE = re.compile(r"(^|[^a-z])(prod|prd|production)([^a-z]|$)", re.I)   # same idea as podfwd._protected
+# probe_db flags that would retarget the query away from the connection that was checked
+LOCKED_FLAGS = ("--host", "--port", "--name", "--engine", "--schema", "--sql", "--db", "--database")
+
+
+def prod_sql_problem(sql: str):
+    """Why `sql` is not allowed on a PROTECTED connection, or None."""
+    body = sql.strip().rstrip(";").strip()
+    if ";" in body:
+        return "multiple statements are not allowed"
+    if not READ_ONLY_SQL.match(body):
+        return "must start with SELECT/SHOW/EXPLAIN/WITH/DESCRIBE/VALUES"
+    m = WRITE_WORDS.search(body) or SIDE_EFFECT_FN.search(body)
+    if m:
+        return f"contains '{m.group(0).strip()}'"
+    return None
+
+
+def locked_flag(extra: list):
+    for a in extra or []:
+        flag = a.split("=", 1)[0].lower()
+        if flag in LOCKED_FLAGS:
+            return flag
+    return None
 
 
 def workspace() -> str:
@@ -86,7 +118,7 @@ def connections() -> list:
                 "host": eff.get("host"), "port": eff.get("port"), "database": eff.get("database"),
                 "schema": eff.get("schema"),
                 "via_tunnel_handler": bool(cfg.get("handlers")),
-                "protected": bool(re.search(r"prod", f"{folder} {name} {ctype}", re.I)),
+                "protected": bool(PROD_RE.search(f"{folder} {name} {ctype}")),
             })
     return out
 
@@ -123,7 +155,7 @@ def with_forward(c: dict, fwd: dict) -> dict:
             c = dict(c, lens_forward={k: f.get(k) for k in ("context", "namespace", "target", "remote_port",
                                                             "lens_status", "listening", "note", "start_cmd")})
             live = f.get("lens_status") == "Active" and f.get("listening")
-            if live and re.search(r"prod", f"{f.get('target')} {f.get('context')}", re.I) and not c["protected"]:
+            if live and PROD_RE.search(f"{f.get('target')} {f.get('context')}") and not c["protected"]:
                 c["protected"] = True
                 c["protected_reason"] = "localhost port is a live Lens forward to a prod service"
     return c
@@ -133,8 +165,13 @@ def probe(ref: str, sql: str, extra: list) -> dict:
     c = with_forward(find(ref), _forwards_by_port())   # protection also follows the tunnel target
     if c["engine"] not in ("postgres", "mysql"):
         raise ValueError(f"engine '{c['engine']}' not supported by probe_db (postgres/mysql only)")
-    if c["protected"] and (not READ_ONLY_SQL.match(sql) or WRITE_WORDS.search(sql)):
-        raise PermissionError(f"'{c['folder']}/{c['name']}' is PROD — only read-only SQL is allowed")
+    bad_flag = locked_flag(extra)
+    if bad_flag:
+        raise PermissionError(f"{bad_flag} is fixed by the DBeaver connection and cannot be overridden")
+    if c["protected"]:
+        why = prod_sql_problem(sql)
+        if why:
+            raise PermissionError(f"'{c['folder']}/{c['name']}' is PROD — only one read-only statement: {why}")
     args = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "probe_db.py"),
             "query", "--engine", c["engine"], "--sql", sql, "--host", c["host"] or "",
             "--port", str(c["port"] or ""), "--name", c["database"] or ""]
