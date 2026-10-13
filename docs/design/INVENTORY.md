@@ -40,7 +40,7 @@
 
 | Từ | Tới | Cạnh |
 |---|---|---|
-| workflows | core | 4 |
+| workflows | core | 5 |
 | workflows.intake | core | 4 |
 | workflows.intake | workflows | 1 |
 | workflows.proposal | core | 3 |
@@ -50,7 +50,7 @@
 | workflows.refactor | workflows.intake | 1 |
 | workflows.refactor | workflows.proposal | 1 |
 | workflows.refactor | workflows.verify | 1 |
-| workflows.verify | core | 1 |
+| workflows.verify | core | 4 |
 | workflows.verify | workflows | 1 |
 | workflows.verify | workflows.refactor | 1 |
 
@@ -58,15 +58,16 @@
 
 | Vùng | Phụ thuộc | Hợp đồng |
 |---|---|---|
-| workflows.refactor | `agent_skill_toolkit.workflows.intake.gate` | gate.admit/submit: every new program enters through the intake gate |
-| workflows.refactor | `agent_skill_toolkit.workflows.proposal.scan` | scan.hotspots: the survey reuses the hotspot scanner |
-| workflows.refactor | `agent_skill_toolkit.workflows.verify.ladder` | ladder.load_spec/resolve_base/KIND: slices are proven by the verify ladder |
-| workflows.verify | `agent_skill_toolkit.workflows.refactor.ratchet` | ratchet.parse_*/scan_isolated/compare: the `kind: ratchet` rung |
+| agent_skill_toolkit.workflows.refactor.program | `agent_skill_toolkit.workflows.intake.gate` | gate.admit/submit: every new program enters through the intake gate |
+| agent_skill_toolkit.workflows.refactor.program | `agent_skill_toolkit.workflows.verify.ladder` | ladder.load_spec/resolve_base/KIND: slices are proven by the verify ladder |
+| agent_skill_toolkit.workflows.refactor.survey | `agent_skill_toolkit.workflows.proposal.scan` | scan.hotspots: the survey reuses the hotspot scanner |
+| agent_skill_toolkit.workflows.verify.ladder | `agent_skill_toolkit.workflows.refactor.ratchet` | ratchet.parse_*/scan_isolated/compare: the `kind: ratchet` rung |
 
 ## Cạnh runtime → script skill (subprocess)
 
-- `agent_skill_toolkit.workflows.execution.agent_call` → `auto-dev/tools/agent_runner.py`
-- `agent_skill_toolkit.workflows.verify.ladder` → `auto-dev/tools/agent_runner.py`
+- `('agent_skill_toolkit.workflows.execution.agent_call', 'agent_runner.py')` → `agents run through agent_runner`
+- `('agent_skill_toolkit.workflows.verify.ladder', 'agent_runner.py')` → `agents run through agent_runner`
+- `('agent_skill_toolkit.workflows.verify.unittest_junit', 'unittest_junit.py')` → `its own argparse prog name`
 
 ## Tool của skill (107 file; 11 là vỏ dùng runtime)
 
@@ -84,7 +85,7 @@
 | atask-automation | `task_resolver.py` |  |  | 746 |
 | atask-automation | `tasks.py` |  |  | 328 |
 | atask-automation | `view.py` |  |  | 167 |
-| auto-dev | `agent_init.py` |  | add | 1586 |
+| auto-dev | `agent_init.py` |  | add, apply, check, docs, draft, scan | 1586 |
 | auto-dev | `agent_runner.py` | ✅ |  | 571 |
 | auto-dev | `autopilot.py` |  | run, watch | 197 |
 | auto-dev | `clarify.py` |  | analyze, brief, bundle | 392 |
@@ -100,13 +101,13 @@
 | auto-dev | `task_queue.py` |  | add, answer, approve, ask-tg, done, intake, list, mark, next, release, remove, reply, requeue, scan, show | 884 |
 | auto-dev | `tg_gate.py` |  | parse, reply, send, wait | 228 |
 | auto-dev | `triage.py` |  | classify, upgrade | 226 |
-| auto-dev | `verify.py` | ✅ | report, status, work | 195 |
+| auto-dev | `verify.py` | ✅ | plan, report, start, status, work | 195 |
 | auto-dev | `verify_gen.py` |  | run | 322 |
 | dev-automation | `azure_devops.py` |  |  | 213 |
 | dev-automation | `bg_notify.py` |  |  | 311 |
 | dev-automation | `cg.py` |  | analyze, prepare, status | 331 |
 | dev-automation | `claude_account_rotation.py` |  |  | 408 |
-| dev-automation | `code_context.py` |  | affected, status, trace | 423 |
+| dev-automation | `code_context.py` |  | affected, callers, impact, locate, status, trace | 423 |
 | dev-automation | `config.py` |  |  | 122 |
 | dev-automation | `daemon_common.py` |  | status | 236 |
 | dev-automation | `dbeaver.py` |  | forwards, list, probe, show | 226 |
@@ -117,7 +118,7 @@
 | dev-automation | `jenkins.py` |  | build, console, info, jobs, status, trigger | 306 |
 | dev-automation | `k8s.py` |  | access, contexts, deploys, describe, doctor, events, forwards, get, logs, pods | 673 |
 | dev-automation | `kafka_ui.py` |  | clusters, login-check, messages, produce, topic, topics | 347 |
-| dev-automation | `local_app.py` |  | logs, prep-java, start, wait-health | 331 |
+| dev-automation | `local_app.py` |  | logs, prep-java, start, status, stop, wait-health | 331 |
 | dev-automation | `mr_watch.py` |  |  | 358 |
 | dev-automation | `mysql_client.py` |  |  | 267 |
 | dev-automation | `notifier.py` |  |  | 128 |
@@ -134,7 +135,7 @@
 | dev-automation | `run_log.py` |  | ac-add, ac-map, ac-waive, advance, checkpoint, field, get, init, list, note, record-gate, require, stage | 613 |
 | dev-automation | `spring_config.py` |  | read | 244 |
 | dev-automation | `status.py` | ✅ |  | 364 |
-| dev-automation | `taskstore.py` | ✅ | add, events, list, show, summary | 77 |
+| dev-automation | `taskstore.py` | ✅ | add, cancel, events, list, show, summary, unblock | 77 |
 | dev-automation | `test_runner.py` |  | detect, run | 344 |
 | dev-automation | `vpn.py` |  | down, ensure, fingerprint, set-password, status, up, watch | 331 |
 | fork-terminal | `agent_parser.py` |  | all, list, tag, wrap | 155 |
@@ -144,7 +145,7 @@
 | fork-terminal | `worktree_manager.py` |  | create, remove | 174 |
 | mr-review | `review_common.py` |  |  | 351 |
 | mr-review | `review_flow.py` | ✅ | enqueue, enqueue-text, reconcile, release-quarantine, status, work | 449 |
-| mr-review | `review_post.py` |  | post, request-approval, sweep | 517 |
+| mr-review | `review_post.py` |  | approval-status, approve, post, reject, render, request-approval, sweep, validate | 517 |
 | mr-review | `review_queue.py` | ✅ | add, add-text, cancel, list, next, pending, set, show | 229 |
 | mr-review | `review_rules.py` |  |  | 153 |
 | mr-review | `review_ws.py` |  | check-stale, cleanup, diff, gc, prepare | 394 |
@@ -180,7 +181,7 @@
 | tchat-automation | `ws_client.py` |  |  | 147 |
 | team-registry | `team.py` |  | bootstrap, get, list, match, remove, set | 223 |
 
-## Test: 31 file, 579 hàm test
+## Test: 31 file, 580 hàm test
 
 - `test_agent_init.py`
 - `test_agentkit.py`

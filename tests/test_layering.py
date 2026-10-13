@@ -25,22 +25,32 @@ STD = set(sys.stdlib_module_names)
 SHARED = ("agent_skill_toolkit.workflows.engine", "agent_skill_toolkit.workflows.coordinator",
           "agent_skill_toolkit.workflows.execution")
 
-# (importer sub-package, imported module) -> the contract relied on. Shrink this list.
+# EXACT (importer module, imported module) edges -> the contract relied on. Keyed per MODULE, so another
+# module of the same area cannot silently inherit an allowance (Codex R R1 #3). Shrink this list; growing it
+# is a reviewed edit of this file (tests/ is protected from the ladder's fixer).
 EXCEPTIONS = {
-    ("workflows.refactor", "agent_skill_toolkit.workflows.intake.gate"):
+    ("agent_skill_toolkit.workflows.refactor.program", "agent_skill_toolkit.workflows.intake.gate"):
         "gate.admit/submit: every new program enters through the intake gate",
-    ("workflows.refactor", "agent_skill_toolkit.workflows.proposal.scan"):
+    ("agent_skill_toolkit.workflows.refactor.survey", "agent_skill_toolkit.workflows.proposal.scan"):
         "scan.hotspots: the survey reuses the hotspot scanner",
-    ("workflows.refactor", "agent_skill_toolkit.workflows.verify.ladder"):
+    ("agent_skill_toolkit.workflows.refactor.program", "agent_skill_toolkit.workflows.verify.ladder"):
         "ladder.load_spec/resolve_base/KIND: slices are proven by the verify ladder",
-    ("workflows.verify", "agent_skill_toolkit.workflows.refactor.ratchet"):
+    ("agent_skill_toolkit.workflows.verify.ladder", "agent_skill_toolkit.workflows.refactor.ratchet"):
         "ratchet.parse_*/scan_isolated/compare: the `kind: ratchet` rung",
 }
-# runtime module -> skill script it starts by path (an edge AST imports cannot see)
+# (runtime module, script file name it names) — subprocess / path edges AST imports cannot see.
 RUNTIME_EDGES = {
-    "agent_skill_toolkit.workflows.verify.ladder": "auto-dev/tools/agent_runner.py",
-    "agent_skill_toolkit.workflows.execution.agent_call": "auto-dev/tools/agent_runner.py",
+    ("agent_skill_toolkit.workflows.verify.ladder", "agent_runner.py"): "agents run through agent_runner",
+    ("agent_skill_toolkit.workflows.execution.agent_call", "agent_runner.py"): "agents run through agent_runner",
+    ("agent_skill_toolkit.workflows.verify.unittest_junit", "unittest_junit.py"): "its own argparse prog name",
 }
+# (runtime module, loader) — dynamic imports / sys.path changes, each with its reason (design §B.2)
+DYNAMIC = {
+    ("agent_skill_toolkit.workflows.verify.unittest_junit", "sys.path.insert"):
+        "discovers the PRODUCT repo's tests: its cwd goes on sys.path, like `python -m unittest`",
+}
+LOADERS = {("importlib", "import_module"), ("importlib", "__import__"), ("runpy", "run_path"),
+           ("runpy", "run_module"), ("sys.path", "insert"), ("sys.path", "append"), ("sys.path", "extend")}
 
 
 def modules():
@@ -68,10 +78,10 @@ def imports(mod: str, path: str, is_pkg: bool) -> set:
             if node.level:
                 parts = pkg.split(".")
                 base = parts[: len(parts) - (node.level - 1)]
+                prefix = base + (node.module.split(".") if node.module else [])
                 if node.module:
-                    out.add(".".join(base + [node.module]))
-                else:
-                    out |= {".".join(base + [a.name]) for a in node.names}
+                    out.add(".".join(prefix))
+                out |= {".".join(prefix + [a.name]) for a in node.names}   # aliases may be modules (#4)
             elif node.module:
                 out.add(node.module)
                 out |= {f"{node.module}.{a.name}" for a in node.names}
@@ -85,14 +95,15 @@ def area(mod: str) -> str:
     if len(parts) < 2:
         return "root"
     if parts[1] == "workflows":
-        if mod.startswith(SHARED) or len(parts) == 2:
+        # EXACT shared modules (engine, coordinator, the execution package) — no prefix match (#5)
+        if len(parts) == 2 or any(mod == x or mod.startswith(x + ".") for x in SHARED):
             return "workflows"
         return "workflows." + parts[2]
     return parts[1]
 
 
 def violations() -> dict:
-    """{(importer area, imported module): [importer modules]}"""
+    """{(importer module, imported module): reason}"""
     known = {m for m, _, _ in modules()}
     out = {}
     for mod, path, is_pkg in modules():
@@ -102,20 +113,68 @@ def violations() -> dict:
             if top in STD:
                 continue
             if top != "agent_skill_toolkit":
-                out.setdefault((src, imp), []).append(mod)        # bare / facade import
+                out[(mod, imp)] = "bare / facade import"
                 continue
-            # an imported NAME (from x import y) is not a module: judge the module it comes from
-            target = imp if imp in known else imp.rsplit(".", 1)[0]
+            # an imported NAME (from x import y) is not a module: judge the module it comes from — but an
+            # UNKNOWN path is judged as written, never reduced to the always-allowed root (#4)
+            parent = imp.rsplit(".", 1)[0]
+            target = imp if imp in known else parent if parent in known else imp
+            if target == "agent_skill_toolkit":
+                continue
             dst = area(target)
-            ok = (dst == "core" or target == "agent_skill_toolkit" or
-                  (src == "core" and dst == "core") or
-                  (src == "integrations" and dst in ("core", "integrations") and
-                   (dst != "integrations" or target.split(".")[:3] == mod.split(".")[:3])) or
-                  (src.startswith("workflows") and (dst in ("core", "integrations", "workflows") or dst == src)))
-            if src == "core" and dst != "core" and target != "agent_skill_toolkit":
-                ok = False
+            if src == "core":
+                ok = dst == "core"
+            elif src == "integrations":
+                ok = dst == "core" or (dst == "integrations" and target.split(".")[:3] == mod.split(".")[:3])
+            elif src.startswith("workflows"):
+                ok = dst in ("core", "integrations", "workflows") or dst == src
+            else:
+                ok = dst in ("core", "workflows", "integrations")
             if not ok:
-                out.setdefault((src, target), []).append(mod)
+                out[(mod, target)] = f"{src} -> {dst}"
+    return out
+
+
+def _call_name(node) -> tuple:
+    f = node.func
+    if isinstance(f, ast.Attribute):
+        owner = f.value
+        if isinstance(owner, ast.Attribute) and isinstance(owner.value, ast.Name):
+            return (f"{owner.value.id}.{owner.attr}", f.attr)          # sys.path.insert
+        if isinstance(owner, ast.Name):
+            return (owner.id, f.attr)                                  # importlib.import_module
+    if isinstance(f, ast.Name) and f.id == "__import__":
+        return ("importlib", "__import__")
+    return ("", "")
+
+
+def dynamic_loaders() -> dict:
+    out = {}
+    for mod, path, _ in modules():
+        with open(path, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                owner, fn = _call_name(node)
+                if (owner, fn) in LOADERS:
+                    out[(mod, f"{owner}.{fn}")] = True
+    return out
+
+
+def script_names() -> set:
+    """String literals naming a .py script (not in docstrings): every one is a potential runtime edge
+    (subprocess argv, os.path.join / Path pieces) — Codex R R1 #2."""
+    out = set()
+    for mod, path, _ in modules():
+        with open(path, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        docs = {id(n.body[0].value) for n in ast.walk(tree)
+                if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.body
+                and isinstance(n.body[0], ast.Expr) and isinstance(n.body[0].value, ast.Constant)}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docs:
+                for m in re.finditer(r"(?:^|[/\\])([A-Za-z][\w-]*\.py)\b", node.value):
+                    out.add((mod, m.group(1)))
     return out
 
 
@@ -135,20 +194,10 @@ class LayeringTest(unittest.TestCase):
             self.assertTrue(why and len(why) > 10, k)
 
     def test_runtime_edges_to_skill_scripts_are_declared(self):
-        """String paths the code BUILDS (os.path.join(...) of literals, or one literal) that point into a
-        skill's tools/ — docstrings and comments are not edges."""
-        found = {}
-        for mod, path, _ in modules():
-            with open(path, encoding="utf-8") as f:
-                tree = ast.parse(f.read())
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Call) and node.args and all(
-                        isinstance(a, ast.Constant) and isinstance(a.value, str) for a in node.args):
-                    joined = "/".join(a.value for a in node.args)
-                    m = re.search(r"([\w-]+/tools/[\w.]+\.py)$", joined)
-                    if m:
-                        found[mod] = m.group(1)
-        self.assertEqual(found, RUNTIME_EDGES)
+        self.assertEqual(script_names(), set(RUNTIME_EDGES), "a runtime module names a script: declare the edge")
+
+    def test_dynamic_loaders_are_declared(self):
+        self.assertEqual(set(dynamic_loaders()), set(DYNAMIC), "dynamic import / sys.path change: declare it")
 
     def test_the_checker_itself_catches_violations(self):
         import tempfile
@@ -163,10 +212,28 @@ class LayeringTest(unittest.TestCase):
             os.makedirs(os.path.dirname(p), exist_ok=True)
             with open(p, "w") as f:
                 f.write(body)
+        files2 = {"core/rel.py": "from ..workflows import engine\n",
+                  "core/dyn.py": "import importlib, sys, subprocess\nimportlib.import_module('x')\n"
+                                 "sys.path.insert(0, 'y')\nsubprocess.run(['python', 'tools/review_common.py'])\n",
+                  "workflows/engine_extra.py": "", "workflows/a/z.py": "from agent_skill_toolkit.workflows import engine_extra\n"}
+        for rel, body in files2.items():
+            p = os.path.join(tmp, rel)
+            with open(p, "w") as f:
+                f.write(body)
         with mock.patch(f"{__name__}.PKG_DIR", tmp):
             v = violations()
-        self.assertEqual(sorted(v), [("core", "agent_skill_toolkit.workflows.engine"), ("core", "review_common"),
-                                     ("workflows.a", "agent_skill_toolkit.workflows.b.y")])
+            loaders = dynamic_loaders()
+            scripts = script_names()
+        self.assertEqual(sorted(v), [
+            ("agent_skill_toolkit.core.bad", "agent_skill_toolkit.workflows.engine"),
+            ("agent_skill_toolkit.core.bare", "review_common"),
+            ("agent_skill_toolkit.core.rel", "agent_skill_toolkit.workflows.engine"),
+            ("agent_skill_toolkit.workflows.a.x", "agent_skill_toolkit.workflows.b.y"),
+            ("agent_skill_toolkit.workflows.a.z", "agent_skill_toolkit.workflows.engine_extra"),
+        ])
+        self.assertEqual(set(loaders), {("agent_skill_toolkit.core.dyn", "importlib.import_module"),
+                                        ("agent_skill_toolkit.core.dyn", "sys.path.insert")})
+        self.assertIn(("agent_skill_toolkit.core.dyn", "review_common.py"), scripts)
         self.assertEqual(area("agent_skill_toolkit.core.store"), "core")
         self.assertEqual(area("agent_skill_toolkit.workflows.engine"), "workflows")
         self.assertEqual(area("agent_skill_toolkit.workflows.verify.ladder"), "workflows.verify")

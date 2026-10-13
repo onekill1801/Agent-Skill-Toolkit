@@ -21,11 +21,20 @@ sys.path.insert(0, os.path.join(ROOT, "tests"))
 
 
 def _subcommands(tree) -> list:
+    """add_parser("x") literals AND `for name in ("a", "b"): ...add_parser(name)` loops (Codex R R1 #6)."""
     out = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "add_parser" and node.args and \
                 isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
             out.append(node.args[0].value)
+        if isinstance(node, ast.For) and isinstance(node.target, ast.Name) and \
+                isinstance(node.iter, (ast.Tuple, ast.List)) and \
+                all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in node.iter.elts):
+            uses = any(isinstance(c, ast.Call) and getattr(c.func, "attr", "") == "add_parser" and c.args and
+                       isinstance(c.args[0], ast.Name) and c.args[0].id == node.target.id
+                       for c in ast.walk(node))
+            if uses:
+                out += [e.value for e in node.iter.elts]
     return sorted(dict.fromkeys(out))
 
 
