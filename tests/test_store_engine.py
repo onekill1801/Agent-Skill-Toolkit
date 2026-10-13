@@ -29,6 +29,17 @@ from agent_skill_toolkit.workflows.execution import handoff, quota  # noqa: E402
 FUTURE = time.time() + 10 ** 6
 
 
+def _alive(pid: int) -> bool:
+    if os.name == "nt":
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True).stdout
+        return str(pid) in out
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
 class _Tmp(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="store-test-")
@@ -316,6 +327,34 @@ class EngineTest(_Tmp):
         self.assertEqual(out["status"], "lease_lost")
         self.assertLess(ctx_holder["ctx"].elapsed, 10)          # killed, did not run 30 s
 
+    def test_ctx_run_kills_descendants_too(self):
+        """Codex R3: killing only the direct child leaves grandchildren editing files / holding pipes."""
+        t = self.st.add("build", "tree")
+        pidfile = os.path.join(self.dir, "grandchild.pid")
+        parent = ("import subprocess,sys,time;"
+                  "c=subprocess.Popen([sys.executable,'-c','import os,time;"
+                  f"open(r\"{pidfile}\",\"w\").write(str(os.getpid()));time.sleep(60)']);time.sleep(60)")
+
+        def steal_when_grandchild_runs():
+            deadline = time.time() + 30
+            while not os.path.exists(pidfile) and time.time() < deadline:
+                time.sleep(0.05)
+            with S.Store(self.st.path) as other:          # another worker takes the task
+                other.db.execute("update tasks set lease_token='thief' where id=?", (t["id"],))
+
+        def build_with_run(ctx):
+            import threading
+            threading.Thread(target=steal_when_grandchild_runs, daemon=True).start()
+            ctx.run([sys.executable, "-c", parent], poll=0.1)
+            return {}
+        t0 = time.time()
+        out = E.work_once(self.st, "w", {"build": [("b", build_with_run)]}, lease_s=0.3)
+        self.assertEqual(out["status"], "lease_lost")
+        self.assertLess(time.time() - t0, 30)
+        gpid = int(open(pidfile).read())
+        time.sleep(0.5)
+        self.assertFalse(_alive(gpid), "grandchild survived")
+
     def test_ctx_run_does_not_hang_on_large_output(self):
         t = self.st.add("build", "big")
         out = E.work_once(self.st, "w", {"build": [("b", lambda c: {
@@ -365,7 +404,10 @@ class QuotaTest(unittest.TestCase):
                             ("Error: 429 Too Many Requests", "rate_limit"),
                             ('{"type":"error","error":{"type":"overloaded_error"}}', "overloaded"),
                             ("You exceeded your current quota, please check your plan", "usage_limit"),
-                            ("stream error: rate_limit_error", "rate_limit")]:
+                            ("stream error: rate_limit_error", "rate_limit"),
+                            ('API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"x"}}',
+                             "rate_limit"),
+                            ('{"error":{"message":"quota","type":"insufficient_quota"}}', "usage_limit")]:
             r = self.c(text)
             self.assertEqual((r["kind"], r["limit"]), ("quota", limit), text)
             self.assertGreater(r["resume_at"], self.NOW)
@@ -378,6 +420,8 @@ class QuotaTest(unittest.TestCase):
                      "expected 429 Too Many Requests from the mock server",          # Codex R2
                      "    assert 'rate_limit_error' in msg",                          # Codex R2
                      "log: upstream answered 429 Too Many Requests, we retried OK",
+                     '"rate_limit_error" is the expected fixture value',              # Codex R3
+                     'fixture: {"error":{"type":"rate_limit_error"}}; assertion failed',  # Codex R3
                      "docs: explain how we handle 429 Too Many Requests from upstream\n" + "ok\n" * 20 + "exit 1",
                      "def login(user): ...", "SyntaxError: invalid syntax", "update the rate limiter config"):
             self.assertEqual(self.c(text)["kind"], "error", text)

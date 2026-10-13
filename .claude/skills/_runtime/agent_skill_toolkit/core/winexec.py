@@ -18,7 +18,7 @@ import shutil
 
 _BATCH = (".cmd", ".bat")
 _CMD_META = re.compile(r'[&|<>^%!"()\r\n]')
-_PLAIN = re.compile(r"[A-Za-z0-9_.,:/=@+\-]*")
+_PLAIN = re.compile(r"[A-Za-z0-9_.,:/=@+\-]+")   # non-empty: "" would add another quoted component
 _NPM_JS = re.compile(r'"%dp0%\\([^"]+?\.(?:js|cjs|mjs))"', re.I)
 _PS1 = re.compile(r'-File\s+"%(?:~dp0|(?:SCRIPT_DIR|dp0)%)\\?([^"]+?\.ps1)"', re.I)
 

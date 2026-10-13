@@ -76,8 +76,17 @@ class Store:
         self.path = path or default_path()
         self.db = sqlite3.connect(self.path, timeout=30, isolation_level=None, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
-        self.db.execute("pragma journal_mode=wal")
         self.db.execute("pragma busy_timeout=30000")
+        # switching to WAL needs an exclusive lock and can fail fast with "locked" when several
+        # workers open the file at once (the busy handler is not always consulted): retry briefly
+        for attempt in range(100):
+            try:
+                self.db.execute("pragma journal_mode=wal")
+                break
+            except sqlite3.OperationalError as e:
+                if "locked" not in str(e).lower() or attempt == 99:
+                    raise
+                time.sleep(0.1)
         with self._tx():                 # serialize schema setup: two workers may open an old DB at once
             for stmt in (s.strip() for s in SCHEMA.split(";")):
                 if stmt:

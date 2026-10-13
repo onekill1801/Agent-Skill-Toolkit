@@ -54,8 +54,9 @@ class ResolveTest(unittest.TestCase):
                 with self.assertRaises(w.UnsafeLauncher, msg=p):
                     w.command(["plain", p])
             self.assertEqual(w.command(["plain", "--version"]), ["cmd", "/d", "/c", shim, "--version"])
-            with self.assertRaises(w.UnsafeLauncher):          # Codex R2: spaces break cmd /c quoting
-                w.command(["plain", "two words"])
+            for arg in ("two words", ""):                       # Codex R2/R3: spaces, empty "" args
+                with self.assertRaises(w.UnsafeLauncher, msg=repr(arg)):
+                    w.command(["plain", arg])
 
 
 @unittest.skipUnless(os.name == "nt", "real cmd.exe / PowerShell behaviour")

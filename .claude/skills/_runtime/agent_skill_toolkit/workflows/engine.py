@@ -23,6 +23,7 @@ Raise from a step:
     any other exception                                       -> attempt counted; requeued or failed
 """
 
+import os
 import threading
 import time
 import traceback
@@ -58,6 +59,10 @@ class StepContext:
         Returns CompletedProcess; raises LeaseLost when killed for losing the lease."""
         import subprocess
         kw.setdefault("stdin", subprocess.DEVNULL)
+        if os.name == "nt":   # own process group so the whole tree can be killed
+            kw["creationflags"] = kw.get("creationflags", 0) | subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kw.setdefault("start_new_session", True)
         p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                              encoding="utf-8", errors="replace", **kw)
         deadline = time.time() + timeout
@@ -67,8 +72,7 @@ class StepContext:
                 return subprocess.CompletedProcess(argv, p.returncode, out, err)
             except subprocess.TimeoutExpired:
                 if self.should_stop() or time.time() > deadline:
-                    p.kill()
-                    p.communicate()
+                    kill_tree(p)
                     if self.should_stop():
                         raise store_mod.LeaseLost(f"task {self.task['id']}: lease lost, killed {argv[0]}")
                     raise subprocess.TimeoutExpired(argv, timeout)
@@ -84,6 +88,32 @@ class StepContext:
         c = quota.classify(output)
         if c["kind"] == "quota":
             raise QuotaExceeded(c["resume_at"], backend, f"{c['limit']}: {output.strip()[-200:]}")
+
+
+def kill_tree(p, wait: float = 10) -> None:
+    """Kill a process AND its descendants (builds and agents spawn children that would keep
+    editing files and keep our pipes open), then reap with a bounded wait."""
+    import signal
+    import subprocess
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True, timeout=30)
+        else:
+            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        p.kill()
+    except OSError:
+        pass
+    try:
+        p.communicate(timeout=wait)
+    except subprocess.TimeoutExpired:   # a detached grandchild still holds the pipes: stop reading
+        for f in (p.stdout, p.stderr):
+            try:
+                f and f.close()
+            except OSError:
+                pass
 
 
 class _Heartbeat:

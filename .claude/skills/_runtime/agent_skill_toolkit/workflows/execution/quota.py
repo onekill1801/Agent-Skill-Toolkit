@@ -27,7 +27,8 @@ class QuotaExceeded(Exception):
 # A provider/CLI refusal is a line of its own: optional "Error:"-style prefix, then the phrase.
 # Text quoted inside an assertion, a log of someone else's API, or docs does not start a line
 # that way ("expected 429 Too Many Requests", "assert 'rate_limit_error' in msg").
-_PREFIX = r"^\s*(?:\[?[\w .-]{0,24}(?:error|warn(?:ing)?|fatal)\]?\s*[:\-]\s*)?(?:\W{0,3}\s*)"
+_PREFIX = (r"^\s*(?:[•●✗✖×>]\s*)?"                                  # a CLI status glyph, not a quote
+           r"(?:\[?[\w .-]{0,24}(?:error|warn(?:ing)?|fatal)\]?\s*[:\-]\s*)?")
 _PHRASES = [
     r"(?:claude ai )?usage limit (?:reached|exceeded|hit)",
     r"you(?:'ve| have) (?:hit|reached) your (?:usage |rate )?limit",
@@ -36,13 +37,18 @@ _PHRASES = [
     r"you exceeded your (?:current )?quota", r"credit balance is too low",
     r"(?:529:?\s*)?overloaded\b", r"(?:rate_limit|overloaded)_error\b",
 ]
-_JSON_ERR = (r'"error"\s*:\s*\{[^{}]*"type"\s*:\s*"(?:rate_limit_error|overloaded_error)"'
-             r'|"code"\s*:\s*"insufficient_quota"')
-_QUOTA = [_PREFIX + "(?:" + "|".join(_PHRASES) + ")", _JSON_ERR]
+# A provider error ENVELOPE that starts the line (after an optional error prefix / HTTP status):
+#   {"type":"error","error":{"type":"rate_limit_error",...}}     (Anthropic)
+#   {"error":{"message":"...","type":"insufficient_quota",...}}   (OpenAI)
+# Not a fixture or a quoted value in the middle of a sentence.
+_ENVELOPE = _PREFIX + r'(?:\d{3}\s*)?\{\s*(?:"type"\s*:\s*"error"\s*,\s*)?"error"\s*:\s*\{[^{}]*'
+_JSON_ERR = (_ENVELOPE + r'"(?:type|code)"\s*:\s*"(?:rate_limit_error|overloaded_error|insufficient_quota|'
+             r'rate_limit_exceeded)"')
+_QUOTA = [_PREFIX + "(?:" + "|".join(_PHRASES) + r")(?=$|[\s.,;:!)|·-])", _JSON_ERR]
 _AUTH = [
     _PREFIX + r"(?:not logged in|please (?:log ?in|run .{0,20}login)|invalid (?:x-)?api[ _-]?key|"
               r"oauth token (?:has )?expired|401\b[^\n]{0,40}(?:unauthori[sz]ed|authentication))",
-    r'"error"\s*:\s*\{[^{}]*"type"\s*:\s*"authentication_error"',
+    _ENVELOPE + r'"type"\s*:\s*"authentication_error"',
 ]
 _LIMIT_KIND = [("overloaded", r"overloaded|\b529\b"), ("rate_limit", r"rate[ _-]?limit|too many requests|\b429\b"),
                ("usage_limit", r".")]
