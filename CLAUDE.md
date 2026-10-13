@@ -25,6 +25,9 @@ temp/                       # Output tạm (đã gitignore)
 
 Mỗi skill có: `SKILL.md` (trigger + workflow + routing) · `cookbook/` (chi tiết) · `prompts/` · `tools/` (Python).
 
+Code mới đặt trong package `.claude/skills/_runtime/agent_skill_toolkit/` (`core` · `integrations` · `workflows`),
+skill chỉ là vỏ: tool gọi `_runtime/bootstrap.py` rồi import đủ namespace — xem `docs/design/agent-ecosystem.md §B`.
+
 ## Workspace đa project
 
 Repo này là **toolset dùng chung**. Workspace project sống ở `./work/` (trong repo, đã **gitignore** → thấy được nhưng không commit):
@@ -69,6 +72,7 @@ python gitlab_api.py whoami                         # user GitLab hiện tại
 python gitlab_api.py my-review-mrs [reviewer|assignee|both]   # MR gắn tên tôi (toàn project)
 python mr_watch.py [--who ...] [--interval 300] [--once] [--no-spawn]   # poll MR gắn tên tôi → tự mở Claude review (hỏi trước khi post)
 python daemon_common.py status   # tình trạng các daemon (last event: started/transient/fatal/recovered) từ temp/daemon_health.jsonl
+python taskstore.py summary | list [--status ...] | show <id> | events [<id>] | add <kind> <ref> | unblock|cancel <id>   # store bền (temp/toolkit.db): task, lease, checkpoint, dừng khi hết quota → chạy tiếp
 python status.py [--json] [--section daemons,runs,queue,approvals,feedback]   # BẢNG TRẠNG THÁI tổng hợp: daemon + pipeline run đang mở + queue + approval chờ + feedback stats
 python k8s.py doctor|contexts                       # kubectl (PATH/Lens) + kubeconfig có trên máy — không gọi mạng
 python k8s.py access|pods|deploys|events|describe|logs|get --project P --env E   # READ-ONLY; hoặc --context C --kubeconfig F [-n NS]

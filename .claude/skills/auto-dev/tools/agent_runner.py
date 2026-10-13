@@ -49,6 +49,10 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _SKILLS = os.path.dirname(os.path.dirname(_HERE))  # .../.claude/skills
 sys.path.insert(0, os.path.join(_SKILLS, "dev-automation", "tools"))
 import config  # noqa: E402
+import runpy  # noqa: E402
+
+runpy.run_path(os.path.join(_SKILLS, "_runtime", "bootstrap.py"))["activate"]()
+from agent_skill_toolkit.workflows.execution import quota  # noqa: E402
 
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_API_MODEL = config.get("ANTHROPIC_MODEL") or "claude-opus-5-5"
@@ -87,6 +91,24 @@ CLI_PRESETS = {
 
 class AgentRunError(Exception):
     """Unrecoverable error invoking the agent (missing CLI, timeout, refusal, ...)."""
+
+    def __init__(self, message: str, classification: dict = None):
+        super().__init__(message)
+        self.classification = classification or quota.classify(message)
+
+
+class AgentQuotaError(AgentRunError):
+    """The provider refused for a limit (usage / rate / overloaded). `resume_at` is an epoch
+    time to try again; a workflow should PAUSE (not fail) — see workflows/engine.QuotaExceeded."""
+
+    @property
+    def resume_at(self) -> float:
+        return float(self.classification.get("resume_at") or 0)
+
+
+def _cli_failure(message: str, output: str) -> AgentRunError:
+    c = quota.classify(output)
+    return AgentQuotaError(message, c) if c["kind"] == "quota" else AgentRunError(message, c)
 
 
 def _resolve_exec(argv: list) -> list:
@@ -166,10 +188,11 @@ def _run_cli(prompt, system, backend, model, cmd_template, prompt_via, timeout,
         raise AgentRunError(f"CLI '{argv[0]}' did not respond within {timeout}s.")
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip()[-400:]
-        raise AgentRunError(f"CLI '{argv[0]}' exit {proc.returncode}: {tail}")
+        raise _cli_failure(f"CLI '{argv[0]}' exit {proc.returncode}: {tail}",
+                           (proc.stdout or "") + "\n" + (proc.stderr or ""))
     out = (proc.stdout or "").strip()
     if not out:
-        raise AgentRunError(f"CLI '{argv[0]}' returned empty stdout.")
+        raise _cli_failure(f"CLI '{argv[0]}' returned empty stdout.", proc.stderr or "")
     return out
 
 
@@ -192,7 +215,9 @@ def _run_api(prompt, system, model, max_tokens, timeout) -> str:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        raise AgentRunError(f"Claude API HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:400]}")
+        body = e.read().decode("utf-8", "replace")[:400]
+        hint = f" retry-after: {e.headers.get('retry-after')}" if e.headers.get("retry-after") else ""
+        raise _cli_failure(f"Claude API HTTP {e.code}: {body}", f"HTTP {e.code} {body}{hint}")
     except urllib.error.URLError as e:
         raise AgentRunError(f"network error calling Claude API: {e.reason}")
     if data.get("stop_reason") == "refusal":
@@ -223,11 +248,6 @@ def run_turn(prompt: str, *, system: str = None, backend: str = "claude",
 
 
 # --------------------------------------------------------------------------- role routing
-
-RETRYABLE = ("usage limit", "rate limit", "rate_limit", "too many requests", "429", "quota",
-             "overloaded", "credit balance", "not logged in", "please log in", "unauthorized",
-             "authentication", "login", "5 hour limit", "weekly limit")
-
 
 def _agents_config() -> dict:
     work = os.environ.get("WORK_DIR") or os.path.join(os.path.dirname(_SKILLS.rstrip(os.sep)), "..", "work")
@@ -312,11 +332,17 @@ def run_role(prompt: str, role: str, *, system: str = None, cwd: str = None,
             return {"text": text, "used": spec, "tried": tried}
         except AgentRunError as e:
             msg = str(e)
-            tried.append({"spec": spec, "error": msg[:200]})
-            if not any(k in msg.lower() for k in RETRYABLE):
-                raise AgentRunError(f"{spec}: {msg}")
+            c = e.classification
+            tried.append({"spec": spec, "error": msg[:200], "kind": c.get("kind"),
+                          "resume_at": c.get("resume_at")})
+            if not c.get("retry_other_backend"):
+                raise AgentRunError(f"{spec}: {msg}", c)
         finally:
             slot.__exit__()
+    quotas = [t["resume_at"] for t in tried if t.get("kind") == "quota" and t.get("resume_at")]
+    if quotas:                       # every candidate is limited: pause until the EARLIEST reset
+        raise AgentQuotaError(f"all candidates for role '{role}' are rate/usage limited: {tried}",
+                              {"kind": "quota", "resume_at": min(quotas), "retry_other_backend": False})
     raise AgentRunError(f"no candidate could run role '{role}': {tried}")
 
 
