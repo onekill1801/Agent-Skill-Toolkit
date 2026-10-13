@@ -32,10 +32,12 @@ import argparse
 import json
 import os
 import re
+import runpy
 import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -74,6 +76,28 @@ INBOX = os.path.join(REPO_ROOT, "temp", "atask_incoming")
 
 # statusType coi là ĐÃ XONG (không xử lý). Đè bằng ATASK_WATCH_DONE_TYPES.
 DEFAULT_DONE_TYPES = ["completed", "done", "closed", "cancelled", "rejected"]
+
+MODE = "direct"   # "direct" (phân tích + duyệt ngay, như cũ) | "store" (chỉ xếp vào store bền — F.5)
+
+
+def _enqueue(task) -> bool:
+    """Task aTask -> task `atask_intake` trong store bền (cổng vào: nguồn atask_watch). Một task
+    mỗi (id, trạng thái). Bộ điều phối (F.7) sẽ phân tích/đề xuất; xem `taskstore.py list`."""
+    try:
+        runpy.run_path(str(Path(__file__).resolve().parents[2] / "_runtime" / "bootstrap.py"))["activate"]()
+        from agent_skill_toolkit.core import store as store_mod
+        from agent_skill_toolkit.workflows.intake import gate
+        with store_mod.Store() as st:
+            t = gate.submit(st, "atask_watch", "atask_intake", f"{task['id']}@{task['statusType']}",
+                            title=str(task.get("name") or task["id"])[:200],
+                            data={"atask": {k: task.get(k) for k in ("id", "name", "project", "statusType",
+                                                                     "due", "priority")}})
+    except (PermissionError, OSError, RuntimeError) as e:
+        print(f"[{_now()}] [WARN] không xếp được task {task['id']}: {e}", file=sys.stderr)
+        return False
+    print(f"[{_now()}]        -> store task {t['id']}{' (đã có)' if t['duplicate'] else ''}")
+    return True
+
 
 _busy = threading.Semaphore(2)   # tối đa 2 task đang phân tích/chờ duyệt cùng lúc
 
@@ -314,6 +338,11 @@ def poll_once(chat, state, act, max_per_cycle, baseline=False):
         print(f"[{_now()}] [task {tag}] {t['id']} {t['name']!r} ({t['statusType']})")
         if not act:
             continue
+        if MODE == "store":
+            if _enqueue(t):
+                state[t["id"]] = t["statusType"]
+                _save_state(state)
+            continue
         if launched >= max_per_cycle:
             print(f"[{_now()}]        (đạt {max_per_cycle} task/vòng — phần còn lại để vòng sau)")
             break
@@ -363,9 +392,12 @@ if __name__ == "__main__":
                    help="chỉ in task mới, không phân tích/duyệt/hành động")
     p.add_argument("--max-per-cycle", type=int, default=2, help="số task xử lý mỗi vòng (mặc định 2)")
     p.add_argument("--triage-existing", action="store_true", help="xử lý cả backlog (bỏ baseline)")
+    p.add_argument("--mode", choices=["direct", "store"], default=rccfg.get("ATASK_WATCH_MODE", "direct") or "direct",
+                   help="direct = phân tích + duyệt Telegram ngay (mặc định); store = chỉ xếp vào store bền")
     p.add_argument("--triage", dest="triage_id", default=None,
                    help="phân tích + đề xuất + duyệt cho ĐÚNG một task id rồi thoát")
     a = p.parse_args()
+    MODE = a.mode
 
     if a.triage_id:
         chat = (tg_api.allowed_chats(tg_api.approval_bot()) or [""])[0]

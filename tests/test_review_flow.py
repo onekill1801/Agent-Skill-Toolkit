@@ -64,7 +64,7 @@ class ReviewFlowTest(unittest.TestCase):
             f.write(FAKE_AGENT % {"future": time.time() + 7200})
         self.log = os.path.join(self.tmp, "agent.log")
         env = {"REVIEW_STATE_DIR": os.path.join(self.tmp, "rq"), "TOOLKIT_STATE_DIR": self.tmp,
-               "TOOLKIT_STORE": os.path.join(self.tmp, "t.db"), "REVIEW_ORCA": "0", "REVIEW_CODEGRAPH": "0",
+               "TOOLKIT_STORE": os.path.join(self.tmp, "t.db"), "WORK_DIR": self.tmp, "REVIEW_ORCA": "0", "REVIEW_CODEGRAPH": "0",
                "REVIEW_AUTO_POST": "auto", "REVIEW_AUTO_POST_PROJECTS": "grp/proj",
                "GITLAB_URL": "https://gitlab.example.vn", "FAKE_AGENT_LOG": self.log, "FAKE_AGENT_MODE": "ok",
                "FAKE_TOOLS": os.path.join(_ROOT, ".claude", "skills", "mr-review", "tools")}
@@ -126,6 +126,36 @@ class ReviewFlowTest(unittest.TestCase):
         self.assertEqual(ran[-1]["status"], "done")
         self.assertEqual(self.posted, ["77-5"])
         self.assertEqual(self.runs(), 1)
+
+    # ------------------------------------------------------------ F.5 intake gate
+    def test_enqueue_records_the_intake_source_and_trust(self):
+        out = rf.enqueue("proj", 30, source="fchat", requester_id="U7")
+        with S.Store() as st:
+            intake = st.get(out["task_id"])["data"]["intake"]
+        self.assertEqual((intake["source"], intake["trust"], intake["requester_id"]), ("fchat", "low", "U7"))
+
+    def test_switched_off_source_cannot_enqueue(self):
+        with open(os.path.join(self.tmp, "policy.json"), "w") as f:
+            json.dump({"intake": {"fchat": {"on": False}}}, f)
+        with self.assertRaises(PermissionError):
+            rf.enqueue("proj", 31, source="fchat")
+        self.assertFalse(rc.load_job("77-31"))                  # refused before the job file
+        self.assertTrue(rf.enqueue("proj", 31, source="mr_watch")["task_id"])
+
+    def test_unknown_source_is_refused(self):
+        with self.assertRaises(PermissionError):
+            rf.enqueue("proj", 32, source="random-bot")
+
+    def test_enqueue_text_refuses_links_to_another_host(self):
+        text = ("review https://evil.example.com/grp/proj/-/merge_requests/40 and "
+                "https://gitlab.example.vn/grp/proj/-/merge_requests/41")
+        out = rf.enqueue_text(text, source="fchat", requester_id="U1")
+        self.assertEqual(out["added"], ["77-41"])
+        self.assertEqual(out["refused"][0]["reason"], "not our GitLab host")
+        with self.assertRaises(ValueError):
+            rf.enqueue_text("https://evil.example.com/grp/proj/-/merge_requests/42", source="fchat")
+        with self.assertRaises(ValueError):
+            rf.enqueue_text("chào cả nhà", source="fchat")
 
     def test_quota_pauses_then_resumes_without_rerunning_finished_steps(self):
         rf.enqueue("proj", 6)

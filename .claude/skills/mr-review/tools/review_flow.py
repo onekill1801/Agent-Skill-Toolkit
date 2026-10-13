@@ -35,6 +35,7 @@ runpy.run_path(str(Path(__file__).resolve().parents[2] / "_runtime" / "bootstrap
 from agent_skill_toolkit.core import paths  # noqa: E402
 from agent_skill_toolkit.core import store as store_mod  # noqa: E402
 from agent_skill_toolkit.workflows import engine as E  # noqa: E402
+from agent_skill_toolkit.workflows.intake import gate  # noqa: E402
 
 import review_common as rc  # noqa: E402
 import review_post as rp  # noqa: E402
@@ -292,13 +293,44 @@ REGISTRY = {KIND: STEPS}
 # ----------------------------------------------------------------------------- commands
 
 def enqueue(project, iid, role: str = "review", **request) -> dict:
+    gate.admit(request.get("source") or "manual", KIND)     # before touching GitLab / the job file
     res = rq.add_job(project, iid, **request)
     job = res["job"]
     with store_mod.Store() as st:
-        task = st.add(KIND, job["id"], title=f"{job.get('project_path')}!{job['iid']} {job.get('title', '')}"[:200],
-                      data={"job_id": job["id"], "role": role}, priority=int(job.get("priority", 5)))
+        task = gate.submit(st, request.get("source") or "manual", KIND, job["id"],
+                           title=f"{job.get('project_path')}!{job['iid']} {job.get('title', '')}"[:200],
+                           data={"job_id": job["id"], "role": role}, priority=int(job.get("priority", 5)),
+                           requester_id=request.get("requester_id", ""))
     return {"job_id": job["id"], "job_duplicate": res["duplicate"], "task_id": task["id"],
             "task_duplicate": task["duplicate"]}
+
+
+def _gitlab_host() -> str:
+    import urllib.parse
+    return (urllib.parse.urlparse(rc.config.get("GITLAB_URL") or "").hostname or "").lower()
+
+
+def enqueue_text(text: str, default_project: str = "", role: str = "review", **request) -> dict:
+    """MR references in free text (a chat message = DATA) -> review tasks. Links must point at
+    our GitLab host (design §3); a foreign host is refused, not followed."""
+    refs = rc.parse_mr_refs(text, default_project)
+    if not refs:
+        raise ValueError("no MR reference found in text")
+    ours = _gitlab_host()
+    added, refused = [], []
+    for r in refs:
+        host = (r.get("host") or "").split(":")[0].lower()
+        if host and host != ours:
+            refused.append({"ref": f"{host}/{r['project']}!{r['iid']}", "reason": "not our GitLab host"})
+            continue
+        try:
+            out = enqueue(r["project"], r["iid"], role=role, **request)
+            added.append(out["job_id"])
+        except (ValueError, RuntimeError) as e:
+            refused.append({"ref": f"{r['project']}!{r['iid']}", "reason": str(e)[:200]})
+    if not added:
+        raise ValueError("no MR could be queued: " + "; ".join(f"{x['ref']}: {x['reason']}" for x in refused))
+    return {"added": added, "refused": refused}
 
 
 _HEAD_CHECKED = {}     # task_id -> last time this process asked GitLab for the head (throttle)
@@ -376,6 +408,13 @@ def main(argv=None) -> int:
         p.add_argument(f"--{k}", default="manual" if k == "source" else "")
     p.add_argument("--priority", type=int, default=rq.PRIORITY_DEFAULT)
     p.add_argument("--role", default="review", help="agents.json role used for the review agent")
+    p = sub.add_parser("enqueue-text")
+    p.add_argument("text")
+    p.add_argument("--default-project", default="")
+    for k in ("requester", "requester-id", "source", "group", "group-type"):
+        p.add_argument(f"--{k}", default="manual" if k == "source" else "")
+    p.add_argument("--priority", type=int, default=rq.PRIORITY_DEFAULT)
+    p.add_argument("--role", default="review")
     p = sub.add_parser("work")
     p.add_argument("--once", action="store_true")
     p.add_argument("--interval", type=int, default=30)
@@ -389,6 +428,10 @@ def main(argv=None) -> int:
             out = enqueue(a.project, a.iid, role=a.role, requester=a.requester, requester_id=a.requester_id,
                           source=a.source,
                           group=a.group, group_type=a.group_type, priority=a.priority, note=a.note)
+        elif a.cmd == "enqueue-text":
+            out = enqueue_text(a.text, a.default_project, role=a.role, requester=a.requester,
+                               requester_id=a.requester_id, source=a.source, group=a.group,
+                               group_type=a.group_type, priority=a.priority, note=a.text)
         elif a.cmd == "work":
             out = work(a.owner, a.once, a.interval)
         elif a.cmd == "reconcile":

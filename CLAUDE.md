@@ -70,7 +70,7 @@ python gitlab_api.py mr-comment <iid> "body"       # [WRITE]
 python gitlab_api.py merge-mr <iid> [--keep-source] [--squash]   # [WRITE] accept/merge MR
 python gitlab_api.py whoami                         # user GitLab hiện tại
 python gitlab_api.py my-review-mrs [reviewer|assignee|both]   # MR gắn tên tôi (toàn project)
-python mr_watch.py [--who ...] [--interval 300] [--once] [--no-spawn]   # poll MR gắn tên tôi → tự mở Claude review (hỏi trước khi post)
+python mr_watch.py [--who ...] [--interval 300] [--once] [--no-spawn] [--mode store|terminal]   # poll MR gắn tên tôi → xếp task review_mr vào store (mặc định; `review_flow.py work` chạy) · terminal = mở Claude như cũ
 python daemon_common.py status   # tình trạng các daemon (last event: started/transient/fatal/recovered) từ temp/daemon_health.jsonl
 python ../auto-dev/tools/verify.py plan|start --repo DIR [--base B] [--spec F] | work [--once] | status   # THANG KIỂM: build→test liên quan→suite→review chéo, tự sửa tới xanh (spec đọc từ base ref; không chạy trên nhánh mặc định)
 python taskstore.py summary | list [--status ...] | show <id> | events [<id>] | add <kind> <ref> | unblock|cancel <id>   # store bền (temp/toolkit.db): task, lease, checkpoint, dừng khi hết quota → chạy tiếp
@@ -98,7 +98,7 @@ python review_ws.py prepare <job> [--with-merge] | diff <job> [--path P] | check
 python review_post.py validate|render|request-approval <job>    # agent dừng ở đây
 python review_post.py approve|reject <job>                      # CHỈ người (cần TTY), duyệt gắn với đúng nội dung
 python review_rules.py check <job>                              # luật tự đăng (REVIEW_AUTO_POST=off|shadow|auto)
-python review_flow.py enqueue --project P --iid N | work [--once] | reconcile | status   # review BỀN: hết quota → dừng/chạy tiếp, MR đổi commit → review lại
+python review_flow.py enqueue --project P --iid N | enqueue-text "<tin>" --source fchat | work [--once] | reconcile | status   # review BỀN: hết quota → dừng/chạy tiếp, MR đổi commit → review lại
 python review_post.py sweep                                     # [WRITE] đăng review đã duyệt + báo FChat
 ```
 Orca: automation "Auto review MR" = công tắc (precheck `review_queue.py pending`); listener FChat

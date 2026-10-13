@@ -39,11 +39,16 @@ import json
 import os
 import queue
 import re
+import runpy
 import socket
 import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
+
+runpy.run_path(str(Path(__file__).resolve().parents[2] / "_runtime" / "bootstrap.py"))["activate"]()
+from agent_skill_toolkit.workflows.intake import gate  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -257,17 +262,11 @@ _MR_TOOLS = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", 
 AUTO_REVIEW_NAME = "Auto review MR"
 
 
-def _allowed_list():
-    return [x.strip().lower() for x in (rccfg.get("FCHAT_REVIEW_ALLOWED") or "").split(",") if x.strip()]
-
-
 def _is_allowed(sender_id, sender_name, me):
-    """Chủ tài khoản (lệnh có tiền tố) luôn được; còn lại phải nằm trong FCHAT_REVIEW_ALLOWED
-    (user id hoặc tên hiển thị, phân tách dấu phẩy; '*' = mọi người trong group). Trống = chặn hết."""
-    if sender_id and sender_id == me:
-        return True
-    allowed = _allowed_list()
-    return "*" in allowed or str(sender_id).lower() in allowed or (sender_name or "").strip().lower() in allowed
+    """Chủ tài khoản (lệnh có tiền tố) luôn được; còn lại phải có USER ID trong FCHAT_REVIEW_ALLOWED
+    (phân tách dấu phẩy; '*' = mọi người trong group). Trống = chặn hết. Tên hiển thị KHÔNG được
+    tính (ai cũng đổi tên được) — design §3, F.5."""
+    return gate.sender_allowed(sender_id, rccfg.get("FCHAT_REVIEW_ALLOWED") or "", me=me or "")
 
 
 def _run_tool(script, *args, timeout=120):
@@ -295,7 +294,8 @@ def _auto_review_state():
 
 
 def _enqueue_review(gid, group_type, sender_name, sender_id, text):
-    res = _run_tool("review_queue.py", "add-text", text,
+    # vào store bền qua cổng vào (nguồn fchat, tin cậy thấp: chỉ review_mr) — F.5
+    res = _run_tool("review_flow.py", "enqueue-text", text,
                     "--default-project", rccfg.get("FCHAT_REVIEW_DEFAULT_PROJECT") or "",
                     "--source", "fchat", "--group", str(gid), "--group-type", str(group_type or ""),
                     "--requester", sender_name or "", "--requester-id", str(sender_id or ""),
@@ -312,6 +312,8 @@ def _enqueue_review(gid, group_type, sender_name, sender_id, text):
             _post_tagged(gid, group_type, sender_name, sender_id, f"⚠️ Không nhận được yêu cầu review: {msg[:160]}")
         return
     jobs = res.get("added", [])
+    for r in res.get("refused") or []:
+        print(f"[{_now()}] [review] bỏ qua {r.get('ref')}: {r.get('reason')}")
     orca, auto_id, enabled = _auto_review_state()
     if orca and auto_id and enabled:
         try:
