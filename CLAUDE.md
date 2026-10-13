@@ -78,6 +78,7 @@ python dbeaver.py probe "Folder/Tên" --sql "select …"   # qua probe_db; user/
 python podfwd.py start <pod/x|svc/x|deploy/x|"-l app=db"> <local>:<remote> --project P --env E [--name N]   # forward nền, tự nối lại
 python podfwd.py start-saved --project P --env E | list | stop <name|all> | logs <name>   # PROD cần --allow-prod (hook hỏi)
 python podfwd.py fetch <pod|"-l sel"> <path-trong-pod> [--to DIR]   # oc rsync pod -> work/pods/ (đọc code/config đã deploy)
+python cg.py prepare <worktree> --project-id <id> | analyze <worktree> --base B --head H --out F   # codegraph cho worktree: copy seed + sync (giây), method bị sửa, nơi gọi ngoài diff, test bị ảnh hưởng
 python vpn.py status | up | ensure | down | watch    # FortiVPN (macOS/Linux: openfortivpn; Windows: FortiClient). status exit 0 = mạng nội bộ OK
 python k8s.py logs ... deploy/NAME [--since 30m] [--errors -C 3] [--grep RE] [--previous]   # gộp log mọi pod của deploy; --errors bắt text/JSON/glog
 python notifier.py started|mr-created|review-done|deploy-done|custom <id> ...   # [WRITE → người thật thấy]

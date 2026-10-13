@@ -256,6 +256,15 @@ def prepare(jid: str, with_merge: bool = False) -> dict:
                                               cwd=wt_merge, check=False).split()
             merge["worktree"] = wt_merge
 
+    codegraph = {"status": "disabled"}
+    if rc.config.get("REVIEW_CODEGRAPH", "1").lower() not in ("0", "false", "no"):
+        import cg                                            # dev-automation/tools (on sys.path)
+        with rc.file_lock(f"codegraph-seed-{pid}", timeout=900):   # one seed copy/sync at a time per project
+            codegraph = cg.prepare(wt, pid, clone_dir=repo.path if not repo.bare else "")
+        if codegraph.get("status") == "ready":
+            codegraph.update(cg.analyze(wt, base, head, title=mr.get("title") or "",
+                                        out=wt + ".codegraph.md"))
+
     ws = {
         "job_id": jid, "project_id": pid, "project_path": job.get("project_path"), "iid": iid,
         "title": mr.get("title"), "web_url": mr.get("web_url"),
@@ -270,6 +279,7 @@ def prepare(jid: str, with_merge: bool = False) -> dict:
         "description": (mr.get("description") or "")[:4000],
         "prepared_at": rc.now(),
         "how_to_diff": f"python {os.path.join(rc.tools_dir(), 'review_ws.py')} diff {jid} [--path P]",
+        "codegraph": {k: v for k, v in codegraph.items() if k != "external_callers"},
     }
     with open(ws_json, "w", encoding="utf-8") as f:
         json.dump(ws, f, ensure_ascii=False, indent=2)
@@ -283,7 +293,7 @@ def prepare(jid: str, with_merge: bool = False) -> dict:
                   note=f"Đang review · {len(files)} file · {commits['new']}/{commits['total']} commit mới · "
                        f"{mr.get('source_branch')} → {mr.get('target_branch')}")
     return {k: ws[k] for k in ("job_id", "worktree", "diff_refs", "files_changed", "lines_added",
-                               "lines_removed", "merge")} | {"ws_path": ws_json,
+                               "lines_removed", "merge", "codegraph")} | {"ws_path": ws_json,
                                                             "commits": {k: v for k, v in commits.items() if k != "list"}}
 
 
@@ -317,6 +327,11 @@ def cleanup(jid: str) -> dict:
     wt = job["worktree"]
     with rc.file_lock(f"repo-{job['project_id']}", timeout=300):
         for p in (wt + ".merge", wt):
+            if p == wt:
+                try:
+                    os.remove(wt + ".codegraph.md")
+                except OSError:
+                    pass
             if os.path.isdir(p):
                 repo.git("worktree", "remove", "--force", p, check=False)
                 shutil.rmtree(p, ignore_errors=True)

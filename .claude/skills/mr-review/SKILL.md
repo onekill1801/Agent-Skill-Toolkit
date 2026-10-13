@@ -36,6 +36,16 @@ Read `<worktree>.ws.json`:
   commits** (conflict resolutions); skim the rest.
 - `merge` — conflicts / merge-result worktree (build & test there when present).
 
+**Read `<worktree>.codegraph.md` first** (when `ws.json.codegraph.status == "ready"`): methods
+the diff touches, their callers OUTSIDE the diff (contract/behaviour risks the diff itself doesn't
+show), and the affected tests — run exactly those instead of the whole suite. Query further with the
+CLI against the worktree's own index (MCP points at your cwd, not the worktree):
+```
+codegraph callers|impact|context|query <symbol-or-text> -p <worktree>
+```
+The graph is static: Spring injection, reflection, JPA derived queries can be missing — verify by
+reading code before claiming "no callers".
+
 Get the diff (works for any provider; handles partial-clone auth):
 ```
 python3 $T/review_ws.py diff <job_id> --stat
