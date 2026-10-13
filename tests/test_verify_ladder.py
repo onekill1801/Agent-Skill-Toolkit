@@ -86,6 +86,7 @@ SPEC = textwrap.dedent(f'''
             - -m
             - py_compile
             - src/calc.py
+          protects: []
         suite:
           run:
             - {PY}
@@ -95,6 +96,8 @@ SPEC = textwrap.dedent(f'''
             - -s
             - tests
             - -q
+          protects: []
+          full_suite: true
       budgets:
         max_fix_rounds_per_rung: 2
         max_fix_rounds_total: 4
@@ -255,25 +258,32 @@ class LadderTest(unittest.TestCase):
         git(self.repo, "commit", "-qam", "prod")
         self.assertEqual(L.protected_changes(self.repo, before, "HEAD"), [])   # production code is fine
 
-    def test_interpreter_scripts_are_protected_but_not_module_runs(self):
-        """Codex F.2 R3 HIGH: `python checks/run.py` -> checks/run.py may not be weakened."""
-        spec = {"rungs": [{"run": ["python", "checks/run.py", "--fast"]}, {"run": ["node", "scripts/t.js"]},
-                          {"run": ["python", "-m", "unittest", "discover"]},
-                          {"run": ["python", "-m", "py_compile", "src/calc.py"]}]}
-        pats = L.spec_launchers(spec)
+    def test_interpreter_rungs_must_declare_what_they_execute(self):
+        """Codex F.2 R3-R5: guessing the executed script from argv can always be fooled, so an
+        interpreter / package-runner rung must DECLARE `protects`; argv paths only add to it."""
         import re as _re
-        self.assertTrue(any(_re.search(p, "checks/run.py") for p in pats))
-        self.assertTrue(any(_re.search(p, "scripts/t.js") for p in pats))
-        self.assertFalse(any(_re.search(p, "src/calc.py") for p in pats))     # production code stays fixable
-        # Codex F.2 R4: options with values and subcommands before the script
-        for argv, script in ((["python", "-W", "ignore", "checks/run.py"], "checks/run.py"),
-                             (["deno", "run", "--allow-read", "ci/check.ts"], "ci/check.ts"),
-                             (["bash", "-e", "ci/check.sh"], "ci/check.sh")):
-            pats = L.spec_launchers({"rungs": [{"name": "r", "run": argv}]})
-            self.assertTrue(any(_re.search(p, script) for p in pats), argv)
-        with self.assertRaises(ValueError):                                     # cannot tell -> refuse
-            L.spec_launchers({"rungs": [{"name": "r", "run": ["node", "."]}]})
-        self.assertEqual(L.spec_launchers({"rungs": [{"name": "r", "run": ["node", "."], "protect_ok": True}]}), [])
+
+        def hits(pats, path):
+            return any(_re.search(p, path) for p in pats)
+        for argv in (["python", "checks/run.py", "-m"], ["python", "ci/check", "data.py"], ["node", "."],
+                     ["npx", "jest"], ["uv", "run", "pytest"], ["bash", "-e", "ci/check.sh"]):
+            with self.assertRaises(ValueError, msg=argv):                       # undeclared -> rejected
+                L.spec_launchers({"rungs": [{"name": "r", "run": argv}]})
+        pats = L.spec_launchers({"rungs": [{"name": "r", "run": ["python", "ci/check", "data.py"],
+                                            "protects": ["ci/check", "ci/lib/"]}]})
+        self.assertTrue(hits(pats, "ci/check"))                                 # the declared executable
+        self.assertTrue(hits(pats, "ci/lib/util.py"))                         # a declared directory
+        self.assertFalse(hits(pats, "data.py"))                                 # args are NOT guessed
+        pats = L.spec_launchers({"rungs": [{"name": "r", "run": ["python", "x.py"],
+                                            "protects": ["ci/../tools/check.py", "./ci/x.sh"]}]})
+        self.assertTrue(hits(pats, "tools/check.py"))                           # normalized like git reports it
+        self.assertTrue(hits(pats, "ci/x.sh"))
+        self.assertEqual(L.spec_launchers({"rungs": [{"name": "r", "run": ["python", "-m", "unittest"],
+                                                      "protects": []}]}), [])   # an explicit "nothing"
+        pats = L.spec_launchers({"rungs": [{"name": "c", "run": ["mvnw.cmd", "-q", "package"]}]})
+        self.assertTrue(hits(pats, "mvnw.cmd"))                                 # non-interpreter launcher
+        with self.assertRaises(ValueError):
+            L.spec_launchers({"rungs": [{"name": "r", "run": ["python", "x.py"], "protects": "x.py"}]})
 
     def test_protection_fails_closed_on_git_errors(self):
         """Codex F.2 R3 NEW HIGH."""

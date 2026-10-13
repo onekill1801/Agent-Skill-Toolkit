@@ -427,50 +427,64 @@ def protected_changes(repo: str, before: str, after: str, extra: list = ()) -> l
     return out
 
 
-_SCRIPT = re.compile(r"\.(py|pyw|js|mjs|cjs|ts|mts|cts|jsx|tsx|sh|bash|zsh|ps1|psm1|rb|pl|php|groovy|kts|"
-                     r"jar|bat|cmd)$", re.I)
-# flags that make an interpreter run a MODULE or INLINE code instead of a repo script — per
-# interpreter (`-e` is inline code for node/ruby/perl but "exit on error" for bash)
-_INLINE_FLAGS = {r"python[\d.]*|py": ("-m", "-c"), r"node|bun": ("-e", "--eval", "-p", "--print"),
-                 r"deno": ("eval",), r"bash|sh|zsh": ("-c",), r"pwsh|powershell": ("-Command", "-c", "-command"),
-                 r"ruby|perl": ("-e",), r"php": ("-r",)}
 _INTERPRETERS = re.compile(r"^(python[\d.]*|py|node|deno|bun|bash|sh|zsh|pwsh|powershell|ruby|perl|php|"
-                           r"groovy|kotlin|java|cmd)(\.exe)?$", re.I)
+                           r"groovy|kotlin|java|cmd|npx|npm|yarn|pnpm|uv|poetry|pipenv)(\.exe|\.cmd)?$", re.I)
+
+
+def _norm(path: str) -> str:
+    """Repo-relative POSIX path, `..` and `./` resolved (git reports `tools/x.py`, not `ci/../tools/x.py`)."""
+    import posixpath
+    p = posixpath.normpath(path.replace("\\", "/"))
+    return "" if p in (".", "") or p.startswith("../") else p.lstrip("/")
 
 
 def spec_launchers(spec: dict) -> list:
-    """Files the spec's commands execute from the repo are protected too: the launcher itself
-    (checks/run.cmd, mvnw.cmd) and the script an interpreter runs (`python checks/run.py`,
-    `node scripts/test.js`, `bash ci/check.sh`). Indirect inputs go in `verify.protected`."""
+    """Protection patterns for what the spec's commands execute from the repo.
+
+    The DECISION is explicit, not guessed (Codex F.2 R4/R5: argv parsing can always be fooled):
+      * a rung whose command is an interpreter / package runner (python, node, bash, npx, uv, …)
+        MUST declare `protects: [...]` — the repo files it executes or depends on (an explicit empty
+        list `protects: []` is a statement too, e.g. for `python -m unittest`, whose tests are
+        protected anyway); otherwise the spec is rejected
+      * the launcher itself (mvnw.cmd, checks/run.cmd) is added; declared paths are normalized.
+        Arguments are not auto-protected — they are often the production code being checked
+    """
     def pat(path):
-        return "(^|/)" + re.escape(path.lstrip("./").replace("\\", "/")) + "$"
+        n = _norm(path)
+        if not n:
+            return None
+        if path.replace("\\", "/").endswith("/"):      # a declared directory protects everything under it
+            return "(^|/)" + re.escape(n) + "/"
+        return "(^|/)" + re.escape(n) + "$"
 
     out = []
     for r in spec.get("rungs", []):
+        name = r.get("name", "?")
         try:
             argv = argv_of(r.get("run")) if r.get("run") else []
         except ValueError:
             continue
         if not argv:
             continue
-        a0 = argv[0]
-        if not os.path.isabs(a0) and ("/" in a0 or "\\" in a0 or a0.startswith(".") or "." in a0):
-            out.append(pat(a0))
-        if _INTERPRETERS.match(os.path.basename(a0)):
-            rest = argv[1:]
-            exe = re.sub(r"(\.exe)$", "", os.path.basename(a0).lower())
-            inline = next((v for k, v in _INLINE_FLAGS.items() if re.fullmatch(k, exe)), ())
-            if any(a in inline for a in rest):
-                continue                          # module / inline code: no repo script is executed
-            # every argument that looks like a script file is protected — not "the first non-option",
-            # which is wrong for `python -W ignore x.py` or `deno run x.ts` (Codex F.2 R4)
-            scripts = [a for a in rest if not a.startswith("-") and _SCRIPT.search(a) and not os.path.isabs(a)]
-            if not scripts and not r.get("protect_ok"):
-                raise ValueError(f"rung `{r.get('name', '?')}`: cannot tell which repo script `{' '.join(argv)[:80]}` "
-                                 "runs — name it explicitly, or list it in verify.protected and set "
-                                 "`protect_ok: true` on the rung")
-            out += [pat(a) for a in scripts]
-    return out
+        declared = r.get("protects")
+        if declared is not None and not isinstance(declared, list):
+            raise ValueError(f"rung `{name}`: `protects` must be a list of repo paths")
+        exe = os.path.basename(argv[0])
+        if _INTERPRETERS.match(exe) and declared is None:
+            raise ValueError(f"rung `{name}` runs `{exe}`: declare `protects:` — the repo files this command "
+                             "executes or depends on (use `protects: []` only if it executes none)")
+        for path in declared or []:
+            p = pat(str(path))
+            if p:
+                out.append(p)
+        a0 = argv[0]       # a repo launcher (mvnw.cmd, checks/run.cmd) is always protected
+        if not os.path.isabs(a0) and ("/" in a0 or "\\" in a0 or re.search(r"\.[A-Za-z0-9]{1,5}$", a0)):
+            p = pat(a0)
+            if p:
+                out.append(p)
+        # Arguments are NOT auto-protected: they are often the production code under check
+        # (`py_compile src/x.py`) — what a command executes is what `protects` declares.
+    return sorted(set(out))
 
 
 def branch_refs(repo: str) -> dict:
