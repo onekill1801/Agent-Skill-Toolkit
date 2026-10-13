@@ -466,6 +466,20 @@ class Store:
                 self._event(task_id, "resolved", status=status, by=by, note=note or None)
         return bool(n)
 
+    def patch_data(self, task_id: str, if_status: tuple = ("blocked", "queued"), **fields) -> bool:
+        """Merge fields into a task's data WITHOUT a lease — only while it is not running (a human's
+        decision recorded on a waiting task, e.g. "go" on a proposal)."""
+        with self._tx():
+            r = self.db.execute(f"select data from tasks where id=? and status in ({','.join('?' * len(if_status))})",
+                                (task_id, *if_status)).fetchone()
+            if not r:
+                return False
+            data = {**json.loads(r["data"] or "{}"), **fields}
+            self.db.execute("update tasks set data=?, updated=? where id=?",
+                            (json.dumps(data, ensure_ascii=False), time.time(), task_id))
+            self._event(task_id, "data_patched", fields=sorted(fields))
+        return True
+
     def set_resource(self, task_id: str, resource: str) -> bool:
         """Give a not-running task its exclusive key (upgrade of a task created before `resource`)."""
         with self._tx():

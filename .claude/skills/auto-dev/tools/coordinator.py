@@ -9,7 +9,8 @@ show the progress board (agent_skill_toolkit.workflows.coordinator).
     python coordinator.py usage [PCT] [--source claude]      # report usage % -> throttling tier (6 h)
     python coordinator.py budget [--daily-agent-runs N]      # hard cap on agent turns per day (0 = none)
 
-Kinds run: review_mr (mr-review/review_flow) · verify (verify.py) · atask_intake (proposal).
+Kinds run: review_mr (mr-review/review_flow) · verify (verify.py) · atask_intake (aTask proposal) ·
+proposal (proposals.py: debate -> ADR).
 `--parallel` = worker threads of this process; the cap on live tasks is ONE value stored in the
 database (`capacity`, initial TOOLKIT_MAX_PARALLEL or 2) for every worker loop on this machine.
 Two tasks with the same `resource` (repo@branch) never run at once; a task waits for its
@@ -37,7 +38,8 @@ import probe_common as pc  # noqa: E402,F401  (UTF-8 stdout on Windows)
 
 def load_registry(kinds: list = None) -> tuple:
     """(registry, hooks, warnings) from every workflow that can be loaded on this machine."""
-    reg, hooks, warn = dict(atask_flow.REGISTRY), [], []
+    from agent_skill_toolkit.workflows.proposal import flow as proposal_flow
+    reg, hooks, warn = {**atask_flow.REGISTRY, **proposal_flow.REGISTRY}, [], []
     try:
         import verify
         reg.update(verify.REGISTRY)
