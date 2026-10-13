@@ -20,6 +20,7 @@ ctx.should_stop() turns True and the step's result is discarded (never checkpoin
 Raise from a step:
     quota.QuotaExceeded (incl. agent_runner.AgentQuotaError) -> paused_quota, no attempt used
     NeedsHuman(reason)                                        -> blocked
+    Retry(reason)                                             -> back to queued now, no attempt used
     any other exception                                       -> attempt counted; requeued or failed
 """
 
@@ -38,6 +39,11 @@ class NeedsHuman(Exception):
     pass
 
 
+class Retry(Exception):
+    """Not a failure: put the task back in the queue now (no attempt used), e.g. the MR got a new
+    revision while we worked. Raise after invalidating whatever must be redone."""
+
+
 class StepContext:
     def __init__(self, st: store_mod.Store, task: dict, outputs: dict, lease_s: int):
         self.store, self.task, self.outputs, self.lease_s = st, task, outputs, lease_s
@@ -53,12 +59,12 @@ class StepContext:
         """True once the lease is lost — a long step should stop and return."""
         return self._lost.is_set()
 
-    def run(self, argv: list, timeout: float = 3600, poll: float = 0.5, **kw):
+    def run(self, argv: list, timeout: float = 3600, poll: float = 0.5, input: str = None, **kw):
         """Run a subprocess for this step and KILL it if the lease is lost (pure-Python work can
         only stop cooperatively via should_stop(); builds/tests/agents should go through here).
         Returns CompletedProcess; raises LeaseLost when killed for losing the lease."""
         import subprocess
-        kw.setdefault("stdin", subprocess.DEVNULL)
+        kw.setdefault("stdin", subprocess.PIPE if input is not None else subprocess.DEVNULL)
         if os.name == "nt":   # own process group so the whole tree can be killed
             kw["creationflags"] = kw.get("creationflags", 0) | subprocess.CREATE_NEW_PROCESS_GROUP
         else:
@@ -66,11 +72,13 @@ class StepContext:
         p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                              encoding="utf-8", errors="replace", **kw)
         deadline = time.time() + timeout
+        pending_input = input
         while True:
             try:   # communicate(timeout) keeps draining the pipes, so a chatty build can't fill them and hang
-                out, err = p.communicate(timeout=poll)
+                out, err = p.communicate(input=pending_input, timeout=poll)
                 return subprocess.CompletedProcess(argv, p.returncode, out, err)
             except subprocess.TimeoutExpired:
+                pending_input = None          # stdin was written on the first call; never resend
                 if self.should_stop() or time.time() > deadline:
                     kill_tree(p)
                     if self.should_stop():
@@ -195,6 +203,9 @@ def run(st: store_mod.Store, task: dict, steps: list, lease_s: int = store_mod.D
             except NeedsHuman as h:
                 st.block(tid, ctx.lease, str(h))
                 return {"status": "blocked", "step": name, "reason": str(h)}
+            except Retry as r:
+                st.release(tid, ctx.lease)
+                return {"status": "queued", "step": name, "reason": str(r)}
             except store_mod.LeaseLost:
                 raise
             except Exception as e:  # noqa: BLE001 — every other failure counts an attempt

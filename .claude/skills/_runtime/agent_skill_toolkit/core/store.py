@@ -295,6 +295,18 @@ class Store:
                 self._event(task_id, "unblocked", by=by)
         return bool(n)
 
+    def resolve_blocked(self, task_id: str, status: str = "done", by: str = "", note: str = "") -> bool:
+        """Close a BLOCKED task whose outcome happened elsewhere (e.g. a human approved and the
+        sweeper posted). Only from blocked, only to done/cancelled — never steals a lease."""
+        if status not in ("done", "cancelled"):
+            raise ValueError("status must be done or cancelled")
+        with self._tx():
+            n = self.db.execute("update tasks set status=?, updated=? where id=? and status='blocked'",
+                                (status, time.time(), task_id)).rowcount
+            if n:
+                self._event(task_id, "resolved", status=status, by=by, note=note or None)
+        return bool(n)
+
     def cancel(self, task_id: str, by: str = ""):
         with self._tx():
             n = self.db.execute(

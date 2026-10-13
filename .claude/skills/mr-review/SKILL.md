@@ -103,6 +103,16 @@ Inline comments already posted are not re-posted after a crash.
 
 On an unrecoverable error: `python3 $T/review_queue.py set <job_id> --status failed --note "<why>"`.
 
+## Durable runner (headless, no Orca needed)
+
+`review_flow.py` runs the same job as a checkpointed workflow on the toolkit store:
+`enqueue --project P --iid N` then `work [--once]` (a loop; `reconcile` runs each tick).
+Steps fetch → prepare → review (headless agent via `agent_runner --role review`, killed if its lease
+is lost) → approval → post. A provider limit PAUSES the task until the reset (no attempt used); a
+new MR head re-runs every step after `fetch`; waiting for a human = task `blocked`, continued by
+`reconcile` once `approve`/Telegram decided. State: `taskstore.py show <task>`.
+The agent it starts must only write `review.json` (prompt says so; the hook denies writes headless).
+
 ## Human commands
 
 | Want | Command |

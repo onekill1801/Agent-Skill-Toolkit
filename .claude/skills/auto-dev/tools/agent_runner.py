@@ -352,17 +352,24 @@ def main() -> int:
     ap.add_argument("--timeout", type=int, default=CLI_TIMEOUT)
     ap.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
     ap.add_argument("--dry-run-text", default=None)
+    ap.add_argument("--cwd", default=None, help="run the agent inside this directory")
     args = ap.parse_args()
 
     prompt = args.prompt if args.prompt is not None else sys.stdin.read()
     backend = "custom" if args.cmd_template else args.backend
+
+    def _err(e: AgentRunError) -> int:
+        c = e.classification or {}
+        # kind/resume_at let a calling workflow PAUSE on a provider limit instead of failing
+        print(json.dumps({"error": True, "message": str(e), "kind": c.get("kind"),
+                          "resume_at": c.get("resume_at")}, ensure_ascii=False))
+        return 1
     if args.role:
         try:
-            res = run_role(prompt, args.role, system=args.system, timeout=args.timeout,
+            res = run_role(prompt, args.role, system=args.system, timeout=args.timeout, cwd=args.cwd,
                            avoid=tuple(x for x in args.avoid.split(",") if x))
         except AgentRunError as e:
-            print(json.dumps({"error": True, "message": str(e)}, ensure_ascii=False))
-            return 1
+            return _err(e)
         print(json.dumps({"used": res["used"], "tried": res["tried"]}, ensure_ascii=False), file=sys.stderr)
         sys.stdout.write(res["text"].rstrip("\n") + "\n")
         return 0
@@ -370,10 +377,9 @@ def main() -> int:
         out = run_turn(prompt, system=args.system, backend=backend, model=args.model,
                        cmd_template=args.cmd_template, prompt_via=args.prompt_via,
                        timeout=args.timeout, max_tokens=args.max_tokens,
-                       dry_run_text=args.dry_run_text)
+                       dry_run_text=args.dry_run_text, cwd=args.cwd)
     except AgentRunError as e:
-        print(json.dumps({"error": True, "message": str(e)}, ensure_ascii=False))
-        return 1
+        return _err(e)
     sys.stdout.write(out)
     if not out.endswith("\n"):
         sys.stdout.write("\n")

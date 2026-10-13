@@ -97,6 +97,7 @@ python review_ws.py prepare <job> [--with-merge] | diff <job> [--path P] | check
 python review_post.py validate|render|request-approval <job>    # agent dừng ở đây
 python review_post.py approve|reject <job>                      # CHỈ người (cần TTY), duyệt gắn với đúng nội dung
 python review_rules.py check <job>                              # luật tự đăng (REVIEW_AUTO_POST=off|shadow|auto)
+python review_flow.py enqueue --project P --iid N | work [--once] | reconcile | status   # review BỀN: hết quota → dừng/chạy tiếp, MR đổi commit → review lại
 python review_post.py sweep                                     # [WRITE] đăng review đã duyệt + báo FChat
 ```
 Orca: automation "Auto review MR" = công tắc (precheck `review_queue.py pending`); listener FChat
