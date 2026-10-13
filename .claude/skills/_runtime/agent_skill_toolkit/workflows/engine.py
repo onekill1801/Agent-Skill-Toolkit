@@ -29,6 +29,7 @@ import threading
 import time
 import traceback
 
+from ..core import proc
 from ..core import store as store_mod
 from .execution import handoff, quota
 
@@ -60,30 +61,14 @@ class StepContext:
         return self._lost.is_set()
 
     def run(self, argv: list, timeout: float = 3600, poll: float = 0.5, input: str = None, **kw):
-        """Run a subprocess for this step and KILL it if the lease is lost (pure-Python work can
+        """Run a subprocess for this step and KILL ITS TREE if the lease is lost (pure-Python work can
         only stop cooperatively via should_stop(); builds/tests/agents should go through here).
         Returns CompletedProcess; raises LeaseLost when killed for losing the lease."""
-        import subprocess
-        kw.setdefault("stdin", subprocess.PIPE if input is not None else subprocess.DEVNULL)
-        if os.name == "nt":   # own process group so the whole tree can be killed
-            kw["creationflags"] = kw.get("creationflags", 0) | subprocess.CREATE_NEW_PROCESS_GROUP
-        else:
-            kw.setdefault("start_new_session", True)
-        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                             encoding="utf-8", errors="replace", **kw)
-        deadline = time.time() + timeout
-        pending_input = input
-        while True:
-            try:   # communicate(timeout) keeps draining the pipes, so a chatty build can't fill them and hang
-                out, err = p.communicate(input=pending_input, timeout=poll)
-                return subprocess.CompletedProcess(argv, p.returncode, out, err)
-            except subprocess.TimeoutExpired:
-                pending_input = None          # stdin was written on the first call; never resend
-                if self.should_stop() or time.time() > deadline:
-                    kill_tree(p)
-                    if self.should_stop():
-                        raise store_mod.LeaseLost(f"task {self.task['id']}: lease lost, killed {argv[0]}")
-                    raise subprocess.TimeoutExpired(argv, timeout)
+        try:
+            return proc.run(argv, input=input, timeout=timeout, should_stop=self.should_stop, poll=poll,
+                            cwd=kw.get("cwd"), env=kw.get("env"))
+        except InterruptedError:
+            raise store_mod.LeaseLost(f"task {self.task['id']}: lease lost, killed {argv[0]}")
 
     def handoff(self, **sections):
         return handoff.write(self.task["id"], sections)
@@ -98,30 +83,7 @@ class StepContext:
             raise QuotaExceeded(c["resume_at"], backend, f"{c['limit']}: {output.strip()[-200:]}")
 
 
-def kill_tree(p, wait: float = 10) -> None:
-    """Kill a process AND its descendants (builds and agents spawn children that would keep
-    editing files and keep our pipes open), then reap with a bounded wait."""
-    import signal
-    import subprocess
-    try:
-        if os.name == "nt":
-            subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True, timeout=30)
-        else:
-            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
-    except (OSError, subprocess.SubprocessError):
-        pass
-    try:
-        p.kill()
-    except OSError:
-        pass
-    try:
-        p.communicate(timeout=wait)
-    except subprocess.TimeoutExpired:   # a detached grandchild still holds the pipes: stop reading
-        for f in (p.stdout, p.stderr):
-            try:
-                f and f.close()
-            except OSError:
-                pass
+kill_tree = proc.kill_tree        # re-exported: callers and tests use engine.kill_tree
 
 
 class _Heartbeat:

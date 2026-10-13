@@ -35,11 +35,31 @@ def _max_parallel() -> int:
     return max(1, rc.cfg_int("REVIEW_MAX_PARALLEL", 3))
 
 
+def _flow_task_open(job: dict) -> bool:
+    """A job taken by review_flow ("flow:<task_id>") lives as long as its durable task is open
+    (paused for quota, blocked on a human, running) — its liveness is the store lease, not
+    claimed_at. Reaping it would let the Orca path review the same MR twice (Codex F.4b #2)."""
+    worker = job.get("worker") or ""
+    if not worker.startswith("flow:"):
+        return False
+    try:
+        import runpy
+        from pathlib import Path
+        runpy.run_path(str(Path(__file__).resolve().parents[2] / "_runtime" / "bootstrap.py"))["activate"]()
+        from agent_skill_toolkit.core import store as store_mod
+        with store_mod.Store() as st:
+            return st.get(worker[5:]).get("status") in store_mod.OPEN
+    except Exception:  # noqa: BLE001 — store unreadable: be conservative, do not reap
+        return True
+
+
 def _reap(jobs: list) -> None:
     """Requeue jobs whose worker died (running past the timeout)."""
     limit = rc.cfg_int("REVIEW_JOB_TIMEOUT_MIN", 60) * 60
     for j in jobs:
         if j.get("status") == "running" and rc.now() - j.get("claimed_at", 0) > limit:
+            if _flow_task_open(j):
+                continue
             j["attempts"] = j.get("attempts", 0) + 1
             j["status"] = "failed" if j["attempts"] >= 2 else "queued"
             rc.log_event(j, "reaped", status=j["status"])

@@ -52,6 +52,7 @@ import config  # noqa: E402
 import runpy  # noqa: E402
 
 runpy.run_path(os.path.join(_SKILLS, "_runtime", "bootstrap.py"))["activate"]()
+from agent_skill_toolkit.core import proc as proc_mod  # noqa: E402
 from agent_skill_toolkit.core import winexec  # noqa: E402
 from agent_skill_toolkit.workflows.execution import quota  # noqa: E402
 
@@ -126,6 +127,31 @@ def _resolve_exec(argv: list) -> list:
         raise AgentRunError(str(e), {"kind": "error", "retry_other_backend": True})
 
 
+# Credentials of the systems the TOOLKIT talks to. An agent we start reads untrusted content
+# (MR diffs, chat text), so it does not get them (Codex review F.4b #1 — interim until the
+# isolated executor, design §10.2; the agent CLIs keep their OWN auth: config dirs / API key).
+_SECRET_ENV = ("GITLAB_PRIVATE_TOKEN", "GITLAB_TOKEN", "AZURE_DEVOPS_PAT", "ATASK_PAT_TOKEN",
+               "ATASK_BEARER_TOKEN", "FCHAT_TOKEN", "FCHAT_BEARER_TOKEN", "TELEGRAM_BOT_TOKEN",
+               "TELEGRAM_APPROVAL_BOT_TOKEN", "JENKINS_TOKEN", "JENKINS_API_TOKEN", "DB_PASSWORD",
+               "FORTIVPN_PASSWORD", "KUBECONFIG_PROD")
+_SECRET_RX = None
+
+
+def agent_env(env_extra: dict = None) -> dict:
+    """Environment for an agent subprocess: headless guard on, toolkit service secrets removed."""
+    import re
+    global _SECRET_RX
+    if _SECRET_RX is None:
+        _SECRET_RX = re.compile(r"(TOKEN|_PAT|PASSWORD|PASSWD|SECRET|PRIVATE_KEY|COOKIE|SESSION)", re.I)
+    keep = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"}  # agent's own auth
+    env = {k: v for k, v in os.environ.items()
+           if k in keep or not (k in _SECRET_ENV or _SECRET_RX.search(k))}
+    env.update(env_extra or {})
+    env["TOOLKIT_HEADLESS"] = "1"
+    env["TOOLKIT_AGENT_SANDBOXED"] = "1"     # marker: toolkit tools may refuse writes when set
+    return env
+
+
 def _combine_prompt(system: str | None, prompt: str) -> str:
     """CLI print-mode has no separate system slot → prepend the system framing."""
     if not system:
@@ -168,10 +194,10 @@ def _run_cli(prompt, system, backend, model, cmd_template, prompt_via, timeout,
                                      full_prompt, prompt_via))
     stdin_data = full_prompt if prompt_via == "stdin" else None
     try:
-        env = dict(os.environ, TOOLKIT_HEADLESS="1", **(env_extra or {}))
-        proc = subprocess.run(argv, input=stdin_data, capture_output=True, text=True,
-                              timeout=timeout, encoding="utf-8", errors="replace", cwd=cwd,
-                              env=env)
+        env = agent_env(env_extra)
+        # proc.run kills the whole tree on timeout: a CLI launcher's agent child must not keep
+        # editing files after we gave up (Codex review F.4b #5)
+        proc = proc_mod.run(argv, input=stdin_data, timeout=timeout, cwd=cwd, env=env)
     except FileNotFoundError:
         raise AgentRunError(
             f"CLI '{argv[0]}' not found on PATH. Install it, change backend, or pass "
