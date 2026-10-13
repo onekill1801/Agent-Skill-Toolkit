@@ -623,6 +623,14 @@ class LadderTest(unittest.TestCase):
         self.assertEqual(L.test_case_file({"classname": "x", "file": "FooTest.java"}, changed, tree), "")
         self.assertEqual(L.test_case_file({"classname": "tests.test_calc.T"}, {"tests/test_calc.py"}),
                          "tests/test_calc.py")
+        # Codex F.3 R3: a changed file named like a package prefix is not the (unchanged) test class
+        pkg = {"src/test/java/com/original.java"}
+        self.assertEqual(L.test_case_file({"classname": "com.original.FooTest"}, pkg,
+                                          pkg | {"src/test/java/com/original/FooTest.java"}), "")
+        self.assertEqual(L.test_case_file({"classname": "com.original.FooTest"}, pkg, pkg), "")
+        # python: an unchanged module wins over a changed shorter prefix
+        self.assertEqual(L.test_case_file({"classname": "tests.test_a.T"}, {"tests.py"},
+                                          {"tests.py", "tests/test_a.py"}), "")
 
     def test_report_needs_coverage_from_the_same_suite_run(self):
         """Codex F.3 R2 #3: coverage checkpoint of commit A + suite checkpoint of commit B -> unchecked."""

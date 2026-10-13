@@ -499,11 +499,17 @@ def test_case_file(tc: dict, changed: set, files: set = None) -> str:
         return unique(lambda c: c == f or c.endswith("/" + f) or f.endswith("/" + c))
     cls = re.sub(r"\$.*$", "", tc.get("classname", ""))
     parts = [x for x in cls.split(".") if x]
-    for n in range(len(parts), 0, -1):            # python: tests.test_calc.T -> tests/test_calc.py
-        stem = "/".join(parts[:n])                # java: com.x.FooTest -> .../com/x/FooTest.java
-        hit = unique(lambda c: stem_of(c) == stem or stem_of(c).endswith("/" + stem))
-        if hit:
-            return hit
+    # java-family: the WHOLE qualified class is the path (com.x.FooTest -> .../com/x/FooTest.java).
+    # python only: classname = module + class(es), so drop trailing segments (tests.test_calc.T ->
+    # tests/test_calc.py). The longest stem that matches ANY tree file decides — never fall back to
+    # a shorter one (a package prefix like com/original.java is not the test; Codex F.3 R3).
+    for n in range(len(parts), 0, -1):
+        stem = "/".join(parts[:n])
+        hits = {c for c in pool if stem_of(c) == stem or stem_of(c).endswith("/" + stem)}
+        if n < len(parts):
+            hits = {c for c in hits if c.lower().endswith(".py")}
+        if hits:
+            return unique(lambda c: c in hits)
     return ""
 
 
