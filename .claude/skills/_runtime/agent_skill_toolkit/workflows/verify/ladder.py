@@ -553,8 +553,35 @@ def rung_ac_coverage(ctx, rung: dict, job: dict) -> dict:
             "suite_sha": src.get("sha", ""), "summary": summary}
 
 
+def rung_ratchet(ctx, rung: dict, job: dict) -> dict:
+    """Architecture ratchet (F.10): rules + baseline read from the BASE ref (a branch cannot loosen
+    them); HEAD may not add a violation; the count only goes down. Fixable: the fixer removes the
+    new violation in production code (it may not touch .agent/)."""
+    from agent_skill_toolkit.workflows.refactor import ratchet as R
+    base, repo = job["base"], job["repo"]
+    rules_path = rung.get("rules") or R.RULES_FILE
+    baseline_path = rung.get("baseline") or R.BASELINE_FILE
+    try:
+        rules = R.parse_rules(git(repo, "show", f"{base}:{rules_path}"))
+    except RuntimeError as e:
+        return {"passed": False, "fixable": False, "summary": f"no {rules_path} on {base[:8]}: {e}"}
+    try:
+        baseline = R.parse_baseline(git(repo, "show", f"{base}:{baseline_path}", check=False))
+    except ValueError as e:
+        return {"passed": False, "fixable": False, "summary": str(e)}
+    now = R.violations(repo, rules)
+    cmp = R.compare(baseline, now)
+    summary = f"ratchet {cmp['baseline']} -> {cmp['now']}"
+    if cmp["new"]:
+        summary += " — NEW violations (remove them; the baseline only shrinks):\n" + "\n".join(
+            f"  {k} (+{n})" for k, n in list(cmp["new"].items())[:30])
+    return {"passed": cmp["passed"], "baseline_count": cmp["baseline"], "count": cmp["now"],
+            "by_rule": R.by_rule(now), "new": dict(list(cmp["new"].items())[:50]), "fixed": len(cmp["fixed"]),
+            "summary": summary}
+
+
 RUNGS = {"cmd": rung_cmd, "affected_tests": rung_affected, "cross_review": rung_cross_review,
-         "ac_coverage": rung_ac_coverage}
+         "ac_coverage": rung_ac_coverage, "ratchet": rung_ratchet}
 
 
 # ----------------------------------------------------------------------------- fix loop
