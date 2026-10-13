@@ -92,6 +92,25 @@ CLI_PRESETS = {
 }
 
 
+# READ-ONLY runs (proposal debate, investigations): each backend's own hard switch — never the prompt.
+READONLY_DENY = ["Bash", "PowerShell", "Edit", "MultiEdit", "Write", "NotebookEdit", "WebFetch", "WebSearch",
+                 "Task", "Agent", "KillShell", "BashOutput"]
+
+
+def _read_only_argv(backend: str, argv: list) -> list:
+    if backend == "claude":
+        return argv + ["--disallowedTools", ",".join(READONLY_DENY), "--allowedTools", "Read,Grep,Glob",
+                       "--strict-mcp-config"]
+    if backend == "codex":
+        out = list(argv)
+        if "-s" in out:
+            out[out.index("-s") + 1] = "read-only"
+        else:
+            out[2:2] = ["-s", "read-only"]
+        return out
+    raise AgentRunError(f"backend {backend!r} has no enforceable read-only mode", {"retry_other_backend": True})
+
+
 class AgentRunError(Exception):
     """Unrecoverable error invoking the agent (missing CLI, timeout, refusal, ...)."""
 
@@ -177,7 +196,10 @@ def _build_argv(argv_tmpl: list, model: str, prompt: str, prompt_via: str) -> li
 
 
 def _run_cli(prompt, system, backend, model, cmd_template, prompt_via, timeout,
-             cwd=None, env_extra=None) -> str:
+             cwd=None, env_extra=None, read_only=False) -> str:
+    if read_only and (cmd_template or backend not in ("claude", "codex")):
+        raise AgentRunError(f"backend {backend!r} has no enforceable read-only mode",
+                            {"retry_other_backend": True})
     if cmd_template:
         argv_tmpl = shlex.split(cmd_template)
         default_model = None
@@ -191,8 +213,8 @@ def _run_cli(prompt, system, backend, model, cmd_template, prompt_via, timeout,
         raise AgentRunError(f"unknown CLI backend '{backend}'; pass cmd_template instead.")
 
     full_prompt = _combine_prompt(system, prompt)
-    argv = _resolve_exec(_build_argv(argv_tmpl, model or default_model or "",
-                                     full_prompt, prompt_via))
+    built = _build_argv(argv_tmpl, model or default_model or "", full_prompt, prompt_via)
+    argv = _resolve_exec(_read_only_argv(backend, built) if read_only else built)
     stdin_data = full_prompt if prompt_via == "stdin" else None
     try:
         env = agent_env(env_extra)
@@ -351,7 +373,7 @@ def run_turn(prompt: str, *, system: str = None, backend: str = "claude",
              model: str = None, cmd_template: str = None, prompt_via: str = None,
              timeout: int = CLI_TIMEOUT, max_tokens: int = DEFAULT_MAX_TOKENS,
              dry_run_text: str = None, cwd: str = None, env_extra: dict = None,
-             role: str = "", notes: list = None) -> str:
+             role: str = "", notes: list = None, read_only: bool = False) -> str:
     """Run one headless agent turn; return raw stdout text. Raises AgentRunError.
 
     `dry_run_text` (or backend='dry-run') short-circuits to a canned response so
@@ -363,13 +385,17 @@ def run_turn(prompt: str, *, system: str = None, backend: str = "claude",
         if dry_run_text is None:
             raise AgentRunError("backend 'dry-run' requires dry_run_text.")
         return dry_run_text
+    if read_only and (cmd_template or backend not in ("claude", "codex", "api")):
+        # refused BEFORE any budget is reserved; run_role moves on to the next candidate
+        raise AgentRunError(f"backend {backend!r} has no enforceable read-only mode",
+                            {"retry_other_backend": True})
     eff = _effective_model(backend, model, cmd_template)
     if backend == "api":
         return _charged_turn(backend, eff, role, timeout, notes,
                              lambda m, t: _run_api(prompt, system, m, max_tokens, t))
     return _charged_turn(backend, eff, role, timeout, notes,
                          lambda m, t: _run_cli(prompt, system, backend, m, cmd_template, prompt_via, t,
-                                               cwd=cwd, env_extra=env_extra))
+                                               cwd=cwd, env_extra=env_extra, read_only=read_only))
 
 
 # --------------------------------------------------------------------------- role routing
@@ -446,7 +472,7 @@ def usage_tier() -> str:
 
 
 def run_role(prompt: str, role: str, *, system: str = None, cwd: str = None,
-             timeout: int = CLI_TIMEOUT, avoid: tuple = ()) -> dict:
+             timeout: int = CLI_TIMEOUT, avoid: tuple = (), read_only: bool = False) -> dict:
     """Run one turn for `role` using the first usable candidate. Returns
     {"text", "used": spec, "tried": [...]}; raises AgentRunError if all fail."""
     cfg = _agents_config()
@@ -468,7 +494,7 @@ def run_role(prompt: str, role: str, *, system: str = None, cwd: str = None,
             continue
         try:
             text = run_turn(prompt, system=system, backend=c["backend"], model=c["model"],
-                            timeout=timeout, cwd=cwd, role=role, notes=tried,
+                            timeout=timeout, cwd=cwd, role=role, notes=tried, read_only=read_only,
                             env_extra=_account_env(cfg, c["backend"], c["account"]))
             return {"text": text, "used": spec, "tried": tried}
         except AgentRunError as e:
@@ -505,6 +531,8 @@ def main() -> int:
     ap.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
     ap.add_argument("--dry-run-text", default=None)
     ap.add_argument("--cwd", default=None, help="run the agent inside this directory")
+    ap.add_argument("--read-only", action="store_true",
+                    help="enforce a read-only agent (claude: tools denied; codex: -s read-only; others refused)")
     args = ap.parse_args()
 
     prompt = args.prompt if args.prompt is not None else sys.stdin.read()
@@ -519,7 +547,7 @@ def main() -> int:
     if args.role:
         try:
             res = run_role(prompt, args.role, system=args.system, timeout=args.timeout, cwd=args.cwd,
-                           avoid=tuple(x for x in args.avoid.split(",") if x))
+                           avoid=tuple(x for x in args.avoid.split(",") if x), read_only=args.read_only)
         except AgentRunError as e:
             return _err(e)
         print(json.dumps({"used": res["used"], "tried": res["tried"]}, ensure_ascii=False), file=sys.stderr)
@@ -529,7 +557,7 @@ def main() -> int:
         out = run_turn(prompt, system=args.system, backend=backend, model=args.model,
                        cmd_template=args.cmd_template, prompt_via=args.prompt_via,
                        timeout=args.timeout, max_tokens=args.max_tokens,
-                       dry_run_text=args.dry_run_text, cwd=args.cwd)
+                       dry_run_text=args.dry_run_text, cwd=args.cwd, read_only=args.read_only)
     except AgentRunError as e:
         return _err(e)
     sys.stdout.write(out)

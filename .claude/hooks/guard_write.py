@@ -42,6 +42,9 @@ WRITE_RULES = [
     (r"\b(kubectl|oc)\b(\s+--?\S+(\s+[^-\s]\S*)?)*\s+(apply|delete|patch|edit|scale|rollout|set|replace|exec|"
      r"cordon|drain|rsh|debug|start-build|new-app|process|adm|policy|tag|import-image)\b", "k8s/OpenShift write"),
     (r"\b(curl|Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b[^|]*(PRIVATE-TOKEN|Authorization)", "raw authenticated API call"),
+    # decisions that belong to a human (an agent must never start or accept its own proposal)
+    (tool("proposals") + r"\s+(go|decide)\b", "proposal decision"),
+    (tool("coordinator") + r"\s+(accept|capacity|usage|budget)\b", "coordinator decision / policy"),
 ]
 ALWAYS_DENY = [
     (tool("review_post") + r"\s+(approve|reject)\b", "only a human may approve/reject a review"),

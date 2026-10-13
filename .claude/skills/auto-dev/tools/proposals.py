@@ -28,18 +28,11 @@ from agent_skill_toolkit.workflows.proposal import flow, scan  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "dev-automation", "tools"))
 import probe_common as pc  # noqa: E402,F401  (UTF-8 stdout on Windows)
 
-REJECTED = "proposal_rejected"          # setting: JSON list of candidate refs never to propose again
+REJECTED = "rejected:"            # setting key prefix: one row per rejected candidate ref (never re-proposed)
 
 
 def _ref(repo: str, key: str) -> str:
     return f"scan:{os.path.normcase(os.path.realpath(repo))}:{key}"
-
-
-def _rejected(st) -> set:
-    try:
-        return set(json.loads(st.get_setting(REJECTED) or "[]"))
-    except ValueError:
-        return set()
 
 
 def cmd_scan(repo: str, enqueue: bool, days: int, out: str) -> dict:
@@ -47,17 +40,21 @@ def cmd_scan(repo: str, enqueue: bool, days: int, out: str) -> dict:
     if not os.path.isdir(repo):
         raise ValueError(f"no such repo: {repo}")
     with store_mod.Store() as st:
-        rejected = _rejected(st)
-        findings = [f for f in scan.run(repo, days=days) if _ref(repo, f["key"]) not in rejected]
+        def rejected(f):
+            return any(st.get_setting(REJECTED + _ref(repo, k)) is not None for k in [f["key"], *f.get("aliases", [])])
+        findings = [f for f in scan.run(repo, days=days) if not rejected(f)]
         if enqueue:
             for f in findings:
                 if f["kind"] == "error":
                     continue
+                keys = [REJECTED + _ref(repo, k) for k in [f["key"], *f.get("aliases", [])]]
                 t = gate.submit(st, "schedule", flow.KIND, _ref(repo, f["key"]), title=f["title"][:200],
                                 data={"question": f["title"], "repo": repo, "key": f["key"],
-                                      "evidence": f.get("evidence") or {}, "go": False, "kind_hint": f["kind"]},
-                                priority=8)
-                f["task_id"] = t["id"]
+                                      "aliases": f.get("aliases", []), "evidence": f.get("evidence") or {},
+                                      "go": False, "kind_hint": f["kind"]},
+                                priority=8, unless_settings=keys)   # re-checked atomically with the insert
+                f["task_id"] = t.get("id")
+        findings = [f for f in findings if not enqueue or f.get("task_id") or f["kind"] == "error"]
     md = scan.digest(os.path.basename(repo), findings)
     path = out or paths.state_dir("proposals", f"week-{scan.week_label()}-{os.path.basename(repo)}.md")
     with open(path, "w", encoding="utf-8") as fh:
@@ -95,6 +92,7 @@ def cmd_go(task_id: str) -> dict:
 
 
 def cmd_decide(task_id: str, decision: str, reason: str) -> dict:
+    import hashlib
     if decision not in ("accept", "reject"):
         raise ValueError("decision must be accept or reject")
     if decision == "reject" and not reason.strip():
@@ -106,21 +104,35 @@ def cmd_decide(task_id: str, decision: str, reason: str) -> dict:
         prefix = next((p for p in allowed if err.startswith(p)), None)
         if t["status"] != "blocked" or not prefix:
             raise ValueError(f"{task_id} is not waiting for this decision (status {t['status']})")
-        note = json.dumps({"decision": decision, "reason": reason, "adr": flow.adr_path(task_id)
-                           if decision == "accept" else None}, ensure_ascii=False)
-        ok = st.resolve_blocked(task_id, "done" if decision == "accept" else "cancelled", by="human", note=note,
-                                if_updated=t["updated"], if_error_prefix=prefix)
+        note = json.dumps({"decision": decision, "reason": reason}, ensure_ascii=False)
+        if decision == "reject":
+            d = t["data"]
+            keys = [REJECTED + t["ref"]]
+            if d.get("key"):
+                keys += [REJECTED + _ref(d.get("repo") or "", k) for k in [d["key"], *d.get("aliases", [])]]
+            ok = st.reject_and_remember(task_id, sorted(set(keys)), t["updated"], prefix, note=note)
+            if not ok:
+                raise ValueError(f"{task_id} changed while deciding — look again")
+            return {"task_id": task_id, "decision": "reject"}
+        # accept: the ADR you read must be the one the valid checkpoint describes (Codex F.9 #2)
+        cp = next((c for c in reversed(st.checkpoints(task_id, valid_only=True)) if c["step"] == "adr"), None)
+        if not cp:
+            raise ValueError(f"{task_id} has no valid ADR — it must be regenerated (coordinator.py work)")
+        path = cp["data"].get("path") or ""
+        try:
+            with open(path, encoding="utf-8") as f:
+                body = f.read()
+        except OSError:
+            raise ValueError(f"ADR file {path} is missing — regenerate it")
+        if hashlib.sha256(body.encode("utf-8")).hexdigest() != cp["data"].get("sha256"):
+            raise ValueError(f"ADR file {path} was changed after it was generated — regenerate or restore it")
+        ok = st.resolve_blocked(task_id, "done", by="human", note=json.dumps(
+            {"decision": "accept", "reason": reason, "adr": path, "sha256": cp["data"]["sha256"]}, ensure_ascii=False),
+            if_updated=t["updated"], if_error_prefix=prefix, if_checkpoint_valid=cp["id"])
         if not ok:
             raise ValueError(f"{task_id} changed while deciding — look again")
-        if decision == "reject":
-            rej = _rejected(st)
-            rej.add(t["ref"])
-            st.set_setting(REJECTED, json.dumps(sorted(rej), ensure_ascii=False), by="human")
-    out = {"task_id": task_id, "decision": decision}
-    if decision == "accept":
-        out["adr"] = flow.adr_path(task_id)
-        out["next"] = "copy the ADR into the repo's .agent/decisions/ and open a task (lane vua / lon) for it"
-    return out
+    return {"task_id": task_id, "decision": "accept", "adr": path,
+            "next": "copy the ADR into the repo's .agent/decisions/ and open a task (lane vua / lon) for it"}
 
 
 def cmd_list() -> list:

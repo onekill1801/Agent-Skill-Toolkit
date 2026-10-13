@@ -15,9 +15,13 @@ from agent_skill_toolkit.workflows import engine as E
 AGENT_RUNNER = os.path.join(".claude", "skills", "auto-dev", "tools", "agent_runner.py")   # runtime edge
 
 
-def run(ctx, role: str, prompt: str, cwd: str = "", timeout: int = 900) -> str:
+def run(ctx, role: str, prompt: str, cwd: str = "", timeout: int = 900, read_only: bool = False) -> str:
+    """read_only: the agent's write tools are switched off by the backend itself (agent_runner
+    --read-only); a backend that cannot enforce it is skipped."""
     runner = os.path.join(paths.toolkit_root(), AGENT_RUNNER)
     argv = [sys.executable, runner, "--role", role, "--timeout", str(timeout)]
+    if read_only:
+        argv.append("--read-only")
     if cwd:
         argv += ["--cwd", cwd]
     p = ctx.run(argv, timeout=timeout + 120, input=prompt)       # agent_runner charges the turn

@@ -98,10 +98,10 @@ def sender_allowed(sender_id, allowlist_csv: str, me: str = "") -> bool:
 
 
 def submit(st, source: str, kind: str, ref: str, *, title: str = "", data: dict = None,
-           priority: int = 5, requester_id: str = "", max_attempts: int = 3) -> dict:
+           priority: int = 5, requester_id: str = "", max_attempts: int = 3, unless_settings=()) -> dict:
     """admit() + store.add(); the task records where it came from (shown on the progress board)."""
     who = admit(source, kind)
     intake = {**who, "requester_id": str(requester_id or ""), "at": time.time()}
     task = st.add(kind, ref, title=title, data={**(data or {}), "intake": intake}, priority=priority,
-                  max_attempts=max_attempts)
+                  max_attempts=max_attempts, unless_settings=unless_settings)
     return task

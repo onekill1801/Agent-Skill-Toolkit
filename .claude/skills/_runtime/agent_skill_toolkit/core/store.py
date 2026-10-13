@@ -142,14 +142,20 @@ class Store:
 
     # ------------------------------------------------------------------ tasks
     def add(self, kind: str, ref: str, *, title: str = "", data: dict = None, priority: int = 5,
-            max_attempts: int = 3, resource: str = "", parent: str = "", depends_on=()) -> dict:
+            max_attempts: int = 3, resource: str = "", parent: str = "", depends_on=(),
+            unless_settings=()) -> dict:
         """Create a task, or return the open one with the same (kind, ref).
         resource:   exclusive key (e.g. "repo:<path>@<branch>") - two tasks holding the same key never
                     run at the same time (design 5.2 owner_conflict)
         parent:     id of the request / program this task belongs to (progress board grouping)
-        depends_on: task ids that must be DONE before this one can be claimed"""
+        depends_on: task ids that must be DONE before this one can be claimed
+        unless_settings: setting keys — if ANY exists, nothing is created ({"skipped": key}); checked in
+                    the same transaction (e.g. a candidate rejected by a human is never re-added)"""
         now = time.time()
         with self._tx():
+            for key in unless_settings or ():
+                if self.db.execute("select 1 from settings where key=?", (key,)).fetchone():
+                    return {"skipped": key, "duplicate": False, "id": None}
             cur = self.db.execute(
                 f"select * from tasks where kind=? and ref=? and status in ({','.join('?' * len(OPEN))})",
                 (kind, ref, *OPEN)).fetchone()
@@ -465,6 +471,21 @@ class Store:
             if n:
                 self._event(task_id, "resolved", status=status, by=by, note=note or None)
         return bool(n)
+
+    def reject_and_remember(self, task_id: str, keys: list, if_updated: float, if_error_prefix: str,
+                            note: str = "", by: str = "human") -> bool:
+        """Cancel a blocked task AND record setting keys (e.g. rejected candidate refs) in ONE
+        transaction: no scan can slip the same idea back in between (Codex F.9 #3)."""
+        with self._tx():
+            n = self.db.execute("update tasks set status='cancelled', updated=? where id=? and status='blocked' "
+                                "and updated=? and substr(coalesce(last_error,''), 1, ?)=?",
+                                (time.time(), task_id, if_updated, len(if_error_prefix), if_error_prefix)).rowcount
+            if not n:
+                return False
+            for k in keys:
+                self.db.execute("insert or replace into settings(key, value) values (?, ?)", (k, note or "1"))
+            self._event(task_id, "resolved", status="cancelled", by=by, note=note or None, remembered=keys)
+        return True
 
     def patch_data(self, task_id: str, if_status: tuple = ("blocked", "queued"), **fields) -> bool:
         """Merge fields into a task's data WITHOUT a lease — only while it is not running (a human's

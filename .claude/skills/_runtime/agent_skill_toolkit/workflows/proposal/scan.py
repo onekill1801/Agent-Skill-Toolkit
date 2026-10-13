@@ -33,8 +33,28 @@ FIX_RX = re.compile(r"\b(fix|bug|hotfix|sửa|lỗi|revert|patch)\b", re.I)
 
 
 def _ver(v: str):
-    m = re.match(r"\D*(\d+)(?:\.(\d+))?", str(v or ""))
-    return (int(m.group(1)), int(m.group(2) or 0)) if m else None
+    """("exact", (major, minor)) for a concrete version (2.1.10.RELEASE, ^17.0.2, ~1.2, v18),
+    ("min", (major, minor)) for a lower bound only (>=8.9.0, >16): the range ALLOWS that version,
+    None for anything else (<20, *, x, ||, unresolved ${...}) — never guessed (Codex F.9 #6)."""
+    s = str(v or "").strip()
+    m = re.fullmatch(r"[v=^~]?\s*(\d+)(?:\.(\d+))?(?:[.\-+][\w.\-+]*)?", s)
+    if m:
+        return ("exact", (int(m.group(1)), int(m.group(2) or 0)))
+    m = re.fullmatch(r">=?\s*v?(\d+)(?:\.(\d+))?(?:\.[\w.\-]*)?", s)
+    if m:
+        return ("min", (int(m.group(1)), int(m.group(2) or 0)))
+    return None
+
+
+def _resolve(v: str, props: dict) -> str:
+    """Maven ${prop} references, a few levels deep; unresolved -> '' (reported as unknown, not guessed)."""
+    for _ in range(5):
+        if "${" not in (v or ""):
+            return v or ""
+        v = re.sub(r"\$\{([^}]+)\}", lambda m: props.get(m.group(1), m.group(0)), v)
+        if all(f"${{{k}}}" not in v for k in props) and "${" in v:
+            return ""
+    return "" if "${" in (v or "") else v
 
 
 # ----------------------------------------------------------------------------- deps
@@ -46,19 +66,21 @@ def _pom_versions(path: str) -> dict:
         return {}
     ns = {"m": root.tag.split("}")[0].strip("{")} if root.tag.startswith("{") else {}
     q = (lambda t: f"m:{t}") if ns else (lambda t: t)
-    out = {}
+    raw = {}
     props = root.find(q("properties"), ns)
     if props is not None:
         for p in props:
-            tag = p.tag.split("}")[-1]
-            if tag.endswith(".version") and (p.text or "").strip():
-                out[tag[:-len(".version")]] = p.text.strip()
+            raw[p.tag.split("}")[-1]] = (p.text or "").strip()
+    out = {}
+    for tag, val in raw.items():
+        if tag.endswith(".version") and val:
+            out[tag[:-len(".version")]] = _resolve(val, raw)
     parent = root.find(q("parent"), ns)
     if parent is not None:
         art = (parent.findtext(q("artifactId"), "", ns) or "").strip()
-        ver = (parent.findtext(q("version"), "", ns) or "").strip()
-        if "spring-boot" in art and ver:
-            out.setdefault("spring-boot", ver)
+        ver = _resolve((parent.findtext(q("version"), "", ns) or "").strip(), raw)
+        if art in ("spring-boot-starter-parent", "spring-boot-dependencies", "spring-boot-parent") and ver:
+            out["spring-boot"] = ver                # the parent is what is really built with
     return out
 
 
@@ -95,14 +117,16 @@ def deps(repo: str) -> list:
     for name, (ver, src) in sorted(found.items()):
         key = "jhipster" if name.startswith("jhipster") else name
         rule = EOL.get(key)
-        have = _ver(ver)
-        if not rule or not have or have >= rule[0]:
+        parsed = _ver(ver)
+        if not rule or not parsed or parsed[1] >= rule[0]:
             continue
+        kind, have = parsed
         gap = (rule[0][0] - have[0]) * 10 + max(0, rule[0][1] - have[1])
-        out.append({"key": f"dep:{key}", "kind": "upgrade", "score": 50 + min(40, gap * 5),
-                    "title": f"Nâng cấp {key} {ver} (dưới {rule[0][0]}.{rule[0][1]})",
-                    "evidence": {"file": src, "property": name, "version": ver, "why": rule[1],
-                                 "table": "static 2026-10 [Unverified — verify upstream]"}})
+        what = f"{key} {ver}" if kind == "exact" else f"{key} (khai báo {ver} — cho phép bản cũ)"
+        out.append({"key": f"dep:{key}", "kind": "upgrade", "score": (50 if kind == "exact" else 30) + min(40, gap * 5),
+                    "title": f"Nâng cấp {what} (dưới {rule[0][0]}.{rule[0][1]})",
+                    "evidence": {"file": src, "property": name, "version": ver, "version_kind": kind,
+                                 "why": rule[1], "table": "static 2026-10 [Unverified — verify upstream]"}})
     return out
 
 
@@ -131,15 +155,28 @@ def hotspots(repo: str, days: int = 90, top: int = 5, min_changes: int = 5) -> l
         changes[f] = changes.get(f, 0) + 1
         if FIX_RX.search(subject):
             fixes[f] = fixes.get(f, 0) + 1
-    ranked = sorted(changes, key=lambda f: (changes[f] + 2 * fixes.get(f, 0)), reverse=True)
+    # qualify FIRST, then rank (Codex F.9 #7)
+    ranked = sorted((f for f in changes if changes[f] >= min_changes),
+                    key=lambda f: (changes[f] + 2 * fixes.get(f, 0)), reverse=True)
     out = []
     for f in ranked[:top]:
-        if changes[f] < min_changes:
-            break
         out.append({"key": f"hotspot:{f}", "kind": "refactor", "score": min(90, 20 + changes[f] + 3 * fixes.get(f, 0)),
                     "title": f"Điểm nóng: {f} ({changes[f]} lần sửa, {fixes.get(f, 0)} lần fix trong {days} ngày)",
-                    "evidence": {"file": f, "changes": changes[f], "fix_commits": fixes.get(f, 0), "days": days}})
+                    "evidence": {"file": f, "changes": changes[f], "fix_commits": fixes.get(f, 0), "days": days},
+                    "aliases": [f"hotspot:{p}" for p in file_history(repo, f)]})
     return out
+
+
+def file_history(repo: str, path: str, cap: int = 20) -> list:
+    """Every path this file had (git log --follow): a rejected hotspot stays rejected after a rename
+    (Codex F.9 #4)."""
+    try:
+        p = subprocess.run(["git", "-C", repo, "log", "--follow", "--name-only", "--format=", "--", path],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return [path]
+    names = [x.strip() for x in p.stdout.splitlines() if x.strip()] if p.returncode == 0 else []
+    return list(dict.fromkeys([path, *names]))[:cap]
 
 
 # ----------------------------------------------------------------------------- run / digest
@@ -162,17 +199,23 @@ def week_label(now: float = None) -> str:
     return f"{y}-W{w:02d}"
 
 
+def _inert(text, limit: int) -> str:
+    """Repo-derived text in the digest: one line, markdown / links neutralised (Codex F.9 #8)."""
+    from agent_skill_toolkit.workflows.intake import lanes
+    return lanes.literal(" ".join(str(text).split()))[:limit]
+
+
 def digest(repo_name: str, findings: list, week: str = "") -> str:
     week = week or week_label()
-    lines = [f"# Đề xuất tuần {week} — {repo_name}", "",
+    lines = [f"# Đề xuất tuần {week} — {_inert(repo_name, 80)}", "",
              "Chỉ là ĐỀ XUẤT: không việc nào tự chạy. Bấm [Làm] = `proposals.py go <task>`; [Bỏ] = "
              "`proposals.py decide <task> reject --reason ...` (không đề xuất lại).", ""]
     if not findings:
         lines.append("_Không có gì đáng đề xuất tuần này._")
     for i, f in enumerate(findings, 1):
         ev = ", ".join(f"{k}={v}" for k, v in (f.get("evidence") or {}).items())
-        lines.append(f"{i}. **{f['title']}** (điểm {f['score']}) — `{f['key']}`")
-        lines.append(f"   - bằng chứng: {ev[:300]}")
+        lines.append(f"{i}. **{_inert(f['title'], 200)}** (điểm {int(f['score'])}) — {_inert(f['key'], 200)}")
+        lines.append(f"   - bằng chứng: {_inert(ev, 300)}")
         if f.get("task_id"):
             lines.append(f"   - task: `{f['task_id']}`")
     return "\n".join(lines) + "\n"
