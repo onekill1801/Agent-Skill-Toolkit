@@ -251,7 +251,7 @@ class LadderTest(unittest.TestCase):
                 open(full, "w", encoding="utf-8").write("x\n")
                 git(self.repo, "add", "-A")
                 git(self.repo, "commit", "-qm", f"touch {path}")
-                extra = L.spec_launchers({"rungs": [{"run": ["checks/run.cmd"]}]})
+                extra = L.spec_launchers({"rungs": [{"run": ["checks/run.cmd"], "protects": []}]})
                 self.assertTrue(L.protected_changes(self.repo, before, "HEAD", extra), path)
         before = git(self.repo, "rev-parse", "HEAD")
         open(os.path.join(self.repo, "src", "calc.py"), "a").write("# prod change\n")
@@ -279,11 +279,22 @@ class LadderTest(unittest.TestCase):
         self.assertTrue(hits(pats, "tools/check.py"))                           # normalized like git reports it
         self.assertTrue(hits(pats, "ci/x.sh"))
         self.assertEqual(L.spec_launchers({"rungs": [{"name": "r", "run": ["python", "-m", "unittest"],
-                                                      "protects": []}]}), [])   # an explicit "nothing"
-        pats = L.spec_launchers({"rungs": [{"name": "c", "run": ["mvnw.cmd", "-q", "package"]}]})
-        self.assertTrue(hits(pats, "mvnw.cmd"))                                 # non-interpreter launcher
+                                                      "protects": []}]}),
+                         ["(^|/)python$"])          # an explicit "nothing" + the bare launcher (harmless if absent)
+        pats = L.spec_launchers({"rungs": [{"name": "c", "run": ["mvnw.cmd", "-q", "package"], "protects": []}]})
+        self.assertTrue(hits(pats, "mvnw.cmd"))                                 # the repo launcher
         with self.assertRaises(ValueError):
             L.spec_launchers({"rungs": [{"name": "r", "run": ["python", "x.py"], "protects": "x.py"}]})
+        # Codex F.2 R6: no list of interpreter names to sidestep — EVERY command rung declares
+        for argv in (["python3.13t", "checks/run.py"], ["verify"], ["mvnw.cmd", "test"], ["./gradlew", "check"]):
+            with self.assertRaises(ValueError, msg=argv):
+                L.spec_launchers({"rungs": [{"name": "r", "run": argv}]})
+        pats = L.spec_launchers({"rungs": [{"name": "r", "run": ["verify"], "protects": []}]})
+        self.assertTrue(hits(pats, "verify"))                                   # bare launcher resolved in repo
+        for root in ("./", ".", "ci/..", "../outside"):
+            with self.assertRaises(ValueError, msg=root):
+                L.spec_launchers({"rungs": [{"name": "r", "run": ["x"], "protects": [root]}]})
+        self.assertEqual(L.spec_launchers({"rungs": [{"name": "rv", "kind": "cross_review"}]}), [])
 
     def test_protection_fails_closed_on_git_errors(self):
         """Codex F.2 R3 NEW HIGH."""
@@ -293,8 +304,9 @@ class LadderTest(unittest.TestCase):
 
     def test_covered_by_requires_a_declared_full_suite(self):
         """Codex F.2 R3 MED: `compile -DskipTests` must not count as coverage."""
-        base = "verify:\n  ladder:\n    t:\n      kind: affected_tests\n      covered_by: {cov}\n      run: x\n" \
-               "    compile:\n      run: mvn -DskipTests package\n    suite:\n      run: mvn test\n{flag}"
+        base = ("verify:\n  ladder:\n    t:\n      kind: affected_tests\n      covered_by: {cov}\n      run: x\n"
+                "      protects: []\n    compile:\n      run: mvn -DskipTests package\n      protects: []\n"
+                "    suite:\n      run: mvn test\n      protects: []\n{flag}")
         for cov, flag, ok in (("compile", "", False), ("suite", "", False), ("suite", "      full_suite: true\n", True)):
             f = os.path.join(self.tmp, f"c_{cov}_{ok}.yml")
             open(f, "w").write(base.format(cov=cov, flag=flag))
