@@ -168,6 +168,7 @@ class TurnBudgetTest(Base):
 
         class Drip(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
+                Drip.posts = getattr(Drip, "posts", 0) + 1
                 self.rfile.read(int(self.headers["content-length"]))
                 self.send_response(200)
                 self.send_header("content-length", "100")
@@ -188,11 +189,44 @@ class TurnBudgetTest(Base):
             t0 = time.monotonic()
             with self.assertRaises(self.ar.AgentRunError) as e:
                 self.ar._post_with_deadline(f"http://127.0.0.1:{srv.server_address[1]}/v1/messages", b"{}",
-                                            {"content-type": "application/json"}, 0.8)
+                                            {"content-type": "application/json"}, 2.0)
             took = time.monotonic() - t0
             self.assertIn("deadline", str(e.exception))
-            self.assertLess(took, 2.5)
+            self.assertLess(took, 4)
             self.assertTrue(dropped.wait(5))
+            # Codex F.11 R4: a deadline that expires before the request goes out -> nothing is sent
+            got_before = Drip.posts if hasattr(Drip, "posts") else 0
+            with self.assertRaises(self.ar.AgentRunError):
+                self.ar._post_with_deadline(f"http://127.0.0.1:{srv.server_address[1]}/v1/messages", b"{}",
+                                            {"content-type": "application/json"}, 0.02)
+            time.sleep(1.0)
+            self.assertEqual(getattr(Drip, "posts", 0), got_before)
+        finally:
+            srv.shutdown()
+
+    def test_api_worker_round_trip(self):
+        import http.server
+        import threading
+
+        class Ok(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                n = int(self.headers["content-length"])
+                body = self.rfile.read(n)
+                out = json.dumps({"echo": body.decode(), "key": self.headers.get("x-api-key")}).encode()
+                self.send_response(200)
+                self.send_header("content-length", str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Ok)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            status, headers, body = self.ar._post_with_deadline(
+                f"http://127.0.0.1:{srv.server_address[1]}/v1/messages", b'{"q": 1}', {"x-api-key": "k1"}, 20)
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body), {"echo": '{"q": 1}', "key": "k1"})
         finally:
             srv.shutdown()
 

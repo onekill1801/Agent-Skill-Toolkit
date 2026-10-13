@@ -215,53 +215,63 @@ def _run_cli(prompt, system, backend, model, cmd_template, prompt_via, timeout,
     return out
 
 
-def _post_with_deadline(url: str, body: bytes, headers: dict, seconds: float) -> tuple:
-    """POST with an OVERALL deadline that really stops the request: a watchdog closes the socket at
-    the deadline, which aborts a blocked connect / a slowly dripping response (urlopen's timeout is
-    per socket operation only — Codex F.11 R2/R3). Returns (status, headers, body)."""
+def _api_post_child() -> int:
+    """`agent_runner.py --api-post`: ONE HTTP POST read from stdin ({url, headers, body}), answer as
+    JSON on stdout. Runs in its own process so the parent can kill it at any stage (DNS, TCP, TLS,
+    response) — nothing is sent after the deadline (Codex F.11 R3/R4)."""
+    import base64
     import http.client
-    import socket
     import ssl
-    import threading
-    u = urllib.parse.urlsplit(url)
+    req_in = json.loads(sys.stdin.read())
+    deadline = float(req_in["deadline"])               # wall clock, set by the parent
+    u = urllib.parse.urlsplit(req_in["url"])
+    left = deadline - time.time()
+    if left <= 0:
+        print(json.dumps({"error": "deadline passed before connecting", "late": True}))
+        return 0
     if u.scheme == "https":
-        conn = http.client.HTTPSConnection(u.hostname, u.port, timeout=seconds, context=ssl.create_default_context())
+        conn = http.client.HTTPSConnection(u.hostname, u.port, timeout=left, context=ssl.create_default_context())
     else:
-        conn = http.client.HTTPConnection(u.hostname, u.port, timeout=seconds)
-    expired, held = threading.Event(), {}
-
-    def abort():
-        expired.set()
-        # the socket captured at connect time: http.client may drop conn.sock once the response
-        # starts (HTTP/1.0, Connection: close) while the response still reads from it
-        for sock in (held.get("sock"), conn.sock):
-            try:
-                if sock:
-                    sock.shutdown(socket.SHUT_RDWR)
-                    sock.close()
-            except OSError:
-                pass
-        conn.close()
-    dog = threading.Timer(seconds, abort)
-    dog.daemon = True
-    dog.start()
+        conn = http.client.HTTPConnection(u.hostname, u.port, timeout=left)
     try:
+        conn.connect()                                  # DNS + TCP + TLS first ...
+        if time.time() >= deadline:                     # ... and nothing is SENT once the deadline passed
+            print(json.dumps({"error": "deadline passed while connecting", "late": True}))
+            return 0
         path = (u.path or "/") + (f"?{u.query}" if u.query else "")
-        conn.connect()
-        held["sock"] = conn.sock
-        conn.request("POST", path, body=body, headers=headers)
+        conn.request("POST", path, body=base64.b64decode(req_in["body"]), headers=req_in["headers"])
         resp = conn.getresponse()
-        data = resp.read()
-        if expired.is_set():                       # read returned (short) because we cut it
-            raise OSError("cancelled")
-        return resp.status, {k.lower(): v for k, v in resp.getheaders()}, data
+        status, headers, raw = resp.status, {k.lower(): v for k, v in resp.getheaders()}, resp.read()
     except (OSError, http.client.HTTPException) as e:
-        if expired.is_set():
-            raise AgentRunError(f"API turn exceeded its {seconds:.0f}s deadline (cancelled)")
-        raise AgentRunError(f"network error calling Claude API: {e}")
+        print(json.dumps({"error": str(e)}))
+        return 0
     finally:
-        dog.cancel()
         conn.close()
+    print(json.dumps({"status": status, "headers": headers, "body": base64.b64encode(raw).decode("ascii")}))
+    return 0
+
+
+def _post_with_deadline(url: str, body: bytes, headers: dict, seconds: float) -> tuple:
+    """POST with an OVERALL deadline that really stops it: the request runs in a child process that
+    proc.run kills (whole tree) at the monotonic deadline — before or during DNS / connect / TLS /
+    send / response. Returns (status, headers, body). The API key travels on stdin, never argv."""
+    import base64
+    payload = json.dumps({"url": url, "headers": headers, "body": base64.b64encode(body).decode("ascii"),
+                          "deadline": time.time() + seconds})
+    try:
+        p = proc_mod.run([sys.executable, os.path.abspath(__file__), "--api-post"], input=payload,
+                         timeout=seconds, env=agent_env())
+    except subprocess.TimeoutExpired:
+        raise AgentRunError(f"API turn exceeded its {seconds:.0f}s deadline (cancelled)")
+    try:
+        out = json.loads((p.stdout or "").strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        raise AgentRunError(f"API worker failed: {(p.stderr or p.stdout or '')[-300:]}")
+    if out.get("late"):
+        raise AgentRunError(f"API turn exceeded its {seconds:.0f}s deadline ({out['error']}; nothing sent)")
+    if out.get("error"):
+        raise AgentRunError(f"network error calling Claude API: {out['error']}")
+    return int(out["status"]), out.get("headers") or {}, base64.b64decode(out["body"])
 
 
 def _run_api(prompt, system, model, max_tokens, timeout) -> str:
@@ -479,6 +489,8 @@ def run_role(prompt: str, role: str, *, system: str = None, cwd: str = None,
 
 
 def main() -> int:
+    if sys.argv[1:] == ["--api-post"]:
+        return _api_post_child()
     ap = argparse.ArgumentParser(description="Run one headless agent turn, print raw text.")
     ap.add_argument("--prompt", default=None, help="prompt text (else read from stdin)")
     ap.add_argument("--system", default=None)
