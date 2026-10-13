@@ -39,7 +39,8 @@ _SKILLS = os.path.dirname(os.path.dirname(_HERE))
 sys.path.insert(0, os.path.join(_SKILLS, "fork-terminal", "tools"))
 sys.path.insert(0, _HERE)
 import agent_parser  # noqa: E402
-import agent_runner  # noqa: E402
+import agent_runner  # noqa: E402  (also activates the runtime package)
+from agent_skill_toolkit.workflows.intake import lanes  # noqa: E402
 
 # --- Tín hiệu mơ hồ theo nhóm (EN + VI). Mỗi rule: nếu khớp -> sinh câu hỏi nhóm đó. -----------
 
@@ -320,6 +321,22 @@ def cmd_brief(args) -> dict:
     }
 
 
+def cmd_bundle(args) -> dict:
+    """Gom MỌI thứ cần người vào một lần hỏi (design §4.1): câu chặn, giả định, AC nháp."""
+    if args.analysis_file:
+        with open(args.analysis_file, encoding="utf-8") as f:
+            analysis = json.load(f)
+    else:
+        analysis = cmd_analyze(args)
+    ac = list(args.ac or [])
+    if args.ac_file:
+        with open(args.ac_file, encoding="utf-8") as f:
+            ac += [ln.strip("-• 	") for ln in f.read().splitlines() if ln.strip()]
+    out = lanes.bundle(args.title or "", analysis.get("questions") or [], args.assume, ac, args.lane)
+    out["verdict"] = analysis.get("verdict")
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Làm rõ yêu cầu mơ hồ ở Intake (trước Plan).")
     sub = ap.add_subparsers(dest="action", required=True)
@@ -343,9 +360,27 @@ def main() -> int:
     b.add_argument("--answers-file", default=None, help="JSON câu trả lời (xem docstring)")
     b.add_argument("--out", default=None, help="ghi brief ra file (vd temp/runs/<id>_brief.md)")
 
+    c = sub.add_parser("bundle", help="MỘT tin nhắn cho người: câu hỏi chặn + giả định + AC nháp (design §4.1)")
+    c.add_argument("--title", default="")
+    c.add_argument("--analysis-file", default=None, help="JSON output của `analyze` (bỏ = tự chạy analyze)")
+    c.add_argument("--type", default=None)
+    c.add_argument("--desc", default=None)
+    c.add_argument("--desc-file", default=None)
+    c.add_argument("--context-file", default=None)
+    c.add_argument("--backend", default=None)
+    c.add_argument("--model", default=None)
+    c.add_argument("--dry-run-text", default=None)
+    c.add_argument("--ac", action="append", default=[], help="một AC nháp (lặp lại được)")
+    c.add_argument("--ac-file", default=None, help="mỗi dòng một AC (vd ac_seeds của context_pack)")
+    c.add_argument("--assume", action="append", default=[], help="giả định thêm")
+    c.add_argument("--lane", default="")
+
     args = ap.parse_args()
     try:
-        out = cmd_analyze(args) if args.action == "analyze" else cmd_brief(args)
+        if args.action == "bundle":
+            out = cmd_bundle(args)
+        else:
+            out = cmd_analyze(args) if args.action == "analyze" else cmd_brief(args)
     except (ValueError, OSError, json.JSONDecodeError) as e:
         out = {"error": True, "message": str(e)}
     print(json.dumps(out, ensure_ascii=False, indent=2))
