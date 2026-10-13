@@ -57,7 +57,7 @@ Ký hiệu: ✅ xong + Codex đồng thuận · 🔁 đã code, đang review/s�
 | F.8 | Thang kiểm mở rộng: deploy dev, health pod, smoke UI, e2e, bench | ⛔ | | | **cần `environments.dev` trong `projects.json`** |
 | F.9 | Làn Đề xuất (ADR + debate) + quét chủ động hằng tuần | ⬜ | | | |
 | F.10 | Làn Lớn (refactor: khảo sát, lưới an toàn, bánh cóc, lát cắt) | ⬜ | | | |
-| F.11 | Điều tiết theo mức dùng (80% / 95%), model theo bước, ngân sách cứng | ⬜ | | | |
+| F.11 | Điều tiết theo mức dùng (80% / 95%), model theo bước, ngân sách cứng | ✅ | `b26077a` → `0a23507` → `a989e1d` → `b8159f7` → `d59e5fe` | GO (vòng 5) | mức dùng do bạn/script khai (`coordinator.py usage PCT [--resets-at]`, hết hạn 6 h — toolkit không tự đọc được % subscription); ≥80%: dừng làn Đề xuất + quét tuần, opus→sonnet, vai nhẹ→haiku; ≥95%: chỉ review_mr + làn Nhỏ; 100%: không nhận việc, từ chối lượt agent tới reset. Ngân sách giữ chỗ **theo từng lượt agent** (atomic, tính trường hợp xấu nhất): task (lượt/giây) → chặn; trần lượt/ngày → dừng tới 0h; lượt API chạy trong tiến trình con bị giết đúng hạn |
 | F.12 | `code_context.py` (CodeGraph mặc định, grep dự phòng) cho grounding / fix_loop | 🟡 | `166bcf7` | | đã có `cg.py` cho review MR |
 
 ## Thông tin đang chờ người dùng
@@ -104,3 +104,8 @@ Ký hiệu: ✅ xong + Codex đồng thuận · 🔁 đã code, đang review/s�
 | 2026-10-13 | F.7 (`80b230b`) | 2 | **NO-GO**: FIXED 4/7; còn backfill khoá repo, chính sách capacity chung, accept chưa atomic — sửa ở `ad62576` |
 | 2026-10-13 | F.7 (`ad62576`) | 3 | **NO-GO**: accept vẫn dùng checkpoint đã bị vô hiệu — sửa ở `7c661e7` |
 | 2026-10-13 | F.7 (`7c661e7`) | 4 | **GO** |
+| 2026-10-13 | F.11 (`b26077a`) | 1 | **NO-GO**: 2 HIGH (ngân sách kiểm theo bước, không giữ chỗ → vượt trần; nhiều lối gọi agent không bị tính) + 5 MED (lượt bị ngắt không tính, chặn cả bước không dùng agent, 100% không dừng, policy hỏng = mở, đổi model sót lối) + LOW DST — thiết kế lại ở `0a23507` |
+| 2026-10-13 | F.11 (`0a23507`) | 2 | **NO-GO**: FIXED 6/8; còn làm tròn timeout lên 1 s, API không có hạn chót tổng, mất kiểu QuotaExceeded qua role, NaN — sửa ở `a989e1d` |
+| 2026-10-14 | F.11 (`a989e1d`) | 3 | **NO-GO**: API chỉ thôi chờ chứ không huỷ; `proc.run` chạy lố 1 nhịp poll — sửa ở `b8159f7` |
+| 2026-10-14 | F.11 (`b8159f7`) | 4 | **NO-GO**: watchdog không huỷ được DNS/kết nối → POST sau hạn — sửa ở `d59e5fe` (tiến trình con) |
+| 2026-10-14 | F.11 (`d59e5fe`) | 5 | **GO** (khe hở kiểm-rồi-gửi chấp nhận được cho kiểm soát ngân sách) |
