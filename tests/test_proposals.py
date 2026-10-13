@@ -38,6 +38,10 @@ class Base(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="prop-")
         mock.patch.dict(os.environ, {"TOOLKIT_STORE": os.path.join(self.tmp, "t.db"), "TOOLKIT_STATE_DIR": self.tmp,
                                      "WORK_DIR": self.tmp, "TOOLKIT_MAX_PARALLEL": "0"}).start()
+        # a human at a terminal (core.human.require) — the decisions under test are human ones
+        mock.patch("agent_skill_toolkit.core.human.isatty", return_value=True).start()
+        for k in ("TOOLKIT_HEADLESS", "TOOLKIT_AGENT_SANDBOXED"):
+            os.environ.pop(k, None)
         self.repo = os.path.join(self.tmp, "repo")
         os.makedirs(os.path.join(self.repo, "src"))
         with open(os.path.join(self.repo, "pom.xml"), "w") as f:

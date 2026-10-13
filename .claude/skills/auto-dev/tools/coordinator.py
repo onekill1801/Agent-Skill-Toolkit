@@ -26,6 +26,7 @@ import sys
 from pathlib import Path
 
 runpy.run_path(str(Path(__file__).resolve().parents[2] / "_runtime" / "bootstrap.py"))["activate"]()
+from agent_skill_toolkit.core import human  # noqa: E402
 from agent_skill_toolkit.core import store as store_mod  # noqa: E402
 from agent_skill_toolkit.workflows import coordinator as C  # noqa: E402
 from agent_skill_toolkit.workflows.execution import usage as usage_mod  # noqa: E402
@@ -62,6 +63,7 @@ def load_registry(kinds: list = None) -> tuple:
 
 
 def accept(task_id: str, lane: str = "") -> dict:
+    human.require("accept an aTask proposal")
     with store_mod.Store() as st:
         t = st.get(task_id)
         if not t or t["kind"] != atask_flow.KIND:

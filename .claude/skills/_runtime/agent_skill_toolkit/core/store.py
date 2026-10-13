@@ -151,32 +151,64 @@ class Store:
         depends_on: task ids that must be DONE before this one can be claimed
         unless_settings: setting keys — if ANY exists, nothing is created ({"skipped": key}); checked in
                     the same transaction (e.g. a candidate rejected by a human is never re-added)"""
-        now = time.time()
         with self._tx():
-            for key in unless_settings or ():
-                if self.db.execute("select 1 from settings where key=?", (key,)).fetchone():
-                    return {"skipped": key, "duplicate": False, "id": None}
-            cur = self.db.execute(
-                f"select * from tasks where kind=? and ref=? and status in ({','.join('?' * len(OPEN))})",
-                (kind, ref, *OPEN)).fetchone()
-            if cur:
-                return {**_row(cur), "duplicate": True}
-            deps = [d for d in dict.fromkeys(depends_on or ()) if d]
-            for d in deps:
-                if not self.db.execute("select 1 from tasks where id=?", (d,)).fetchone():
-                    raise ValueError(f"depends_on: no task {d}")
-            if parent and not self.db.execute("select 1 from tasks where id=?", (parent,)).fetchone():
-                raise ValueError(f"parent: no task {parent}")
-            tid = uuid.uuid4().hex[:12]
-            self.db.execute("insert into tasks(id, kind, ref, title, status, priority, max_attempts, data, "
-                            "created, updated, resource, parent) values (?,?,?,?,?,?,?,?,?,?,?,?)",
-                            (tid, kind, ref, title, "queued", priority, max_attempts,
-                             json.dumps(data or {}, ensure_ascii=False), now, now, resource or None,
-                             parent or None))
-            for d in deps:
-                self.db.execute("insert into deps(task_id, depends_on) values (?,?)", (tid, d))
-            self._event(tid, "added", task_kind=kind, ref=ref, depends_on=deps or None)
-        return {**self.get(tid), "duplicate": False}
+            out = self._add_locked(kind, ref, title=title, data=data, priority=priority, max_attempts=max_attempts,
+                                   resource=resource, parent=parent, depends_on=depends_on,
+                                   unless_settings=unless_settings)
+        return out if out.get("skipped") or out["duplicate"] else {**self.get(out["id"]), "duplicate": False}
+
+    def _add_locked(self, kind, ref, *, title="", data=None, priority=5, max_attempts=3, resource="", parent="",
+                    depends_on=(), unless_settings=()) -> dict:
+        now = time.time()
+        for key in unless_settings or ():
+            if self.db.execute("select 1 from settings where key=?", (key,)).fetchone():
+                return {"skipped": key, "duplicate": False, "id": None}
+        cur = self.db.execute(
+            f"select * from tasks where kind=? and ref=? and status in ({','.join('?' * len(OPEN))})",
+            (kind, ref, *OPEN)).fetchone()
+        if cur:
+            return {**_row(cur), "duplicate": True}
+        deps = [d for d in dict.fromkeys(depends_on or ()) if d]
+        for d in deps:
+            if not self.db.execute("select 1 from tasks where id=?", (d,)).fetchone():
+                raise ValueError(f"depends_on: no task {d}")
+        if parent and not self.db.execute("select 1 from tasks where id=?", (parent,)).fetchone():
+            raise ValueError(f"parent: no task {parent}")
+        tid = uuid.uuid4().hex[:12]
+        self.db.execute("insert into tasks(id, kind, ref, title, status, priority, max_attempts, data, "
+                        "created, updated, resource, parent) values (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (tid, kind, ref, title, "queued", priority, max_attempts,
+                         json.dumps(data or {}, ensure_ascii=False), now, now, resource or None,
+                         parent or None))
+        for d in deps:
+            self.db.execute("insert into deps(task_id, depends_on) values (?,?)", (tid, d))
+        self._event(tid, "added", task_kind=kind, ref=ref, depends_on=deps or None)
+        return {"id": tid, "duplicate": False}
+
+    def add_graph(self, nodes: list, guard=None) -> dict:
+        """Create several tasks in ONE transaction (a plan is never half-created — Codex F.10b #8).
+        nodes: [{"key", "kind", "ref", ...add() kwargs..., "parent_key"?, "depends_keys"?: [...]}] in order;
+        keys reference EARLIER nodes. guard(db) -> error text runs first inside the transaction (e.g. "an
+        identical program is still running"). Returns {"tasks": {key: id}} or {"duplicate": id} when the
+        FIRST node already exists open (nothing else is created)."""
+        ids = {}
+        with self._tx():
+            if guard:
+                why = guard(self.db)
+                if why:
+                    raise ValueError(why)
+            for i, n in enumerate(nodes):
+                n = dict(n)
+                key = n.pop("key")
+                parent = ids.get(n.pop("parent_key", None)) or n.pop("parent", "")
+                deps = [ids[k] for k in n.pop("depends_keys", [])] + list(n.pop("depends_on", []))
+                out = self._add_locked(n.pop("kind"), n.pop("ref"), parent=parent, depends_on=deps, **n)
+                if out["duplicate"]:
+                    if i == 0:
+                        return {"duplicate": out["id"]}
+                    raise ValueError(f"task {key} already exists open ({out['id']})")
+                ids[key] = out["id"]
+        return {"tasks": ids}
 
     def get(self, task_id: str) -> dict:
         return _row(self.db.execute("select * from tasks where id=?", (task_id,)).fetchone())

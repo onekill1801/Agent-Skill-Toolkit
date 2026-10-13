@@ -35,6 +35,9 @@ SPEC = textwrap.dedent(f"""
             - -c
             - "import pathlib, sys; sys.exit(0 if pathlib.Path('src/app.py').exists() else 1)"
           protects: []
+          full_suite: true
+        arch:
+          kind: ratchet
       budgets:
         max_fix_rounds_per_rung: 1
     """)
@@ -50,6 +53,10 @@ class ProgramTest(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="prog-")
         mock.patch.dict(os.environ, {"TOOLKIT_STORE": os.path.join(self.tmp, "t.db"), "TOOLKIT_STATE_DIR": self.tmp,
                                      "WORK_DIR": self.tmp, "TOOLKIT_MAX_PARALLEL": "0"}).start()
+        # a human at a terminal (core.human.require) — the decisions under test are human ones
+        mock.patch("agent_skill_toolkit.core.human.isatty", return_value=True).start()
+        for k in ("TOOLKIT_HEADLESS", "TOOLKIT_AGENT_SANDBOXED"):
+            os.environ.pop(k, None)
         self.repo = os.path.join(self.tmp, "repo")
         os.makedirs(os.path.join(self.repo, "src"))
         os.makedirs(os.path.join(self.repo, ".agent"))
@@ -57,6 +64,8 @@ class ProgramTest(unittest.TestCase):
             f.write(SPEC)
         with open(os.path.join(self.repo, "src", "app.py"), "w") as f:
             f.write("x = 1\n")
+        with open(os.path.join(self.repo, ".agent", "architecture.json"), "w") as f:
+            json.dump({"rules": [{"id": "no-legacy", "files": r"\.py$", "deny": "^import legacy"}]}, f)
         with open(os.path.join(self.repo, ".gitignore"), "w") as f:
             f.write("__pycache__/\n")
         git(self.repo, "init", "-q", "-b", "main")
@@ -148,6 +157,130 @@ class ProgramTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"TOOLKIT_HEADLESS": "1"}):
             self.assertEqual(guard_write.decide({"tool_name": "Bash", "tool_input": {
                 "command": "python refactor.py program approve abc"}})[0], "deny")
+
+
+class Round1Test(ProgramTest):
+    """Codex F.10b round 1 (inherits the fixture; its own tests only)."""
+
+    def run_all(self, pid):
+        self.work()
+        self.approve(pid)
+        self.work()
+
+    def test_approval_is_human_only(self):                                   # #5
+        from agent_skill_toolkit.core import human
+        pid = self.new()["program"]
+        self.work()
+        with mock.patch.dict(os.environ, {"TOOLKIT_HEADLESS": "1"}):
+            with self.assertRaises(PermissionError):
+                self.approve(pid)
+        with mock.patch.object(human, "isatty", return_value=False):
+            with self.assertRaises(PermissionError):
+                self.approve(pid)
+
+    def test_multi_dependency_waits_for_merges(self):                        # #1
+        with open(self.slices, "w") as f:
+            json.dump([{"id": "a", "title": "A"}, {"id": "b", "title": "B"},
+                       {"id": "c", "title": "C", "depends_on": ["a", "b"]}], f)
+        out = self.new()
+        self.run_all(out["program"])
+        with S.Store() as st:
+            c = st.get(out["slices"][2]["implement"])
+        self.assertEqual(c["status"], "blocked")
+        self.assertIn("merged into main first", c["last_error"])
+        for sl in out["slices"][:2]:                              # the human merges a and b
+            git(self.repo, "merge", "-q", "--no-ff", "-m", "merge", sl["branch"])
+        with S.Store() as st:
+            st.unblock(c["id"])
+        self.work()
+        with S.Store() as st:
+            self.assertEqual(st.get(out["slices"][2]["verify"])["status"], "done")
+        git(self.repo, "merge-base", "--is-ancestor", out["slices"][0]["branch"], out["slices"][2]["branch"])
+
+    def test_foreign_branch_is_not_reused(self):                             # #2
+        out = self.new()
+        git(self.repo, "branch", out["slices"][0]["branch"])      # someone else's branch with that name
+        self.run_all(out["program"])
+        with S.Store() as st:
+            s1 = st.get(out["slices"][0]["implement"])
+        self.assertEqual(s1["status"], "blocked")
+        self.assertIn("already exists", s1["last_error"])
+
+    def test_identical_program_cannot_start_twice(self):                     # #2
+        pid = self.new()["program"]
+        with self.assertRaises(ValueError):
+            self.new()                                            # still waiting for approval
+        self.work()
+        self.approve(pid)
+        with self.assertRaises(ValueError):
+            self.new()                                            # plan approved, slices still open
+        with S.Store() as st:
+            for k in st.children(pid) + [st.get(pid)]:
+                st.cancel(k["id"])
+        self.assertFalse(self.new()["duplicate"])                 # all finished: a new run is allowed
+
+    def test_agent_touching_the_shared_clone_is_caught(self):                # #4
+        def evil(ctx, role, prompt, cwd="", timeout=900, read_only=False):
+            with open(os.path.join(cwd, "src", "x.py"), "w") as f:
+                f.write("x\n")
+            git(self.repo, "branch", "sneaky")                    # writes to YOUR clone
+            return "done"
+        mock.patch.object(P.agent_call, "run", side_effect=evil).start()
+        out = self.new()
+        self.run_all(out["program"])
+        with S.Store() as st:
+            s1 = st.get(out["slices"][0]["implement"])
+        self.assertEqual(s1["status"], "blocked")
+        self.assertIn("changed your clone", s1["last_error"])
+
+    def test_branch_checked_before_the_agent_runs(self):                     # #3
+        out = self.new()
+        self.work()
+        self.approve(out["program"])
+        calls = []
+        orig = P.step_worktree
+
+        def worktree_then_drift(ctx):
+            res = orig(ctx)
+            git(ctx.data["worktree"], "checkout", "-q", "-b", "elsewhere")
+            return res
+        mock.patch.object(P, "SLICE_STEPS", [("worktree", worktree_then_drift), ("implement", P.step_implement)]).start()
+        mock.patch.dict(P.REGISTRY, {P.SLICE: P.SLICE_STEPS}).start()
+        mock.patch.object(P.agent_call, "run", side_effect=lambda *a, **k: calls.append(1) or "x").start()
+        self.work()
+        self.assertEqual(calls, [])
+        with S.Store() as st:
+            self.assertIn("before the agent", st.get(out["slices"][0]["implement"])["last_error"])
+
+    def test_base_is_pinned_and_spec_must_prove_refactors(self):             # #6 / #7
+        out = self.new()
+        self.assertEqual(out["base"], git(self.repo, "rev-parse", "main"))
+        with open(os.path.join(self.repo, ".agent", "project.yml"), "w") as f:
+            f.write(SPEC.replace("        arch:\n          kind: ratchet\n", "").replace("full_suite: true", "full_suite: false"))
+        git(self.repo, "commit", "-qam", "weaker spec")
+        with S.Store() as st:
+            for k in st.list(limit=50):
+                st.cancel(k["id"])
+        with self.assertRaises(ValueError) as e:
+            self.new()
+        self.assertIn("cannot prove a refactor slice", str(e.exception))
+
+    def test_plan_is_created_atomically(self):                               # #8
+        from agent_skill_toolkit.core import store as store_mod
+        real = store_mod.Store._add_locked
+        n = {"i": 0}
+
+        def flaky(self_, *a, **k):
+            n["i"] += 1
+            if n["i"] == 3:
+                raise RuntimeError("crash mid-plan")
+            return real(self_, *a, **k)
+        with mock.patch.object(store_mod.Store, "_add_locked", flaky):
+            with self.assertRaises(RuntimeError):
+                self.new()
+        with S.Store() as st:
+            self.assertEqual(st.list(limit=50), [])               # nothing half-created
+        self.assertFalse(self.new()["duplicate"])
 
 
 if __name__ == "__main__":

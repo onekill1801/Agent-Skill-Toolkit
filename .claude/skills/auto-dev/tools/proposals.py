@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 runpy.run_path(str(Path(__file__).resolve().parents[2] / "_runtime" / "bootstrap.py"))["activate"]()
+from agent_skill_toolkit.core import human  # noqa: E402
 from agent_skill_toolkit.core import paths  # noqa: E402
 from agent_skill_toolkit.core import store as store_mod  # noqa: E402
 from agent_skill_toolkit.workflows.intake import gate  # noqa: E402
@@ -84,6 +85,7 @@ def _task(st, task_id: str) -> dict:
 
 
 def cmd_go(task_id: str) -> dict:
+    human.require("start a proposal")
     with store_mod.Store() as st:
         t = _task(st, task_id)
         if t["status"] != "blocked" or not str(t.get("last_error") or "").startswith(flow.WAIT_GO):
@@ -96,6 +98,7 @@ def cmd_go(task_id: str) -> dict:
 
 def cmd_decide(task_id: str, decision: str, reason: str) -> dict:
     import hashlib
+    human.require("decide a proposal")
     if decision not in ("accept", "reject"):
         raise ValueError("decision must be accept or reject")
     if decision == "reject" and not reason.strip():

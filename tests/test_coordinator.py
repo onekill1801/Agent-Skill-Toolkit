@@ -32,6 +32,10 @@ class Base(unittest.TestCase):
         self.db = os.path.join(self.tmp, "t.db")
         mock.patch.dict(os.environ, {"TOOLKIT_STORE": self.db, "TOOLKIT_STATE_DIR": self.tmp,
                                      "WORK_DIR": self.tmp, "TOOLKIT_MAX_PARALLEL": "0"}).start()
+        # a human at a terminal (core.human.require) — the decisions under test are human ones
+        mock.patch("agent_skill_toolkit.core.human.isatty", return_value=True).start()
+        for k in ("TOOLKIT_HEADLESS", "TOOLKIT_AGENT_SANDBOXED"):
+            os.environ.pop(k, None)
 
     def tearDown(self):
         mock.patch.stopall()

@@ -27,6 +27,7 @@ from pathlib import Path
 
 runpy.run_path(str(Path(__file__).resolve().parents[2] / "_runtime" / "bootstrap.py"))["activate"]()
 from agent_skill_toolkit.core import paths  # noqa: E402
+from agent_skill_toolkit.core import human  # noqa: E402
 from agent_skill_toolkit.core import store as store_mod  # noqa: E402
 from agent_skill_toolkit.workflows.refactor import program as P  # noqa: E402
 from agent_skill_toolkit.workflows.refactor import ratchet as R  # noqa: E402
@@ -107,6 +108,7 @@ def program(action: str, a) -> dict:
         if not t or t["kind"] != P.PROGRAM:
             raise ValueError(f"{a.program_id} is not a refactor program")
         if action == "approve":
+            human.require("approve a refactor plan")          # in the handler, not only the hook (Codex F.10b #5)
             if t["status"] != "blocked" or not str(t.get("last_error") or "").startswith(P.WAIT_PLAN):
                 raise ValueError(f"{a.program_id} is not waiting for plan approval (status {t['status']})")
             if not st.patch_data(a.program_id, ("blocked",), approved=True):
