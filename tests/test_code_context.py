@@ -232,6 +232,21 @@ class Round1FixesTest(Base):
         text = f"TypeError: x\n    at boom ({win}:10:5)\n    at Object.<anonymous> (node:internal/x.js:1:1)\n"
         self.assertEqual(cc.trace(self.repo, text)["files"], ["web app/src/app.js"])
 
+    def test_round2_trace_edges(self):                                       # Codex F.12 R2
+        p = os.path.join(self.repo, "decoder.py")
+        with open(p, "w") as f:
+            f.write("def d():\n    pass\n")
+        self.assertEqual(cc.trace(self.repo, 'File "../decoder.py", line 3, in d\n')["frames"], [])
+        inner = "\tat com.acme.billing.InvoiceService$Lines.sum(InvoiceService.java:4)\n"
+        self.assertEqual(cc.trace(self.repo, inner)["files"], ["src/main/java/com/acme/billing/InvoiceService.java"])
+
+    def test_grep_never_claims_a_qualified_identity(self):                   # Codex F.12 R2
+        self.no_codegraph()
+        out = cc.locate(self.repo, "Other.createInvoice")
+        self.assertEqual(out["definitions"], [])
+        self.assertFalse(out["resolved"])
+        self.assertTrue(out["candidates"])
+
     def test_no_trace_means_no_repo_walk(self):                              # #6
         with mock.patch.object(cc, "_iter_code", side_effect=AssertionError("walked")):
             self.assertEqual(cc.trace(self.repo, "plain failure text, no frames")["frames"], [])
@@ -265,6 +280,12 @@ class Round1CodegraphTest(CodegraphTest):
         out = cc.locate(self.repo, "Other.createInvoice")
         self.assertEqual(out["source"], "grep")
         self.assertIn("exactly", out["fallback"])
+
+    def test_malformed_nested_answers_fall_back(self):                       # Codex F.12 R2
+        self.answers["query"] = json.dumps([None, {"node": None}, {"node": {"name": 3}}])
+        self.assertEqual(cc.locate(self.repo, "createInvoice")["source"], "grep")
+        self.answers["callers"] = json.dumps({"definitions": [None, {"callers": [None, {"filePath": 5}]}]})
+        self.assertEqual(cc.callers(self.repo, "createInvoice")["callers"], [])
 
 
 class GroundingTest(Base):

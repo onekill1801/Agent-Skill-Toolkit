@@ -108,8 +108,10 @@ def _cg_json(args: list, timeout: int = 120):
 def _rows(defs: list, key: str) -> list:
     out = []
     for d in defs or []:
+        if not isinstance(d, dict) or not isinstance(d.get(key) or [], list):
+            continue
         for r in d.get(key) or []:
-            if r.get("filePath"):
+            if isinstance(r, dict) and isinstance(r.get("filePath"), str) and r.get("filePath"):
                 out.append({"name": r.get("name"), "kind": r.get("kind"), "file": r["filePath"].replace("\\", "/"),
                             "line": r.get("startLine")})
     return out
@@ -191,6 +193,16 @@ def _answer(source: str, state: dict, **data) -> dict:
     return out
 
 
+def _nodes(data) -> list:
+    """Query answer -> node dicts; anything malformed is skipped (Codex F.12 R2 #3)."""
+    out = []
+    for r in data if isinstance(data, list) else []:
+        n = r.get("node") if isinstance(r, dict) else None
+        if isinstance(n, dict) and isinstance(n.get("name"), str):
+            out.append(n)
+    return out
+
+
 def _same_symbol(node: dict, symbol: str) -> bool:
     """`Foo.bar` must match the qualified name (suffix on a segment boundary); a bare `bar` matches by
     name. Imports / files / variables are not definitions (Codex F.12 #4)."""
@@ -239,12 +251,17 @@ def locate(repo: str, symbol: str, sync: bool = True) -> dict:
         if isinstance(data, list):
             hits = [{"name": n.get("qualifiedName") or n.get("name"), "kind": n.get("kind"),
                      "file": (n.get("filePath") or "").replace("\\", "/"), "line": n.get("startLine")}
-                    for n in (r.get("node") or {} for r in data) if _same_symbol(n, symbol)]
+                    for n in _nodes(data) if _same_symbol(n, symbol)]
             if hits:
                 return _answer("codegraph", state, symbol=symbol, definitions=hits, ambiguous=len(hits) > 1)
             note = f"no definition matching {symbol!r} exactly"
         state = {**state, "reason": f"codegraph: {note}"}
-    return _answer("grep", state, symbol=symbol, definitions=grep_definitions(repo, symbol))
+    found = grep_definitions(repo, symbol)
+    if "." in symbol:
+        # text search sees only the last name: these are CANDIDATES, not proven definitions of `symbol`
+        return _answer("grep", state, symbol=symbol, definitions=[], candidates=found, resolved=False,
+                       note=f"name {_name(symbol)!r} only — qualified identity not verified")
+    return _answer("grep", state, symbol=symbol, definitions=found, ambiguous=len(found) > 1)
 
 
 def definitions_many(repo: str, symbols: list, sync: bool = False, per: int = 5) -> dict:
@@ -262,8 +279,7 @@ def definitions_many(repo: str, symbols: list, sync: bool = False, per: int = 5)
         data, _ = _cg_json(["query", name, "-p", repo, "-j", "-l", "25"], timeout=60)
         hits = [{"name": n.get("qualifiedName") or n.get("name"), "kind": n.get("kind"),
                  "file": (n.get("filePath") or "").replace("\\", "/"), "line": n.get("startLine")}
-                for n in ((r.get("node") or {}) for r in (data or []) if isinstance(data, list))
-                if _same_symbol(n, sym)]
+                for n in _nodes(data) if _same_symbol(n, sym)]
         if hits:
             out[sym] = hits[:per]
     return out
@@ -314,8 +330,7 @@ def trace(repo: str, text: str, limit: int = 30) -> dict:
         base = f.rsplit("/", 1)[-1]
         cands = by_base.get(base, [])
         if f.endswith(JVM) and "/" not in f:
-            sym = re.sub(r"\$.*$", "", fr["symbol"])
-            parts = sym.split(".")
+            parts = fr["symbol"].split(".")                         # a.b.C$Inner.m -> package a.b
             pkg = "/".join(parts[:-2])                              # a.b.C.m -> a/b ; C.m -> ""
             cands = [r for r in cands if (f"/{r}".endswith(f"/{pkg}/{base}") if pkg else r == base or
                                           re.search(r"(^|/)(src/(main|test)/(java|kotlin|scala|groovy)/)" + re.escape(base) + "$", r))]
@@ -326,7 +341,9 @@ def trace(repo: str, text: str, limit: int = 30) -> dict:
             rel = os.path.relpath(real, root_real).replace("\\", "/")
             cands = [r for r in cands if r == rel]
         else:
-            rel = f.lstrip("./")
+            if ".." in f.split("/"):
+                continue                                             # climbs out of wherever it ran: not provable
+            rel = f[2:] if f.startswith("./") else f
             cands = [r for r in cands if r == rel or r.endswith("/" + rel)]
         if len(cands) != 1:
             continue                                                 # not ours, or ambiguous
