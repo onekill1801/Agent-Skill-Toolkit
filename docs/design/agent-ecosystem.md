@@ -416,6 +416,15 @@ def run_ladder(task, ladder, start_at=0):
 - **Một luật nghiệm thu duy nhất:** bậc bắt buộc đỏ ⇒ không được giao (hết mâu thuẫn "inform vs block"
   trong `auto-dev/SKILL.md`).
 
+### 6.2.1 Đã hiện thực (F.2, Codex GO vòng 8)
+
+`workflows/verify/ladder.py` + `auto-dev/tools/verify.py`. Luật an toàn chốt qua 8 vòng review:
+spec đọc từ **base ref**; worktree **sạch + đúng nhánh** trước mỗi bậc; `pending_fix` lưu bền trước khi agent sửa
+chạy (crash/hết quota vẫn được kiểm khi chạy tiếp); ref nhánh/tag khác bị đổi → dừng kèm lệnh khôi phục;
+**mọi bậc chạy lệnh phải khai `protects: [...]`** (file mà lệnh thực thi; `[]` là khai báo tường minh) — không đoán
+từ argv; launcher `argv[0]` luôn được bảo vệ; thay đổi test / cấu hình build-CI / `.agent` / file được khai báo →
+người duyệt; so khớp không phân biệt hoa thường; `covered_by` chỉ trỏ tới bậc `full_suite: true`.
+
 ### 6.3 Co giãn theo những gì repo có
 
 `agent_init scan` dò repo → đề xuất `verify.ladder`:
