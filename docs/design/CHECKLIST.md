@@ -51,7 +51,7 @@ Ký hiệu: ✅ xong + Codex đồng thuận · 🔁 đã code, đang review/s�
 | F.6b | Executor tách biệt + duyệt Telegram gắn hash | ⛔ | | | **cần user Windows chuẩn + token GitLab chỉ đọc** |
 | F.1 | Làm rõ → AC, gom câu hỏi 1 lần, triage 4 làn + tự nâng làn | ✅ | `12b4e42` → `bf35c5d` → `b1c43ab` | GO (vòng 3) | làn quyết định tier/mode/debate; đề xuất chỉ khi là câu hỏi; nội dung task được làm sạch + «trích» + vô hiệu markup |
 | F.2 | Thang kiểm local + vòng tự sửa (`workflows/verify/ladder.py`, `auto-dev/tools/verify.py`) | ✅ | `20ececc` … `09f6b76` (8 commit) | GO (vòng 8) | worktree sạch + đúng nhánh trước mỗi bậc; pending fix bền; mọi bậc chạy lệnh khai `protects`; thay đổi test/cấu hình/spec/launcher → người duyệt; chạy thử trên toolkit: done. Repo Java chờ người dùng chọn |
-| F.3 | AC → test thật trong repo + bảng AC → bằng chứng | ⬜ | | | |
+| F.3 | AC → test thật trong repo + bảng AC → bằng chứng | ✅ | `d516752` → `28cae3d` → `e5b5bbd` → `fa4ceb5` | GO (vòng 4) | AC chỉ tính khi testcase JUnit của LẦN CHẠY NÀY pass, từ file test đổi trên nhánh (khớp đủ package, không mơ hồ); thiếu test cho AC → người xử lý (không tự sửa); báo cáo chỉ tin kết quả cùng spec + cùng lần chạy suite; `verify.py start --ac/--ac-file`, `report` |
 | F.5 | Cổng vào: `mr_watch` / `atask_watch` / `group_watch` chỉ xếp hàng vào store | ⬜ | | | cần allowlist TChat (user id) |
 | F.7 | Điều phối nhiều việc + bảng tiến độ (Orca + aTask/`status.py`) | ⬜ | | | quyết định ghi tự động project "Agent Hub" |
 | F.8 | Thang kiểm mở rộng: deploy dev, health pod, smoke UI, e2e, bench | ⛔ | | | **cần `environments.dev` trong `projects.json`** |
@@ -93,3 +93,7 @@ Ký hiệu: ✅ xong + Codex đồng thuận · 🔁 đã code, đang review/s�
 | 2026-10-13 | F.1 (`b1c43ab`) | 3 | **GO** |
 | 2026-10-13 | F.4b (`b336e7f`) | 3 | **GO**: quarantine + khoá gửi duyệt chung đều FIXED; không có lỗi mới. Gợi ý thêm test tranh chấp đồng thời flow/direct |
 | 2026-10-13 | F.4a + 0.7 (`4a847a0`) | 3 | **GO**: chấp nhận 2 phản biện (finish khi lease hết hạn an toàn nhờ token; dừng hợp tác cho Python thuần). MED còn: kill cây tiến trình, quota JSON nhúng, tham số rỗng — sửa ở `199a6f5` (sẽ được xác nhận trong vòng review F.4b) |
+| 2026-10-13 | F.3 (`d516752`) | 1 | **NO-GO**: marker trong file không phải test/comment được tính; test bị skip / suite không liên quan vẫn ✅; báo cáo diễn giải checkpoint cũ theo spec mới; start trùng làm mất AC; AC1000 bị đánh số lại — sửa ở `28cae3d` |
+| 2026-10-13 | F.3 (`28cae3d`) | 2 | **NO-GO**: FIXED 3/5; report JUnit cũ còn được tính, checkpoint coverage/suite lệch commit; HIGH mới: Java khớp theo tên class đơn — sửa ở `e5b5bbd` |
+| 2026-10-13 | F.3 (`e5b5bbd`) | 3 | **NO-GO**: HIGH tiền tố package (`com/original.java`) giả làm file test — sửa ở `fa4ceb5` |
+| 2026-10-13 | F.3 (`fa4ceb5`) | 4 | **GO** |
