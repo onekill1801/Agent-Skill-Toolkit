@@ -52,6 +52,7 @@ import config  # noqa: E402
 import runpy  # noqa: E402
 
 runpy.run_path(os.path.join(_SKILLS, "_runtime", "bootstrap.py"))["activate"]()
+from agent_skill_toolkit.core import winexec  # noqa: E402
 from agent_skill_toolkit.workflows.execution import quota  # noqa: E402
 
 ANTHROPIC_VERSION = "2023-06-01"
@@ -112,26 +113,16 @@ def _cli_failure(message: str, output: str) -> AgentRunError:
 
 
 def _resolve_exec(argv: list) -> list:
-    """Make argv[0] directly executable across OSes.
-
-    On Windows a CLI is often a .cmd/.bat launcher (e.g. Cursor `agent.cmd`) or a
-    .ps1; subprocess(shell=False) can't exec those directly, so route via cmd.exe /
-    powershell. `shutil.which` honours PATHEXT. On macOS/Linux the Windows branch
-    is a no-op.
-    """
-    if not argv:
-        return argv
-    exe = shutil.which(argv[0])
-    if not exe:
+    """Make argv[0] directly executable across OSes — never through cmd.exe with untrusted
+    arguments (a prompt carries MR content; cmd.exe would re-parse it). Windows .cmd/.bat
+    launchers are resolved to what they run (node + script, powershell -File x.ps1, sibling
+    .exe); see agent_skill_toolkit.core.winexec. No-op on macOS/Linux."""
+    if not argv or not shutil.which(argv[0]):
         return argv  # let subprocess raise FileNotFoundError with the original name
-    low = exe.lower()
-    if os.name == "nt":
-        if low.endswith((".cmd", ".bat")):
-            return ["cmd", "/c", exe] + argv[1:]
-        if low.endswith(".ps1"):
-            return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                    "-File", exe] + argv[1:]
-    return [exe] + argv[1:]
+    try:
+        return winexec.command(argv)
+    except winexec.UnsafeLauncher as e:
+        raise AgentRunError(str(e), {"kind": "error", "retry_other_backend": True})
 
 
 def _combine_prompt(system: str | None, prompt: str) -> str:
