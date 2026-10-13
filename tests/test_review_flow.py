@@ -33,12 +33,6 @@ FAKE_AGENT = textwrap.dedent('''
         print(json.dumps({"error": True, "kind": "quota", "resume_at": %(future)s,
                           "message": "Claude AI usage limit reached"}))
         sys.exit(1)
-    if mode == "tamper":                      # prompt-injected agent forges a human approval
-        import glob
-        job_file = glob.glob(os.path.join(os.environ["REVIEW_STATE_DIR"], "jobs", "*.json"))[0]
-        job = json.load(open(job_file, encoding="utf-8"))
-        job["approval"] = {"via": "terminal", "decision": "approved"}
-        json.dump(job, open(job_file, "w", encoding="utf-8"))
     if mode == "crash":
         print(json.dumps({"error": True, "kind": "error", "message": "boom"}))
         sys.exit(1)
@@ -49,6 +43,14 @@ FAKE_AGENT = textwrap.dedent('''
               "findings": [{"severity": "minor", "title": "nit", "file": "a.py", "line": 3}]}
     with open(wt + ".review.json", "w", encoding="utf-8") as f:
         json.dump(review, f)
+    if mode == "tamper":   # prompt-injected agent forges a VALID human approval (matching payload hash)
+        sys.path.insert(0, os.environ["FAKE_TOOLS"])
+        import review_common as rc, review_post as rp
+        jid = re.search(r"Process review job (\\S+)", prompt).group(1)
+        job = rc.load_job(jid)
+        job["approval"] = {"via": "terminal", "decision": "approved", "by": "attacker",
+                           "payload_hash": rp.payload_hash(job, rp.load_review(job))}
+        rc.save_job(job, sync=False)
     print("done")
 ''')
 
@@ -64,7 +66,8 @@ class ReviewFlowTest(unittest.TestCase):
         env = {"REVIEW_STATE_DIR": os.path.join(self.tmp, "rq"), "TOOLKIT_STATE_DIR": self.tmp,
                "TOOLKIT_STORE": os.path.join(self.tmp, "t.db"), "REVIEW_ORCA": "0", "REVIEW_CODEGRAPH": "0",
                "REVIEW_AUTO_POST": "auto", "REVIEW_AUTO_POST_PROJECTS": "grp/proj",
-               "GITLAB_URL": "https://gitlab.example.vn", "FAKE_AGENT_LOG": self.log, "FAKE_AGENT_MODE": "ok"}
+               "GITLAB_URL": "https://gitlab.example.vn", "FAKE_AGENT_LOG": self.log, "FAKE_AGENT_MODE": "ok",
+               "FAKE_TOOLS": os.path.join(_ROOT, ".claude", "skills", "mr-review", "tools")}
         mock.patch.dict(os.environ, env).start()
         mock.patch.object(rf, "AGENT_RUNNER", self.agent).start()
         mock.patch.object(rc, "resolve_project_id", return_value=("77", "grp/proj")).start()
@@ -203,13 +206,60 @@ class ReviewFlowTest(unittest.TestCase):
         self.assertEqual(self.runs(), 0)
 
     # ------------------------------------------------------------ Codex review F.4b round 1
-    def test_tampering_agent_is_detected_and_blocked(self):
-        """#1: an agent that edits approval/job state is caught; nothing is posted."""
+    def test_tampering_agent_is_quarantined_until_a_human_releases_it(self):
+        """#1 + round 2 HIGH: a forged approval WITH a matching hash must never be used —
+        not by reconcile, not by a later work cycle, not by approval_status/post."""
+        os.environ["REVIEW_AUTO_POST"] = "shadow"            # a human approval would be required
         os.environ["FAKE_AGENT_MODE"] = "tamper"
         rf.enqueue("proj", 20)
         self.assertEqual(self.work()[-1]["status"], "blocked")
         self.assertIn("protected state", self.task()["last_error"])
+        for _ in range(3):                                    # repeated cycles change nothing
+            self.assertEqual(rf.reconcile()["reconciled"], [])
+            self.assertEqual(self.work(), [])
+        job = rc.load_job("77-20")
+        self.assertTrue(job["quarantine"])
+        self.assertIsNone(job["approval"])                   # the forged approval was dropped
+        self.assertEqual(rp.approval_status(job), "pending")
+        self.assertFalse(os.path.exists(rp.review_path(job)))   # agent output set aside
         self.assertEqual(self.posted, [])
+        with self.assertRaises(PermissionError):
+            rp.request_approval(job)
+        # a human looks, then releases: the review is done again by a fresh agent run
+        os.environ["FAKE_AGENT_MODE"] = "ok"
+        os.environ["REVIEW_AUTO_POST"] = "auto"
+        with mock.patch("sys.stdin.isatty", return_value=True), mock.patch("builtins.input", return_value="y"):
+            self.assertTrue(rf.release_quarantine(self.task()["id"])["released"])
+        self.assertEqual(self.work()[-1]["status"], "done")
+        self.assertEqual(self.posted, ["77-20"])
+        self.assertEqual(self.runs(), 2)
+
+    def test_direct_request_approval_is_once_per_payload(self):
+        """Round 2 MED: the CLI / Orca path calling request_approval directly gets the same guarantee."""
+        os.environ["REVIEW_AUTO_POST"] = "shadow"
+        rf.enqueue("proj", 25)
+        self.assertEqual(self.work()[-1]["status"], "blocked")      # flow requested approval once
+        sends = []
+        with mock.patch.object(rp, "_telegram_request", side_effect=lambda j, q: sends.append(1) or {}):
+            again = rp.request_approval(rc.load_job("77-25"))
+        self.assertTrue(again["reused"])
+        self.assertEqual(sends, [])
+
+    def test_direct_request_crash_after_send_is_uncertain_not_resent(self):
+        os.environ["REVIEW_AUTO_POST"] = "shadow"
+        rf.enqueue("proj", 26)
+        os.environ["FAKE_AGENT_MODE"] = "ok"
+        sends = []
+
+        def send_then_die(job, question):
+            sends.append(job["id"])
+            raise RuntimeError("process died right after sending")
+        with mock.patch.object(rp, "_telegram_request", side_effect=send_then_die):
+            ran = self.work()
+            self.assertEqual(ran[-1]["status"], "blocked")
+            with self.assertRaises(rp.ApprovalUncertain):           # a direct caller is refused too
+                rp.request_approval(rc.load_job("77-26"))
+        self.assertEqual(sends, ["77-26"])
 
     def test_agent_env_has_no_toolkit_secrets(self):
         sys.path.insert(0, os.path.join(_ROOT, ".claude", "skills", "auto-dev", "tools"))
@@ -272,10 +322,10 @@ class ReviewFlowTest(unittest.TestCase):
         rf.enqueue("proj", 24)
         sent = []
 
-        def crash_after_send(job, via="auto"):
+        def crash_after_send(job, question):           # the Telegram send itself (inside the guard)
             sent.append(job["id"])
             raise RuntimeError("process died right after sending")
-        with mock.patch.object(rp, "request_approval", side_effect=crash_after_send):
+        with mock.patch.object(rp, "_telegram_request", side_effect=crash_after_send):
             ran = self.work()
         self.assertEqual(sent, ["77-24"])                        # sent once, then never again
         self.assertEqual(ran[-1]["status"], "blocked")

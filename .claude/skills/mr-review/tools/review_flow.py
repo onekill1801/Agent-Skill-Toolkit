@@ -136,6 +136,51 @@ def _protected_snapshot(jid: str) -> dict:
     return out
 
 
+def quarantine(ctx, jid: str, reason: str, touched: list) -> None:
+    """Tamper detected: drop whatever approval the agent may have forged, set aside its review,
+    and mark job + task so nothing (reconcile, sweep, post) continues without a human
+    (Codex F.4b round 2: a block alone was auto-cleared by the forged approval)."""
+    q = {"reason": reason[:500], "at": rc.now(), "task": ctx.task["id"], "touched": touched[:20]}
+    with rc.file_lock("queue"):
+        job = rc.load_job(jid)
+        job.update(quarantine=q, approval=None)
+        job.pop("approval_intent", None)
+        rc.log_event(job, "quarantined", reason=reason[:200])
+        rc.save_job(job, sync=False)
+    review_file = rp.review_path(job)
+    if os.path.exists(review_file):            # the agent's output is untrusted now
+        os.replace(review_file, review_file + f".quarantined-{rc.now()}")
+    ctx.store.update_data(ctx.task["id"], ctx.lease, quarantine=q)
+
+
+def release_quarantine(task_id: str) -> dict:
+    """Human-only: after looking at what the agent touched, allow the flow to run again —
+    from the review step, with a fresh agent run (its earlier output is discarded)."""
+    if not sys.stdin.isatty():
+        raise PermissionError("release-quarantine needs an interactive terminal (a human)")
+    with store_mod.Store() as st:
+        t = st.get(task_id)
+        if not t or not t["data"].get("quarantine"):
+            raise ValueError(f"task {task_id} is not quarantined")
+        q = t["data"]["quarantine"]
+        print(json.dumps(q, ensure_ascii=False, indent=2))
+        if input(f"\nRelease task {task_id} (job {t['data'].get('job_id')}) and review it again? [y/N] "
+                 ).strip().lower() not in ("y", "yes"):
+            return {"task_id": task_id, "released": False}
+        with rc.file_lock("queue"):
+            job = rc.load_job(t["data"]["job_id"])
+            job.pop("quarantine", None)
+            job["approval"] = None
+            rc.log_event(job, "quarantine_released", by=os.environ.get("USERNAME") or os.environ.get("USER") or "")
+            rc.save_job(job, sync=False)
+        st.invalidate(task_id, ["review", "approval", "post"], reason="quarantine released by a human")
+        data = dict(t["data"])
+        data.pop("quarantine", None)
+        st.db.execute("update tasks set data=? where id=?", (json.dumps(data, ensure_ascii=False), task_id))
+        st.unblock(task_id, by="human:release-quarantine")
+    return {"task_id": task_id, "released": True}
+
+
 def step_prepare(ctx) -> dict:
     if _skipped(ctx):
         return {"skipped": True}
@@ -180,9 +225,11 @@ def step_review(ctx) -> dict:
     ctx.usage("agent_runner", ctx.data.get("role", "review"), seconds=round(time.time() - t0, 1))
     after = _protected_snapshot(job["id"])
     touched = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
-    if touched:     # a review agent edited approval / job / posting code: stop, a human must look
-        raise E.NeedsHuman("review agent modified protected state (possible prompt injection): "
-                           + ", ".join(os.path.basename(t) for t in touched[:8]))
+    if touched:     # a review agent edited approval / job / posting code: quarantine, a human must look
+        reason = ("review agent modified protected state (possible prompt injection): "
+                  + ", ".join(os.path.basename(t) for t in touched[:8]))
+        quarantine(ctx, job["id"], reason, touched)
+        raise E.NeedsHuman(reason)
     if p.returncode != 0:
         try:
             err = json.loads((p.stdout or "").strip().splitlines()[-1])
@@ -203,29 +250,15 @@ def step_approval(ctx) -> dict:
     if _skipped(ctx) or (ctx.outputs.get("review") or {}).get("skipped"):
         return {"skipped": True}
     job = _ensure_owned(ctx)
-    jid = job["id"]
-    # one request per exact payload, even across crashes / concurrent workers (Codex F.4b #4):
-    # the intent is persisted BEFORE anything is sent; an intent without a result = uncertain send
-    with rc.file_lock(f"approval-{jid}", timeout=60):
-        job = rc.load_job(jid)
-        review = rp.load_review(job)
-        phash = rp.payload_hash(job, review)
-        a = job.get("approval") or {}
-        if a.get("payload_hash") == phash and a.get("via"):
-            return {"via": a.get("via"), "reused": True}
-        intent = job.get("approval_intent") or {}
-        if intent.get("payload_hash") == phash:
-            raise E.NeedsHuman("an approval request for this exact review may already have been sent "
-                               "(interrupted while sending) — check Telegram, or approve in a terminal")
-        job["approval_intent"] = {"payload_hash": phash, "at": rc.now(), "task": ctx.task["id"]}
-        rc.save_job(job, sync=False)
+    # once per exact payload for EVERY caller: locking, reuse and the durable intent live in
+    # review_post.request_approval itself (Codex F.4b round 2)
+    try:
         out = rp.request_approval(job, via="auto")
-        job = rc.load_job(jid)
-        job.pop("approval_intent", None)
-        rc.save_job(job, sync=False)
+    except rp.ApprovalUncertain as e:
+        raise E.NeedsHuman(str(e))
     ap = out["approval"]
-    return {"via": ap.get("via"), "rules_passed": (ap.get("rules") or {}).get("rules_passed"),
-            "mode": (ap.get("rules") or {}).get("mode")}
+    return {"via": ap.get("via"), "reused": bool(out.get("reused")),
+            "rules_passed": (ap.get("rules") or {}).get("rules_passed"), "mode": (ap.get("rules") or {}).get("mode")}
 
 
 def step_post(ctx) -> dict:
@@ -281,8 +314,10 @@ def reconcile() -> dict:
     every = rc.cfg_int("REVIEW_FLOW_HEAD_CHECK_SEC", 300)
     with store_mod.Store() as st:
         for t in st.list(("blocked",), KIND, 500):
+            if t["data"].get("quarantine"):
+                continue                      # only `release-quarantine` (a human) moves these
             job = rc.load_job(t["data"].get("job_id", ""))
-            if not job:
+            if not job or job.get("quarantine"):
                 continue
             status = job.get("status")
             if status in rc.TERMINAL:
@@ -347,6 +382,7 @@ def main(argv=None) -> int:
     p.add_argument("--owner", default=f"review-flow@{socket.gethostname()}:{os.getpid()}")
     sub.add_parser("reconcile")
     sub.add_parser("status")
+    sub.add_parser("release-quarantine").add_argument("task_id")
     a = ap.parse_args(argv)
     try:
         if a.cmd == "enqueue":
@@ -357,6 +393,8 @@ def main(argv=None) -> int:
             out = work(a.owner, a.once, a.interval)
         elif a.cmd == "reconcile":
             out = reconcile()
+        elif a.cmd == "release-quarantine":
+            out = release_quarantine(a.task_id)
         else:
             with store_mod.Store() as st:
                 out = {**st.summary(), "open": [{k: t[k] for k in ("id", "ref", "status", "step", "attempts",

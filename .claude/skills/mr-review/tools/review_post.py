@@ -175,14 +175,41 @@ def _preview(job: dict, review: dict) -> str:
             f"{job.get('web_url', '')}\nXem đầy đủ: python review_post.py render {job['id']}")
 
 
+class ApprovalUncertain(RuntimeError):
+    """A request for this exact payload was started but never recorded (crash while sending):
+    it may already be on someone's phone. Sending again could produce two cards — a human checks."""
+
+
 def request_approval(job: dict, via: str = "auto") -> dict:
-    review = load_review(job)
-    errs = validate(job, review)
-    if errs:
-        raise ValueError("review.json invalid: " + "; ".join(errs))
+    """Ask for approval of the CURRENT review payload — once per payload, whoever calls it
+    (review_flow, the CLI, an Orca worker), even across crashes and concurrent callers."""
+    jid = job["id"]
+    with rc.file_lock(f"approval-{jid}", timeout=60):
+        job = rc.load_job(jid) or job
+        if job.get("quarantine"):
+            raise PermissionError(f"job {jid} is quarantined ({job['quarantine'].get('reason', '')[:120]}) — "
+                                  "a human must release it")
+        review = load_review(job)
+        errs = validate(job, review)
+        if errs:
+            raise ValueError("review.json invalid: " + "; ".join(errs))
+        phash = payload_hash(job, review)
+        a = job.get("approval") or {}
+        if a.get("payload_hash") == phash and a.get("via"):
+            return {"job_id": jid, "approval": a, "reused": True}
+        intent = job.get("approval_intent") or {}
+        if intent.get("payload_hash") == phash:
+            raise ApprovalUncertain("an approval request for this exact review may already have been sent "
+                                    "(interrupted while sending) — check Telegram, or approve in a terminal")
+        job["approval_intent"] = {"payload_hash": phash, "at": rc.now()}   # durable BEFORE anything is sent
+        rc.save_job(job, sync=False)
+        out = _request_approval_locked(job, review, phash, via)
+        return out
+
+
+def _request_approval_locked(job: dict, review: dict, phash: str, via: str) -> dict:
     note, inline = payload(job, review)
     rules = rr.evaluate(job, note, inline)
-    phash = payload_hash(job, review)
     question = _preview(job, review)
     if rules["mode"] == "shadow":
         question += ("\n🤖 Auto-post (shadow): " + ("SẼ tự đăng" if rules["rules_passed"]
@@ -201,6 +228,7 @@ def request_approval(job: dict, via: str = "auto") -> dict:
                       f"{_counts(review.get('findings', []))} — {state}. Xem: python review_post.py render {job['id']}"))
     job.update(status="awaiting_approval", approval=approval, verdict=review["verdict"],
                review_file=review_path(job))
+    job.pop("approval_intent", None)                  # recorded: the send is no longer uncertain
     rc.log_event(job, "approval_requested", via=approval["via"], rules_passed=rules["rules_passed"])
     rc.save_job(job)
     return {"job_id": job["id"], "approval": approval, "preview": question}
@@ -238,6 +266,8 @@ def _current_payload(job: dict):
 def approval_status(job: dict) -> str:
     """'pending' | 'approved' | 'rejected' — for the payload as it is NOW."""
     a = job.get("approval") or {}
+    if job.get("quarantine"):            # an agent tampered with this job: nothing counts until a human releases it
+        return "pending"
     review, phash = _current_payload(job)
     if review is None:
         return "pending"
