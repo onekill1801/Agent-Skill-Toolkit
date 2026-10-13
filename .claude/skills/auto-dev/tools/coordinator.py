@@ -64,18 +64,19 @@ def accept(task_id: str, lane: str = "") -> dict:
             # blocked for another reason (dependency, bad data, ...) is NOT a proposal (Codex F.7 #5)
             raise ValueError(f"{task_id} is not waiting for a decision on a proposal "
                              f"(status {t['status']}, step {t.get('step') or '-'})")
-        tri = next((c["data"] for c in reversed(st.checkpoints(task_id, valid_only=True))
-                    if c["step"] == "triage"), {})
+        tri_cp = next((c for c in reversed(st.checkpoints(task_id, valid_only=True))
+                       if c["step"] == "triage"), {})
+        tri = tri_cp.get("data") or {}
         if not tri.get("kind"):
             raise ValueError(f"{task_id} has no triage result — cannot accept")
         lane = lane or tri.get("lane") or ""
         if lane and lane not in ("nho", "vua", "lon", "de_xuat"):
             raise ValueError("lane must be nho|vua|lon|de_xuat")
-        # resolve EXACTLY the revision inspected above (same update time + proposal marker): if the
-        # task was re-run / blocked for another reason meanwhile, nothing changes (Codex F.7 R2 #5)
+        # resolve EXACTLY the revision inspected above, in ONE statement: same update time, proposal
+        # marker, and the triage checkpoint used is still valid — else nothing changes (Codex F.7 R2/R3)
         ok = st.resolve_blocked(task_id, "done", by="human", note=json.dumps(
             {"accepted": True, "kind": tri.get("kind"), "lane": lane}, ensure_ascii=False),
-            if_updated=t["updated"], if_error_prefix=atask_flow.PROPOSAL)
+            if_updated=t["updated"], if_error_prefix=atask_flow.PROPOSAL, if_checkpoint_valid=tri_cp["id"])
         if not ok:
             raise ValueError(f"{task_id} changed while accepting — look at it again (coordinator.py board)")
     return {"task_id": task_id, "accepted": ok, "kind": tri.get("kind"), "lane": lane}

@@ -281,6 +281,21 @@ class CoordinatorRound1FixesTest(Base):
             self.assertTrue(st.resolve_blocked(t["id"], "done", if_updated=st.get(t["id"])["updated"],
                                                if_error_prefix="proposal: "))
 
+    def test_accept_refuses_invalidated_evidence(self):                     # R3 #5
+        with S.Store() as st:
+            t = st.add("k", "b")
+            tok = st.claim("w")["lease_token"]
+            st.checkpoint(t["id"], tok, "triage", {"kind": "code"})
+            st.block(t["id"], tok, "proposal: code")
+            cp = st.checkpoints(t["id"], valid_only=True)[-1]
+            seen = st.get(t["id"])
+            time.sleep(0.01)
+            st.invalidate(t["id"], reason="task text changed")             # after the read
+            self.assertNotEqual(st.get(t["id"])["updated"], seen["updated"])
+            self.assertFalse(st.resolve_blocked(t["id"], "done", if_checkpoint_valid=cp["id"]))
+            self.assertFalse(st.resolve_blocked(t["id"], "done", if_updated=seen["updated"]))
+            self.assertEqual(st.get(t["id"])["status"], "blocked")
+
     def test_running_legacy_task_keeps_keyed_tasks_of_its_kind_off(self):    # R2 #3
         with S.Store() as st:
             st.add("verify", "legacy")

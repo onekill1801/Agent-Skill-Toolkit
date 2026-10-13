@@ -318,6 +318,8 @@ class Store:
                 n = self.db.execute("update checkpoints set valid=0 where task_id=? and valid=1",
                                     (task_id,)).rowcount
             if n:
+                # a new revision of the task: callers that resolve "the revision I inspected" see it
+                self.db.execute("update tasks set updated=? where id=?", (time.time(), task_id))
                 self._event(task_id, "invalidated", steps=steps or "all", count=n, reason=reason or None)
         return n
 
@@ -382,11 +384,13 @@ class Store:
         return bool(n)
 
     def resolve_blocked(self, task_id: str, status: str = "done", by: str = "", note: str = "",
-                        if_updated: float = None, if_error_prefix: str = None) -> bool:
+                        if_updated: float = None, if_error_prefix: str = None,
+                        if_checkpoint_valid: int = None) -> bool:
         """Close a BLOCKED task whose outcome happened elsewhere (e.g. a human approved and the
         sweeper posted). Only from blocked, only to done/cancelled — never steals a lease.
         if_updated / if_error_prefix: resolve only the exact revision the caller inspected (a task
-        re-run and blocked for another reason meanwhile is left alone — Codex F.7 R2 #5)."""
+        re-run and blocked for another reason meanwhile is left alone — Codex F.7 R2 #5).
+        if_checkpoint_valid: that checkpoint id must still be valid (the evidence the decision used)."""
         if status not in ("done", "cancelled"):
             raise ValueError("status must be done or cancelled")
         q, args = "update tasks set status=?, updated=? where id=? and status='blocked'", [status, time.time(), task_id]
@@ -396,6 +400,9 @@ class Store:
         if if_error_prefix is not None:
             q += " and substr(coalesce(last_error,''), 1, ?)=?"
             args += [len(if_error_prefix), if_error_prefix]
+        if if_checkpoint_valid is not None:
+            q += " and exists (select 1 from checkpoints c where c.id=? and c.task_id=? and c.valid=1)"
+            args += [int(if_checkpoint_valid), task_id]
         with self._tx():
             n = self.db.execute(q, args).rowcount
             if n:
