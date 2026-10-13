@@ -164,6 +164,12 @@ def load_spec(repo: str, base: str = "", spec_file: str = "") -> dict:
         r["name"] = name
         rungs.append(r)
     for i, r in enumerate(rungs):
+        if r.get("kind") == "ac_coverage":
+            src = r.get("from")
+            ok = [x["name"] for x in rungs[:i] if x.get("full_suite") is True and x.get("junit")]
+            if src not in ok:
+                raise ValueError(f"`{r['name']}` (ac_coverage) needs `from:` = an EARLIER rung with "
+                                 f"`full_suite: true` and `junit:` (candidates: {ok or 'none'})")
         cov = r.get("covered_by")
         suites = [x["name"] for x in rungs[i + 1:] if x.get("kind", "cmd") == "cmd" and x.get("full_suite") is True]
         if cov and cov not in suites:
@@ -274,8 +280,46 @@ def _expand(argv: list, tests: list) -> list:
     return out
 
 
+def parse_junit(repo: str, patterns, since: float, cap: int = 20000) -> list:
+    """Executed test cases from JUnit XML files written by THIS run (mtime >= since).
+    [{"id", "classname", "name", "file", "status": passed|failure|error|skipped}]"""
+    import glob
+    import xml.etree.ElementTree as ET
+    out = []
+    for pattern in ([patterns] if isinstance(patterns, str) else list(patterns or [])):
+        for path in sorted(glob.glob(os.path.join(repo, pattern), recursive=True)):
+            try:
+                if os.path.getmtime(path) < since - 1 or os.path.getsize(path) > 50 * 2 ** 20:
+                    continue                     # a report from an earlier run proves nothing about this one
+                root = ET.parse(path).getroot()
+            except (OSError, ET.ParseError):
+                continue
+            for tc in root.iter("testcase"):
+                status = "passed"
+                for child in tc:
+                    tag = child.tag.lower()
+                    if tag in ("failure", "error", "skipped"):
+                        status = tag
+                        break
+                cls, name = tc.get("classname", ""), tc.get("name", "")
+                out.append({"id": f"{cls}.{name}".strip("."), "classname": cls, "name": name,
+                            "file": (tc.get("file") or "").replace("\\", "/"), "status": status})
+                if len(out) >= cap:
+                    return out
+    return out
+
+
 def rung_cmd(ctx, rung: dict, job: dict) -> dict:
-    return _exec(ctx, job["repo"], argv_of(rung["run"]), int(rung.get("timeout", 3600)))
+    t0 = time.time()
+    res = _exec(ctx, job["repo"], argv_of(rung["run"]), int(rung.get("timeout", 3600)))
+    if rung.get("junit"):
+        tests = parse_junit(job["repo"], rung["junit"], t0)
+        res["tests_run"] = tests                 # per-test evidence for ac_coverage (same HEAD, same run)
+        res["tests_summary"] = {k: sum(1 for t in tests if t["status"] == k)
+                                for k in ("passed", "failure", "error", "skipped")}
+        if not tests and res.get("passed"):
+            res["junit_missing"] = True
+    return res
 
 
 def rung_affected(ctx, rung: dict, job: dict) -> dict:
@@ -392,40 +436,64 @@ def rung_cross_review(ctx, rung: dict, job: dict) -> dict:
 
 TEST_FILE = re.compile(r"(^|/)(tests?|specs?|__tests__)/|(^|/)src/(test|it)/|(^|/)test_[^/]*\.py$|_test\.(py|go|rb)$|"
                        r"(Test|Tests|IT|Spec)\.(java|kt|scala|groovy)$|\.(spec|test)\.[cm]?[jt]sx?$", re.I)
+TEST_CODE = re.compile(r"\.(py|java|kt|kts|scala|groovy|js|jsx|ts|tsx|mjs|cjs|go|rb|cs|php)$", re.I)
 AC_MARKER = r"(?<![A-Za-z0-9])AC[-_ ]?0*(\d{1,3})(?![0-9])"   # test_ac1_x, AC-2, @DisplayName("AC3 ...")
 
 
-def ac_markers(repo: str, base: str, marker: str = AC_MARKER) -> dict:
-    """{"AC1": ["tests/test_x.py:12", ...]} — AC markers in test files CHANGED on this branch
-    (base...HEAD), read at HEAD: a test the branch did not touch does not prove the new AC."""
-    rx = re.compile(marker, re.I)
-    found = {}
-    for path in _changed_files(repo, base):
-        if not TEST_FILE.search(path.replace("\\", "/")):
-            continue
-        try:
-            text = git(repo, "show", f"HEAD:{path}")
-        except RuntimeError:                       # deleted on this branch
-            continue
-        for n, line in enumerate(text.splitlines(), 1):
-            for m in rx.finditer(line):
-                found.setdefault(f"AC{int(m.group(1))}", []).append(f"{path}:{n}")
-    return found
+def _changed_test_files(repo: str, base: str) -> set:
+    return {p.replace("\\", "/") for p in _changed_files(repo, base)
+            if TEST_FILE.search(p.replace("\\", "/")) and TEST_CODE.search(p)}
+
+
+def test_case_file(tc: dict, changed: set) -> str:
+    """Which changed test file a JUnit test case comes from ('' if it cannot be tied to one)."""
+    if tc.get("file"):
+        f = tc["file"].lstrip("./")
+        return next((c for c in changed if c == f or c.endswith("/" + f) or f.endswith("/" + c)), "")
+    cls = re.sub(r"\$.*$", "", tc.get("classname", ""))
+    parts = cls.split(".")
+    for n in range(len(parts), 0, -1):            # python: tests.test_calc.T -> tests/test_calc.py
+        stem = "/".join(parts[:n])
+        hit = next((c for c in changed if re.sub(r"\.\w+$", "", c) == stem or
+                    re.sub(r"\.\w+$", "", c).endswith("/" + stem)), "")
+        if hit:
+            return hit
+    last = parts[-1] if parts else ""             # java/kotlin: com.x.FooTest -> .../FooTest.java
+    return next((c for c in changed if re.search(rf"(^|/){re.escape(last)}\.(java|kt|scala|groovy)$", c)), "") if last else ""
 
 
 def rung_ac_coverage(ctx, rung: dict, job: dict) -> dict:
-    """Every acceptance criterion of the task has at least one test on this branch that names it.
-    Not fixable by the fixer (it may not touch tests): a missing AC test goes back to a human /
-    the implementer."""
+    """Every acceptance criterion has at least one test case that RAN AND PASSED in the `from`
+    suite rung of this same run (same HEAD), whose name carries the AC marker and which lives in a
+    test file changed on this branch. Comments, docs, skipped / failed / undiscovered tests do not
+    count. Not fixable by the fixer (it may not touch tests)."""
     acs = [a for a in (job.get("acs") or []) if a.get("id")]
     if not acs:
         return {"passed": True, "skipped": "task has no acceptance criteria"}
-    marks = ac_markers(job["repo"], job["base"], rung.get("marker") or AC_MARKER)
-    missing = [a["id"] for a in acs if a["id"].upper() not in marks]
-    return {"passed": not missing, "fixable": False, "covered": {k: v[:5] for k, v in marks.items()},
-            "missing": missing,
-            "summary": "" if not missing else "no test on this branch names " + ", ".join(missing) +
-                       f" (marker {rung.get('marker') or AC_MARKER!r} in a changed test file)"}
+    src = ctx.outputs.get(rung["from"]) or {}
+    tests = src.get("tests_run")
+    if not tests:
+        return {"passed": False, "fixable": False, "missing": [a["id"] for a in acs],
+                "summary": f"`{rung['from']}` produced no JUnit test results — per-AC evidence is impossible "
+                           f"(check its `junit:` glob)"}
+    rx = re.compile(rung.get("marker") or AC_MARKER, re.I)
+    changed = _changed_test_files(job["repo"], job["base"])
+    covered, not_run = {}, {}
+    for tc in tests:
+        ids = {f"AC{int(m.group(1))}" for m in rx.finditer(f"{tc['classname']} {tc['name']}")}
+        if not ids or not test_case_file(tc, changed):
+            continue
+        for aid in ids:
+            (covered if tc["status"] == "passed" else not_run).setdefault(aid, []).append(f"{tc['id']} [{tc['status']}]")
+    missing = [a["id"] for a in acs if a["id"].upper() not in covered]
+    summary = ""
+    if missing:
+        detail = [f"{m}: " + ("only " + ", ".join(not_run[m][:3]) if m in not_run else "no executed test names it")
+                  for m in missing]
+        summary = "acceptance criteria without a passing test on this branch — " + "; ".join(detail)
+    return {"passed": not missing, "fixable": False, "covered": {k: v[:5] for k, v in covered.items()},
+            "not_run": {k: v[:5] for k, v in not_run.items()}, "missing": missing,
+            "suite_sha": src.get("sha", ""), "summary": summary}
 
 
 RUNGS = {"cmd": rung_cmd, "affected_tests": rung_affected, "cross_review": rung_cross_review,
@@ -617,6 +685,10 @@ def steps_for(task_data: dict) -> list:
             job = _job(ctx, spec)
             res = RUNGS[rung["kind"]](ctx, rung, job)
             if not res.get("passed") and res.get("fixable") is False:
+                # no checkpoint is saved for a blocked step: keep this red result for the report
+                red = {"step": rung["name"], "input_key": f"{head(job['repo'])}:{spec['hash']}",
+                       "data": {**{k: v for k, v in res.items() if k != "tests_run"}, "sha": head(job["repo"])}}
+                ctx.store.update_data(ctx.task["id"], ctx.lease, last_red=red)
                 raise E.NeedsHuman(f"`{rung['name']}` failed and is not auto-fixable:\n{res.get('summary', '')}")
             if not res.get("passed"):
                 fix(ctx, rung, res, job)           # raises Retry / NeedsHuman / QuotaExceeded
@@ -639,58 +711,73 @@ def steps_for(task_data: dict) -> list:
 # ----------------------------------------------------------------------------- evidence report (F.3)
 
 def evidence_report(st, task_id: str) -> dict:
-    """AC -> evidence table + what WAS and was NOT checked, from the store (design §6.4 c)."""
+    """AC -> evidence table + what WAS and was NOT checked (design §6.4 c). Only checkpoints made
+    under the CURRENT spec (input key carries its hash) count; anything else is reported as
+    not checked rather than reinterpreted (Codex F.3 #3)."""
     t = st.get(task_id)
     if not t:
         raise ValueError(f"no task {task_id}")
     d = t["data"]
+    spec = load_spec(d["repo"], d.get("base", ""), d.get("spec_file", ""))
     cps = {}
     for c in st.checkpoints(task_id, valid_only=True):
         cps[c["step"]] = c
-    try:
-        spec = load_spec(d["repo"], d.get("base", ""), d.get("spec_file", ""))
-        rungs = spec["rungs"]
-    except (ValueError, RuntimeError, OSError):
-        rungs = [{"name": n, "kind": "?"} for n in cps]
+    red = d.get("last_red") or {}
+    if red.get("step") and red["step"] not in cps:      # a blocked, not-fixable rung (no checkpoint)
+        cps[red["step"]] = red
+
+    def current(c):
+        return bool(c) and str(c.get("input_key") or "").endswith(":" + spec["hash"])
+
     rows = []
-    for r in rungs:
+    for r in spec["rungs"]:
         c = cps.get(r["name"])
         out = (c or {}).get("data") or {}
         if not c:
             state = "chưa chạy"
+        elif not current(c):
+            state = "kết quả cũ (spec đã đổi)"
         elif out.get("skipped"):
             state = f"bỏ qua: {out['skipped']}"
         else:
             state = "xanh" if out.get("passed") else "đỏ"
         rows.append({"rung": r["name"], "kind": r.get("kind", "cmd"), "state": state,
-                     "sha": (out.get("sha") or "")[:8], "seconds": out.get("seconds")})
+                     "sha": (out.get("sha") or "")[:8], "seconds": out.get("seconds"),
+                     "tests": out.get("tests_summary")})
     green = {x["rung"] for x in rows if x["state"] == "xanh"}
-    suites = [r["name"] for r in rungs if r.get("full_suite")]
-    covered = (cps.get(next((r["name"] for r in rungs if r.get("kind") == "ac_coverage"), ""), {}) or {}) \
-        .get("data", {}).get("covered", {})
+    ac_rung = next((r for r in spec["rungs"] if r.get("kind") == "ac_coverage"), None)
+    ac_cp = cps.get(ac_rung["name"]) if ac_rung else None
+    ac_data = (ac_cp or {}).get("data") or {}
+    usable = bool(ac_rung) and current(ac_cp)
     acs = []
     for a in d.get("acs") or []:
-        tests = covered.get(a["id"].upper(), [])
-        suite_ok = any(s_ in green for s_ in suites)
-        status = ("✅" if tests and suite_ok else "⚠" if tests else "❌")
+        aid = a["id"].upper()
+        if not usable:
+            status, tests = "chưa kiểm", []
+        elif aid in (ac_data.get("covered") or {}):
+            status, tests = "✅", ac_data["covered"][aid]
+        elif aid in (ac_data.get("not_run") or {}):
+            status, tests = "⚠ có test nhưng không chạy/không qua", ac_data["not_run"][aid]
+        else:
+            status, tests = "❌ không có test", []
         acs.append({"id": a["id"], "text": a.get("text", ""), "tests": tests, "status": status})
-    kinds = {r.get("kind", "cmd") for r in rungs}
+    kinds = {r.get("kind", "cmd") for r in spec["rungs"]}
     not_checked = [label for kind, label in (("affected_tests", "test liên quan (CodeGraph)"),
                                              ("cross_review", "review chéo"), ("ac_coverage", "test cho từng AC"))
                    if kind not in kinds]
     not_checked += [f"{x['rung']} ({x['state']})" for x in rows if x["state"] != "xanh"]
-    if not suites:
+    if not any(r.get("full_suite") for r in spec["rungs"]):
         not_checked.append("full suite (không bậc nào khai full_suite: true)")
     not_checked.append("deploy dev / e2e / đo hiệu năng (F.8 — chưa có)")
     head_sha = next((x["sha"] for x in reversed(rows) if x["sha"]), "")
     lines = [f"## Bằng chứng — {t.get('title') or task_id}  @{head_sha}", ""]
     if acs:
-        lines += ["| AC | Nội dung | Test | Kết quả |", "|---|---|---|---|"]
+        lines += ["| AC | Nội dung | Test đã chạy | Kết quả |", "|---|---|---|---|"]
         lines += [f"| {a['id']} | {a['text'][:80]} | {', '.join(a['tests'][:3]) or '—'} | {a['status']} |" for a in acs]
         lines.append("")
-    lines += ["| Bậc | Loại | Kết quả | SHA | Giây |", "|---|---|---|---|---|"]
-    lines += [f"| {x['rung']} | {x['kind']} | {x['state']} | {x['sha']} | {x['seconds'] if x['seconds'] is not None else ''} |"
-              for x in rows]
+    lines += ["| Bậc | Loại | Kết quả | SHA | Giây | Test |", "|---|---|---|---|---|---|"]
+    lines += [f"| {x['rung']} | {x['kind']} | {x['state']} | {x['sha']} | "
+              f"{x['seconds'] if x['seconds'] is not None else ''} | {x['tests'] or ''} |" for x in rows]
     lines += ["", "**Đã kiểm:** " + (", ".join(sorted(green)) or "—"),
               "**Chưa kiểm:** " + "; ".join(not_checked)]
     return {"task_id": task_id, "status": t["status"], "acs": acs, "rungs": rows, "not_checked": not_checked,

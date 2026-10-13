@@ -42,9 +42,13 @@ def parse_acs(items: list) -> list:
         text = str(raw).strip().lstrip("-•* ").strip()
         if not text:
             continue
-        m = re.match(r"(?i)^AC[-_ ]?0*(\d{1,3})\s*[.:)\-]\s*(.*)$", text)
+        m = re.match(r"(?i)^AC[-_ ]?0*(\d+)\s*[.:)\-]\s*(.*)$", text)
         if m:
+            if len(m.group(1)) > 3:                # the test marker only knows AC1..AC999 — never renumber
+                raise ValueError(f"acceptance criterion id AC{m.group(1)} is out of range (AC1..AC999)")
             aid, text = f"AC{int(m.group(1))}", m.group(2).strip()
+        elif re.match(r"(?i)^AC[-_ ]?\d", text):
+            raise ValueError(f"malformed acceptance criterion id in {text[:40]!r} (use 'AC<n>: text')")
         else:
             n = 1
             while f"AC{n}" in used:
@@ -57,7 +61,8 @@ def parse_acs(items: list) -> list:
     return out
 
 
-def start(repo: str, base: str, spec: str, fixer_role: str, allow_default: bool, acs: list = None) -> dict:
+def start(repo: str, base: str, spec: str, fixer_role: str, allow_default: bool, acs: list = None,
+          update_acs: bool = False) -> dict:
     repo = os.path.abspath(repo)
     br = L.guard_branch(repo, allow_default)
     s = L.load_spec(repo, base, spec)                       # fail fast on a bad spec
@@ -72,6 +77,20 @@ def start(repo: str, base: str, spec: str, fixer_role: str, allow_default: bool,
                          "acs": acs or [],
                          "spec_file": os.path.abspath(spec) if spec else "", "fixer_role": fixer_role},
                    max_attempts=3)
+        if t["duplicate"] and (t["data"].get("acs") or []) != (acs or []):
+            # an open task for this branch has DIFFERENT ACs: never drop the new ones silently (F.3 #4)
+            if not update_acs:
+                raise ValueError(f"task {t['id']} is already open for {br} with other acceptance criteria — "
+                                 "pass --update-acs to replace them (its checks will run again), or cancel it")
+            if t["status"] == "running":
+                raise ValueError(f"task {t['id']} is running — wait for it or cancel it before changing ACs")
+            data = dict(t["data"], acs=acs or [])
+            data.pop("last_red", None)                    # judged against the old ACs
+            st.db.execute("update tasks set data=?, updated=? where id=?",
+                          (json.dumps(data, ensure_ascii=False), time.time(), t["id"]))
+            st.invalidate(t["id"], reason="acceptance criteria changed")
+            if t["status"] == "blocked":
+                st.unblock(t["id"], by="update-acs")
     return {"task_id": t["id"], "duplicate": t["duplicate"], "branch": br,
             "rungs": [r["name"] for r in s["rungs"]]}
 
@@ -103,6 +122,7 @@ def main(argv=None) -> int:
             p.add_argument("--allow-default-branch", action="store_true")
             p.add_argument("--ac", action="append", default=[], help="acceptance criterion (repeatable), e.g. 'AC1: ...'")
             p.add_argument("--ac-file", default="", help="one acceptance criterion per line")
+            p.add_argument("--update-acs", action="store_true", help="replace the ACs of an open task for this branch")
     p = sub.add_parser("work")
     p.add_argument("--once", action="store_true")
     p.add_argument("--interval", type=int, default=30)
@@ -121,7 +141,7 @@ def main(argv=None) -> int:
             if a.ac_file:
                 with open(a.ac_file, encoding="utf-8") as f:
                     items += f.read().splitlines()
-            out = start(a.repo, a.base, a.spec, a.fixer_role, a.allow_default_branch, parse_acs(items))
+            out = start(a.repo, a.base, a.spec, a.fixer_role, a.allow_default_branch, parse_acs(items), a.update_acs)
         elif a.cmd == "report":
             with store_mod.Store() as st:
                 out = L.evidence_report(st, a.task_id)

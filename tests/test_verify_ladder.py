@@ -451,61 +451,141 @@ class LadderTest(unittest.TestCase):
         with mock.patch("shutil.which", return_value=None):
             self.assertIsNone(L._affected(self.repo, ["src/calc.py"]))
 
-    # ------------------------------------------------------------------ F.3: AC -> tests -> evidence
-    def ac_spec(self):
-        spec = SPEC.replace("    suite:", "    acs:\n      kind: ac_coverage\n    suite:")
+    # ------------------------------------------------------------------ F.3: AC -> executed tests -> evidence
+    JUNIT_HELPER = os.path.join(_ROOT, ".claude", "skills", "_runtime", "agent_skill_toolkit", "workflows",
+                                "verify", "unittest_junit.py").replace("\\", "/")
+
+    def ac_spec(self, extra_suite_flag=""):
+        spec = textwrap.dedent(f"""
+            verify:
+              base: main
+              ladder:
+                suite:
+                  run:
+                    - {PY}
+                    - {self.JUNIT_HELPER}
+                    - -s
+                    - tests
+                    - -o
+                    - build/junit.xml
+                  protects: []
+                  full_suite: true
+                  junit: build/junit.xml
+                acs:
+                  kind: ac_coverage
+                  from: suite
+              budgets:
+                max_fix_rounds_per_rung: 1
+            """)
         f = os.path.join(self.tmp, "ac.yml")
         open(f, "w").write(spec)
+        gi = os.path.join(self.repo, ".gitignore")
+        if "build/" not in open(gi).read():
+            open(gi, "a").write("build/\n")
+            git(self.repo, "commit", "-qam", "ignore build")
         return f
 
     def add_test(self, body, msg="tests for ACs"):
         open(os.path.join(self.repo, "tests", "test_calc.py"), "a").write(body)
-        git(self.repo, "commit", "-qam", msg)
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", msg)
+
+    def run_ac(self, acs):
+        out = V.start(self.repo, "main", self.ac_spec(), "implement", False, V.parse_acs(acs))
+        return out, V.work("w", once=True, interval=0)["ran"]
 
     def test_parse_acs(self):
         self.assertEqual(V.parse_acs(["AC2: trả .xlsx", "- 403 khi không quyền", "", "ac-3) nhanh"]),
                          [{"id": "AC2", "text": "trả .xlsx"}, {"id": "AC1", "text": "403 khi không quyền"},
                           {"id": "AC3", "text": "nhanh"}])
-        with self.assertRaises(ValueError):
-            V.parse_acs(["AC1: a", "AC1: b"])
+        for bad in (["AC1: a", "AC1: b"], ["AC1000: must deny access"], ["AC12x bad"]):
+            with self.assertRaises(ValueError, msg=bad):
+                V.parse_acs(bad)
 
-    def test_every_ac_needs_a_test_on_the_branch_and_it_is_not_auto_fixed(self):
-        self.add_test("\n    def test_ac1_add(self):  # AC1\n        self.assertEqual(calc.add(1, 1), 2)\n")
-        V.start(self.repo, "main", self.ac_spec(), "implement", False,
-                V.parse_acs(["AC1: cộng đúng", "AC2: cộng số âm"]))
-        ran = V.work("w", once=True, interval=0)["ran"]
-        self.assertEqual(ran[-1]["status"], "blocked")
-        self.assertIn("AC2", self.task()["last_error"])
-        self.assertIn("not auto-fixable", self.task()["last_error"])
-        self.assertEqual(self.calls("fix"), 0)                         # the fixer may not write tests
-
-    def test_marker_in_an_untouched_test_does_not_count(self):
-        # test_calc.py on main has no AC marker; a marker in a file the branch did not change is ignored
-        open(os.path.join(self.repo, "src", "calc.py"), "a").write("# change\n")
-        git(self.repo, "commit", "-qam", "prod only")
-        marks = L.ac_markers(self.repo, "main")
-        self.assertEqual(marks, {})
-
-    def test_evidence_report(self):
-        self.add_test("\n    def test_ac1_add(self):  # AC1\n        self.assertEqual(calc.add(1, 1), 2)\n"
-                      "\n    def test_AC_2_negative(self):\n        self.assertEqual(calc.add(-1, -1), -2)\n")
-        out = V.start(self.repo, "main", self.ac_spec(), "implement", False,
-                      V.parse_acs(["AC1: cộng đúng", "AC2: cộng số âm"]))
-        self.assertEqual(V.work("w", once=True, interval=0)["ran"][-1]["status"], "done")
+    def test_acs_covered_by_executed_passing_tests(self):
+        self.add_test("    def test_ac1_add(self):\n        self.assertEqual(calc.add(1, 1), 2)\n"
+                      "    def test_AC_2_negative(self):\n        self.assertEqual(calc.add(-1, -1), -2)\n")
+        out, ran = self.run_ac(["AC1: cộng đúng", "AC2: cộng số âm"])
+        self.assertEqual(ran[-1]["status"], "done")
         with S.Store() as st:
             rep = L.evidence_report(st, out["task_id"])
         self.assertEqual([a["status"] for a in rep["acs"]], ["✅", "✅"])
-        self.assertIn("tests/test_calc.py", rep["acs"][0]["tests"][0])
-        md = rep["markdown"]
-        self.assertIn("| AC1 |", md)
-        self.assertIn("review chéo", md)                                # not in this ladder -> listed
-        self.assertIn("deploy dev", md)
+        self.assertIn("test_ac1_add [passed]", rep["acs"][0]["tests"][0])
+        self.assertIn("review chéo", rep["markdown"])
+        self.assertIn("deploy dev", rep["markdown"])
+
+    def test_missing_ac_blocks_and_is_not_auto_fixed(self):
+        self.add_test("    def test_ac1_add(self):\n        self.assertEqual(calc.add(1, 1), 2)\n")
+        _, ran = self.run_ac(["AC1: cộng đúng", "AC2: cộng số âm"])
+        self.assertEqual(ran[-1]["status"], "blocked")
+        self.assertIn("AC2", self.task()["last_error"])
+        self.assertIn("not auto-fixable", self.task()["last_error"])
+        self.assertEqual(self.calls("fix"), 0)
+
+    def test_comments_docs_and_skipped_tests_do_not_count(self):
+        """Codex F.3 #1/#2: a README or a comment names AC1; the only AC1 test is skipped."""
+        os.makedirs(os.path.join(self.repo, "tests", "docs"), exist_ok=True)
+        open(os.path.join(self.repo, "tests", "README.md"), "w").write("# AC1 is covered!\n")
+        self.add_test("    # def test_ac1_commented(self): pass\n"
+                      "    @unittest.skip('later')\n    def test_ac1_skipped(self):\n        pass\n")
+        out, ran = self.run_ac(["AC1: cộng đúng"])
+        self.assertEqual(ran[-1]["status"], "blocked")
+        self.assertIn("only", self.task()["last_error"])            # "only ...test_ac1_skipped [skipped]"
+        with S.Store() as st:
+            rep = L.evidence_report(st, out["task_id"])
+        self.assertTrue(rep["acs"][0]["status"].startswith("⚠"))
+
+    def test_untouched_test_file_does_not_prove_a_new_ac(self):
+        # an AC-named test that already existed on main does not count for this branch
+        self.add_test("    def test_ac1_add(self):\n        self.assertEqual(calc.add(1, 1), 2)\n", msg="old test")
+        git(self.repo, "checkout", "-q", "main")
+        git(self.repo, "merge", "-q", "feat/x")
+        git(self.repo, "checkout", "-q", "feat/x")
+        open(os.path.join(self.repo, "src", "calc.py"), "a").write("# change\n")
+        git(self.repo, "commit", "-qam", "prod only")
+        _, ran = self.run_ac(["AC1: cộng đúng"])
+        self.assertEqual(ran[-1]["status"], "blocked")
+
+    def test_report_does_not_reuse_results_of_another_spec(self):
+        """Codex F.3 #3: change the spec after verifying -> results are reported as stale."""
+        self.add_test("    def test_ac1_add(self):\n        self.assertEqual(calc.add(1, 1), 2)\n")
+        out, ran = self.run_ac(["AC1: cộng đúng"])
+        self.assertEqual(ran[-1]["status"], "done")
+        spec_file = os.path.join(self.tmp, "ac.yml")
+        open(spec_file, "a").write("  protected: []\n")           # any change to the trusted spec
+        with S.Store() as st:
+            rep = L.evidence_report(st, out["task_id"])
+        self.assertEqual(rep["acs"][0]["status"], "chưa kiểm")
+        self.assertTrue(all(r["state"].startswith("kết quả cũ") for r in rep["rungs"]))
+
+    def test_ac_coverage_needs_an_earlier_junit_full_suite(self):
+        bad = os.path.join(self.tmp, "bad_ac.yml")
+        open(bad, "w").write("verify:\n  ladder:\n    acs:\n      kind: ac_coverage\n      from: suite\n"
+                             "    suite:\n      run: x\n      protects: []\n      full_suite: true\n      junit: r.xml\n")
+        with self.assertRaises(ValueError):
+            L.load_spec(self.repo, "main", bad)
+
+    def test_restart_with_different_acs_is_explicit(self):
+        """Codex F.3 #4."""
+        self.add_test("    def test_ac1_add(self):\n        self.assertEqual(calc.add(1, 1), 2)\n")
+        spec = self.ac_spec()
+        first = V.start(self.repo, "main", spec, "implement", False, V.parse_acs(["AC1: a"]))
+        with self.assertRaises(ValueError):
+            V.start(self.repo, "main", spec, "implement", False, V.parse_acs(["AC1: a", "AC2: b"]))
+        again = V.start(self.repo, "main", spec, "implement", False, V.parse_acs(["AC1: a", "AC2: b"]), True)
+        self.assertEqual(again["task_id"], first["task_id"])
+        self.assertEqual([a["id"] for a in self.task()["data"]["acs"]], ["AC1", "AC2"])
+        self.assertEqual(V.work("w", once=True, interval=0)["ran"][-1]["status"], "blocked")   # AC2 has no test
+
+    def test_evidence_report_cli(self):
+        self.add_test("    def test_ac1_add(self):\n        self.assertEqual(calc.add(1, 1), 2)\n")
+        out, _ = self.run_ac(["AC1: cộng đúng"])
         report_file = os.path.join(self.tmp, "report.md")
         r = subprocess.run([sys.executable, os.path.join(_ROOT, ".claude", "skills", "auto-dev", "tools", "verify.py"),
                             "report", out["task_id"], "--out", report_file], capture_output=True, text=True,
                            encoding="utf-8", env=dict(os.environ))
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("| AC2 |", open(report_file, encoding="utf-8").read())
+        self.assertIn("| AC1 |", open(report_file, encoding="utf-8").read())
 
     def test_summary_keeps_errors_and_tail_only(self):
         log = "\n".join(f"line {i}" for i in range(5000)) + "\nAssertionError: 1 != 5\nFAILED (failures=1)"
