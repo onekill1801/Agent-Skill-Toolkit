@@ -388,7 +388,48 @@ def rung_cross_review(ctx, rung: dict, job: dict) -> dict:
             "findings": len(findings), "summary": "" if passed else summary}
 
 
-RUNGS = {"cmd": rung_cmd, "affected_tests": rung_affected, "cross_review": rung_cross_review}
+# ----------------------------------------------------------------------------- AC coverage (F.3)
+
+TEST_FILE = re.compile(r"(^|/)(tests?|specs?|__tests__)/|(^|/)src/(test|it)/|(^|/)test_[^/]*\.py$|_test\.(py|go|rb)$|"
+                       r"(Test|Tests|IT|Spec)\.(java|kt|scala|groovy)$|\.(spec|test)\.[cm]?[jt]sx?$", re.I)
+AC_MARKER = r"(?<![A-Za-z0-9])AC[-_ ]?0*(\d{1,3})(?![0-9])"   # test_ac1_x, AC-2, @DisplayName("AC3 ...")
+
+
+def ac_markers(repo: str, base: str, marker: str = AC_MARKER) -> dict:
+    """{"AC1": ["tests/test_x.py:12", ...]} — AC markers in test files CHANGED on this branch
+    (base...HEAD), read at HEAD: a test the branch did not touch does not prove the new AC."""
+    rx = re.compile(marker, re.I)
+    found = {}
+    for path in _changed_files(repo, base):
+        if not TEST_FILE.search(path.replace("\\", "/")):
+            continue
+        try:
+            text = git(repo, "show", f"HEAD:{path}")
+        except RuntimeError:                       # deleted on this branch
+            continue
+        for n, line in enumerate(text.splitlines(), 1):
+            for m in rx.finditer(line):
+                found.setdefault(f"AC{int(m.group(1))}", []).append(f"{path}:{n}")
+    return found
+
+
+def rung_ac_coverage(ctx, rung: dict, job: dict) -> dict:
+    """Every acceptance criterion of the task has at least one test on this branch that names it.
+    Not fixable by the fixer (it may not touch tests): a missing AC test goes back to a human /
+    the implementer."""
+    acs = [a for a in (job.get("acs") or []) if a.get("id")]
+    if not acs:
+        return {"passed": True, "skipped": "task has no acceptance criteria"}
+    marks = ac_markers(job["repo"], job["base"], rung.get("marker") or AC_MARKER)
+    missing = [a["id"] for a in acs if a["id"].upper() not in marks]
+    return {"passed": not missing, "fixable": False, "covered": {k: v[:5] for k, v in marks.items()},
+            "missing": missing,
+            "summary": "" if not missing else "no test on this branch names " + ", ".join(missing) +
+                       f" (marker {rung.get('marker') or AC_MARKER!r} in a changed test file)"}
+
+
+RUNGS = {"cmd": rung_cmd, "affected_tests": rung_affected, "cross_review": rung_cross_review,
+         "ac_coverage": rung_ac_coverage}
 
 
 # ----------------------------------------------------------------------------- fix loop
@@ -575,6 +616,8 @@ def steps_for(task_data: dict) -> list:
         def fn(ctx):
             job = _job(ctx, spec)
             res = RUNGS[rung["kind"]](ctx, rung, job)
+            if not res.get("passed") and res.get("fixable") is False:
+                raise E.NeedsHuman(f"`{rung['name']}` failed and is not auto-fixable:\n{res.get('summary', '')}")
             if not res.get("passed"):
                 fix(ctx, rung, res, job)           # raises Retry / NeedsHuman / QuotaExceeded
             require_clean(job["repo"], f"after `{rung['name']}` (the rung left files behind)")
@@ -591,3 +634,64 @@ def steps_for(task_data: dict) -> list:
             return f"{head(repo)}:{spec['hash']}"
         return (rung["name"], fn, key)
     return [make(r) for r in spec["rungs"]]
+
+
+# ----------------------------------------------------------------------------- evidence report (F.3)
+
+def evidence_report(st, task_id: str) -> dict:
+    """AC -> evidence table + what WAS and was NOT checked, from the store (design §6.4 c)."""
+    t = st.get(task_id)
+    if not t:
+        raise ValueError(f"no task {task_id}")
+    d = t["data"]
+    cps = {}
+    for c in st.checkpoints(task_id, valid_only=True):
+        cps[c["step"]] = c
+    try:
+        spec = load_spec(d["repo"], d.get("base", ""), d.get("spec_file", ""))
+        rungs = spec["rungs"]
+    except (ValueError, RuntimeError, OSError):
+        rungs = [{"name": n, "kind": "?"} for n in cps]
+    rows = []
+    for r in rungs:
+        c = cps.get(r["name"])
+        out = (c or {}).get("data") or {}
+        if not c:
+            state = "chưa chạy"
+        elif out.get("skipped"):
+            state = f"bỏ qua: {out['skipped']}"
+        else:
+            state = "xanh" if out.get("passed") else "đỏ"
+        rows.append({"rung": r["name"], "kind": r.get("kind", "cmd"), "state": state,
+                     "sha": (out.get("sha") or "")[:8], "seconds": out.get("seconds")})
+    green = {x["rung"] for x in rows if x["state"] == "xanh"}
+    suites = [r["name"] for r in rungs if r.get("full_suite")]
+    covered = (cps.get(next((r["name"] for r in rungs if r.get("kind") == "ac_coverage"), ""), {}) or {}) \
+        .get("data", {}).get("covered", {})
+    acs = []
+    for a in d.get("acs") or []:
+        tests = covered.get(a["id"].upper(), [])
+        suite_ok = any(s_ in green for s_ in suites)
+        status = ("✅" if tests and suite_ok else "⚠" if tests else "❌")
+        acs.append({"id": a["id"], "text": a.get("text", ""), "tests": tests, "status": status})
+    kinds = {r.get("kind", "cmd") for r in rungs}
+    not_checked = [label for kind, label in (("affected_tests", "test liên quan (CodeGraph)"),
+                                             ("cross_review", "review chéo"), ("ac_coverage", "test cho từng AC"))
+                   if kind not in kinds]
+    not_checked += [f"{x['rung']} ({x['state']})" for x in rows if x["state"] != "xanh"]
+    if not suites:
+        not_checked.append("full suite (không bậc nào khai full_suite: true)")
+    not_checked.append("deploy dev / e2e / đo hiệu năng (F.8 — chưa có)")
+    head_sha = next((x["sha"] for x in reversed(rows) if x["sha"]), "")
+    lines = [f"## Bằng chứng — {t.get('title') or task_id}  @{head_sha}", ""]
+    if acs:
+        lines += ["| AC | Nội dung | Test | Kết quả |", "|---|---|---|---|"]
+        lines += [f"| {a['id']} | {a['text'][:80]} | {', '.join(a['tests'][:3]) or '—'} | {a['status']} |" for a in acs]
+        lines.append("")
+    lines += ["| Bậc | Loại | Kết quả | SHA | Giây |", "|---|---|---|---|---|"]
+    lines += [f"| {x['rung']} | {x['kind']} | {x['state']} | {x['sha']} | {x['seconds'] if x['seconds'] is not None else ''} |"
+              for x in rows]
+    lines += ["", "**Đã kiểm:** " + (", ".join(sorted(green)) or "—"),
+              "**Chưa kiểm:** " + "; ".join(not_checked)]
+    return {"task_id": task_id, "status": t["status"], "acs": acs, "rungs": rows, "not_checked": not_checked,
+            "markdown": "\n".join(lines)}
