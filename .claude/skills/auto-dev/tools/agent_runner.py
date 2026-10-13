@@ -258,6 +258,27 @@ def _effective_model(backend: str, model: str, cmd_template: str) -> str:
     return model or CLI_PRESETS[backend]["default_model"] or ""
 
 
+def _with_deadline(fn, seconds: float):
+    """Run fn with an OVERALL deadline (connect + a slowly dripping response): urlopen's timeout is per
+    socket operation only (Codex F.11 R2). On expiry the call is abandoned (daemon thread)."""
+    import threading
+    box = {}
+
+    def go():
+        try:
+            box["ok"] = fn()
+        except BaseException as e:  # noqa: BLE001
+            box["err"] = e
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    t.join(seconds)
+    if t.is_alive():
+        raise AgentRunError(f"API turn exceeded its {seconds:.0f}s deadline")
+    if "err" in box:
+        raise box["err"]
+    return box["ok"]
+
+
 def _charged_turn(backend, model, role, timeout, notes, fn):
     """Every REAL agent turn goes through here (Codex F.11 #1/#2/#7): the claude model follows the
     usage tier, the turn is reserved atomically against the daily cap / the task's budget BEFORE it
@@ -282,7 +303,7 @@ def _charged_turn(backend, model, role, timeout, notes, fn):
             raise AgentBudgetError(str(b), {"kind": "budget", "retry_other_backend": False})
     t0 = time.time()
     try:
-        return fn(model, int(max(1, res["timeout"])))
+        return fn(model, float(res["timeout"]))           # fractional, never rounded up
     finally:
         try:
             with store_mod.Store() as st:
@@ -310,7 +331,7 @@ def run_turn(prompt: str, *, system: str = None, backend: str = "claude",
     eff = _effective_model(backend, model, cmd_template)
     if backend == "api":
         return _charged_turn(backend, eff, role, timeout, notes,
-                             lambda m, t: _run_api(prompt, system, m, max_tokens, t))
+                             lambda m, t: _with_deadline(lambda: _run_api(prompt, system, m, max_tokens, t), t))
     return _charged_turn(backend, eff, role, timeout, notes,
                          lambda m, t: _run_cli(prompt, system, backend, m, cmd_template, prompt_via, t,
                                                cwd=cwd, env_extra=env_extra))
@@ -421,7 +442,8 @@ def run_role(prompt: str, role: str, *, system: str = None, cwd: str = None,
             tried.append({"spec": spec, "error": msg[:200], "kind": c.get("kind"),
                           "resume_at": c.get("resume_at")})
             if not c.get("retry_other_backend"):
-                raise AgentRunError(f"{spec}: {msg}", c)
+                # keep the subtype: a quota stays QuotaExceeded (pause), a budget stays a budget error
+                raise e.__class__(f"{spec}: {msg}", c) from e
         finally:
             slot.__exit__()
     quotas = [t["resume_at"] for t in tried if t.get("kind") == "quota" and t.get("resume_at")]

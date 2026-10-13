@@ -24,6 +24,7 @@ import json
 import time
 
 SAVE, CRITICAL, EXHAUSTED = 80, 95, 100
+MIN_TURN_S = 10                         # a turn with less time left than this is refused, not squeezed
 USAGE_TTL_S = 6 * 3600
 AGENT_BACKEND = "agent_runner"          # usage rows of agent turns (reserve / settle)
 LIGHT_ROLES = ("log_read", "classify", "summarize", "triage", "handoff")
@@ -147,7 +148,7 @@ def reserve(st, task_id: str, step: str, backend: str, model: str, timeout: floa
                 raise BudgetSpent("budget", f"budget spent: {used['runs']}/{b['agent_runs']} agent runs for this task")
             if b.get("agent_seconds") is not None:
                 left = float(b["agent_seconds"]) - used["seconds"]
-                if left <= 0:
+                if left < MIN_TURN_S:                      # never launch a turn longer than what is left
                     raise BudgetSpent("budget", f"budget spent: {used['seconds']:.0f}/{b['agent_seconds']} "
                                                 "agent seconds for this task")
                 timeout = min(timeout, left)
@@ -158,6 +159,6 @@ def reserve(st, task_id: str, step: str, backend: str, model: str, timeout: floa
 
 
 def settle(st, row: int, seconds: float) -> None:
-    """Replace the worst case by the real duration (never more than reserved)."""
-    st.db.execute("update usage set seconds=min(coalesce(seconds, ?), ?) where id=?",
-                  (float(seconds), float(seconds), int(row)))
+    """Replace the worst case by the REAL duration — even if it ran over (accounting tells the truth;
+    the hard stop is the turn's deadline — Codex F.11 R2)."""
+    st.db.execute("update usage set seconds=? where id=?", (float(seconds), int(row)))

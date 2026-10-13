@@ -95,7 +95,8 @@ class TierTest(Base):
 
     def test_malformed_policy_denies_all(self):                           # Codex F.11 #6
         self.add_mix()
-        for bad in ("[]", '{"only_kinds": "review_mr", "expires_at": 9e12}', '{"deny_kinds": [1], "expires_at": 9e12}',
+        for bad in ("[]", '{"only_kinds": [], "expires_at": NaN}', '{"only_kinds": [], "expires_at": "NaN"}',
+                    '{"only_kinds": "review_mr", "expires_at": 9e12}', '{"deny_kinds": [1], "expires_at": 9e12}',
                     '{"deny_kinds": [], "expires_at": "soon"}', '{"deny_kinds": []}'):
             self.st.set_setting("claim_policy", bad)
             self.assertEqual(self.st.claim_policy().get("unreadable"), True, bad)
@@ -140,6 +141,42 @@ class TurnBudgetTest(Base):
         self.assertEqual(res["timeout"], 30)                   # only what is left
         with self.assertRaises(U.BudgetSpent):                 # unsettled = worst case still counts
             U.reserve(self.st, t["id"], "s", "claude", "sonnet", 600)
+
+    def test_too_little_time_left_is_refused_not_squeezed(self):            # Codex F.11 R2
+        t = self.st.add("k", "x", data={"budget": {"agent_seconds": 25}})
+        res = U.reserve(self.st, t["id"], "s", "claude", "", 600)
+        U.settle(self.st, res["row"], 20)                      # 5 s left < MIN_TURN_S
+        with self.assertRaises(U.BudgetSpent):
+            U.reserve(self.st, t["id"], "s", "claude", "", 600)
+        U.settle(self.st, res["row"], 40)                      # an overrun is recorded as it was
+        self.assertEqual(U.agent_usage(self.st, t["id"])["seconds"], 40)
+
+    def test_fractional_timeout_is_kept(self):
+        seen = []
+        t = self.st.add("k", "x", data={"budget": {"agent_seconds": 12.5}})
+        with mock.patch.dict(os.environ, {"TOOLKIT_TASK_ID": t["id"]}):
+            with mock.patch.object(self.ar, "_run_cli", side_effect=lambda *a, **k: seen.append(a[6]) or "ok"):
+                self.ar.run_turn("p", backend="claude", model="sonnet", timeout=600)
+        self.assertEqual(seen, [12.5])
+
+    def test_api_turn_has_an_overall_deadline(self):
+        def slow(*a, **k):
+            time.sleep(3)
+            return "late"
+        with mock.patch.object(self.ar, "_run_api", side_effect=slow):
+            t0 = time.time()
+            with self.assertRaises(self.ar.AgentRunError):
+                self.ar._with_deadline(lambda: self.ar._run_api(), 0.3)
+            self.assertLess(time.time() - t0, 2)
+
+    def test_role_routing_keeps_the_quota_type(self):                       # Codex F.11 R2
+        from agent_skill_toolkit.workflows.execution import quota
+        self.st.set_setting("daily_agent_runs", "1")
+        U.reserve(self.st, "", "", "claude", "", 60)
+        with open(os.path.join(self.tmp, "agents.json"), "w") as f:
+            json.dump({"roles": {"r": ["claude:sonnet", "codex"]}}, f)
+        with self.assertRaises(quota.QuotaExceeded):
+            self.ar.run_role("p", "r")
 
     def test_daily_cap_covers_every_caller(self):
         self.st.set_setting("daily_agent_runs", "1")

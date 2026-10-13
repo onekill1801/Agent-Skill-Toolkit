@@ -20,6 +20,7 @@ Statuses:  queued -> running -> done
 
 import contextlib
 import json
+import math
 import os
 import sqlite3
 import time
@@ -206,6 +207,8 @@ class Store:
         try:
             p = json.loads(raw)
             expires = float(p["expires_at"])
+            if not math.isfinite(expires):                 # NaN / inf never compare as expired
+                raise ValueError("expires_at")
         except (ValueError, TypeError, KeyError):
             return deny_all                # malformed = nothing new is claimed (Codex F.11 #6)
         lists = ("deny_kinds", "deny_lanes", "deny_sources", "only_kinds", "only_lanes")
