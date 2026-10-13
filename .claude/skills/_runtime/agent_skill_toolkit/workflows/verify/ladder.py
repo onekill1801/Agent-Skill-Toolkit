@@ -578,38 +578,37 @@ def rung_ratchet(ctx, rung: dict, job: dict) -> dict:
         head_bl = R.parse_baseline(git(repo, "show", f"HEAD:{baseline_path}", check=False))
     except ValueError as e:
         return stop(f"ratchet policy unreadable: {e}")
-    weaker = R.policy_weakened(rules, head_rules, baseline, head_bl)
-    if weaker:                       # merging this would weaken the policy for every later branch (Codex F.10a #1)
-        return stop("this branch weakens the architecture policy — a human must review it: " + "; ".join(weaker[:5]))
-    # files moved out of a rule's path scope while they still had violations (Codex F.10a #4)
-    moved, renames = [], {}
+    renames = {}
     for ln in git(repo, "diff", "--name-status", "-M", f"{base}...HEAD", check=False).splitlines():
         parts = ln.split("\t")
         if len(parts) == 3 and parts[0].startswith("R"):
-            old, new = parts[1], parts[2]
-            renames[old] = new
-            for r in rules:
-                if r["_files"].search(old) and not r["_files"].search(new) and r["_pkg"] is None and \
-                        any(k.startswith(f"{r['id']}|{old}|") for k in baseline):
-                    moved.append(f"{old} -> {new} (rule {r['id']})")
-    if moved:
-        return stop("files with known violations moved out of their rule's scope — review (or give the rule a "
-                    "`package` selector): " + "; ".join(moved[:5]))
+            renames[parts[1]] = parts[2]
+    weaker = R.policy_weakened(rules, head_rules, baseline, head_bl, renames)
+    if weaker:                       # merging this would weaken the policy for every later branch (Codex F.10a #1)
+        return stop("this branch weakens the architecture policy — a human must review it: " + "; ".join(weaker[:5]))
     try:
-        res = R.scan_isolated(repo, rules_text, float(rung.get("timeout", 300)))
+        res = R.scan_isolated(repo, rules_text, float(rung.get("timeout", 300)), renames)
     except (TimeoutError, RuntimeError, ValueError) as e:
         return stop(f"ratchet scan failed closed: {e}")
     if res["unscanned"]:
         return stop("covered files could not be scanned: " + "; ".join(f"{u['file']} ({u['why']})"
                                                                          for u in res["unscanned"][:5]))
     now = res["violations"]
-    # a renamed file keeps its known violations (identity = rule|file|statement)
-    carried = {}
-    for k, n in baseline.items():
-        rid, f, stmt = k.split("|", 2)
-        k2 = f"{rid}|{renames.get(f, f)}|{stmt}"
-        carried[k2] = carried.get(k2, 0) + n
+    carried = R.rename_keys(R.normalize_baseline(baseline), renames)   # renamed files keep their entries
     cmp = R.compare(carried, now)
+    # a known violation that left its file but appears in code the rule does not cover was MOVED, not
+    # fixed — whatever git thinks about renames (Codex F.10a R2 #4)
+    laundered = []
+    for k in cmp["fixed"]:
+        rid, f, stmt = k.split("|", 2)
+        if stmt in set(res["outside"].get(rid) or ()):
+            laundered.append(f"{f}: {stmt[:80]} (rule {rid})")
+    laundered += [f"{m['old']} -> {m['new']} (rule {m['rule']})" for m in res.get("renames_out") or []
+                  if any(k.startswith(f"{m['rule']}|{m['old']}|") for k in carried) or
+                  any(k.startswith(f"{m['rule']}|{m['new']}|") for k in carried)]
+    if laundered:
+        return stop("known violations moved out of their rule's scope — review (or give the rule a `package` "
+                    "selector): " + "; ".join(laundered[:5]))
     summary = f"ratchet {cmp['baseline']} -> {cmp['now']}"
     if cmp["new"]:
         summary += " — NEW violations (remove them; the baseline only shrinks):\n" + "\n".join(

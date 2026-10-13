@@ -211,6 +211,88 @@ class RatchetRungTest(Base):
         self.assertEqual(L.spec_launchers({"rungs": [{"name": "arch", "kind": "ratchet"}]}), [])
 
 
+class Round2Test(RatchetRungTest):
+    """Codex F.10a round 2."""
+
+    def pkg_rule(self):
+        self.write(".agent/architecture.json", json.dumps({"rules": [dict(RULES["rules"][0], package=r"\.web(\.|$)")]}))
+        self.commit("package selector")
+
+    def test_package_covered_but_unreadable_fails_closed(self):
+        self.pkg_rule()
+        self.branch()
+        self.write(J + "other/Big.java", "package com.acme.web;\nimport com.acme.repository.Z;\n" + "// p\n" * (R.MAX_FILE // 5 + 10))
+        self.commit()
+        res = self.run_rung()
+        self.assertEqual((res["passed"], res["fixable"]), (False, False))
+        self.assertIn("could not be scanned", res["summary"])
+
+    def test_move_plus_rewrite_is_still_caught(self):
+        self.branch()
+        os.remove(os.path.join(self.repo, J + "web/UserController.java"))
+        self.write(J + "other/Totally.java", "package com.acme.other;\nimport com.acme.repository.UserRepo;\n"
+                   + "".join(f"class C{i} {{}}\n" for i in range(40)))
+        self.commit("move + rewrite")
+        res = self.run_rung()
+        self.assertEqual((res["passed"], res["fixable"]), (False, False))
+        self.assertIn("moved out", res["summary"])
+
+    def test_package_with_a_comment_is_read(self):
+        self.pkg_rule()
+        self.branch()
+        self.write(J + "other/C.java", "package /* x */ com.acme.web;\nimport com.acme.repository.Q;\n")
+        self.commit()
+        self.assertFalse(self.run_rung()["passed"])
+
+    def test_kotlin_without_semicolons(self):
+        self.branch()
+        self.write(J + "web/K.kt", "package com.acme.web\nimport com.acme.repository.X\nclass K {}\n")
+        self.write(".agent/architecture.json", json.dumps(RULES))
+        self.commit()
+        rules = R.parse_rules(json.dumps({"rules": [dict(RULES["rules"][0], files=r"(^|/)web/.*\.(java|kt)$")]}))
+        found = [k for k in R.scan(self.repo, rules)["violations"] if "K.kt" in k]
+        self.assertEqual(found, ["web-no-repo|" + J + "web/K.kt|import com.acme.repository.X"])
+
+    def test_legacy_baseline_keys_still_match(self):
+        RF.ratchet("init", self.repo)
+        bl = json.load(open(os.path.join(self.repo, R.BASELINE_FILE)))
+        bl["violations"] = {k + ";": n for k, n in bl["violations"].items()}       # older format
+        self.write(R.BASELINE_FILE, json.dumps(bl))
+        self.commit("old baseline")
+        git(self.repo, "checkout", "-qb", "feat/old")
+        self.write(J + "service/Other.java", "package com.acme.service;\nclass O {}\n")
+        self.commit()
+        self.assertTrue(self.run_rung()["passed"])
+
+    def test_tighten_carries_renames(self):
+        self.branch()
+        git(self.repo, "checkout", "-q", "main")
+        git(self.repo, "mv", J + "web/UserController.java", J + "web/AccountController.java")
+        self.commit("rename in scope")
+        out = RF.ratchet("tighten", self.repo)
+        self.assertEqual(out["now"], 2)
+        self.assertIn("AccountController", open(os.path.join(self.repo, R.BASELINE_FILE)).read())
+        self.commit("tightened")
+        git(self.repo, "checkout", "-qb", "feat/next")
+        self.write(J + "service/X.java", "package com.acme.service;\nclass X {}\n")
+        self.commit()
+        self.assertTrue(self.run_rung()["passed"])
+
+    def test_path_rule_regex_is_time_limited_everywhere(self):
+        self.write(".agent/architecture.json", json.dumps({"rules": [{"id": "dos", "files": r"^(a+)+$", "deny": "x"}]}))
+        self.write("a" * 30, "x\n")
+        self.commit("dos rule")
+        git(self.repo, "checkout", "-qb", "feat/dos")
+        git(self.repo, "mv", "a" * 30, "a" * 29 + "b")
+        self.commit("rename")
+        job = {"repo": self.repo, "base": git(self.repo, "rev-parse", "main")}
+        import time as _t
+        t0 = _t.monotonic()
+        res = L.rung_ratchet(None, {"name": "arch", "kind": "ratchet", "timeout": 2}, job)
+        self.assertLess(_t.monotonic() - t0, 20)
+        self.assertEqual(res["passed"], False)
+
+
 class SurveyTest(Base):
     def test_modules_edges_cycles_tests(self):
         s = survey.run(self.repo)
@@ -236,6 +318,13 @@ class SurveyTest(Base):
         self.assertIn(("b", "a"), edges)
         self.assertIn(["a", "b"], s["cycles"])
         self.assertIn(("com.acme.util", "com.acme.service"), edges)
+
+    def test_namespace_packages_in_src(self):                                # Codex F.10a R2 #9
+        for rel, body in {"src/a/x.py": "import b.y\n", "src/b/y.py": "from a import x\n"}.items():
+            self.write(rel, body)
+        git(self.repo, "add", "-A")
+        s = survey.run(self.repo)
+        self.assertIn(["a", "b"], s["cycles"])
 
     def test_cli_writes_the_report(self):
         out = RF.main(["survey", "--repo", self.repo, "--out", os.path.join(self.tmp, "s.md")])

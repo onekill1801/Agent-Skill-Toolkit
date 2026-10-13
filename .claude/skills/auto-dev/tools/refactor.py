@@ -61,8 +61,21 @@ def ratchet(action: str, repo: str, base: str = "") -> dict:
         with open(path, "w", encoding="utf-8") as f:
             f.write(R.baseline_doc(now))
         return {"baseline": path, "count": sum(now.values()), "by_rule": R.by_rule(now), "next": "review + commit it"}
-    cmp = R.compare(have, now)
+    cmp = R.compare(R.normalize_baseline(have), now)
     if action == "tighten":
+        # renames since the baseline was last committed carry their entries to the new path (Codex F.10a R2)
+        ref = subprocess.run(["git", "-C", repo, "log", "-1", "--format=%H", "--", R.BASELINE_FILE],
+                             capture_output=True, text=True, timeout=60).stdout.strip()
+        renames = {}
+        if ref:
+            diff = subprocess.run(["git", "-C", repo, "diff", "--name-status", "-M", ref], capture_output=True,
+                                  text=True, encoding="utf-8", errors="replace", timeout=120).stdout
+            for ln in diff.splitlines():
+                parts = ln.split("\t")
+                if len(parts) == 3 and parts[0].startswith("R"):
+                    renames[parts[1]] = parts[2]
+        have = R.rename_keys(R.normalize_baseline(have), renames)
+        cmp = R.compare(have, now)
         if cmp["new"]:
             raise ValueError(f"{len(cmp['new'])} new violation(s) beyond the baseline — fix them first: "
                              + "; ".join(list(cmp["new"])[:5]))

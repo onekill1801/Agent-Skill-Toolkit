@@ -50,8 +50,8 @@ def _py_roots(files: list) -> list:
     roots = set()
     for f in files:
         parts = f.split("/")
-        if len(parts) > 2 and parts[0] in ("src", "lib", "python") and parts[2:] and \
-                any(x == "/".join(parts[:2]) + "/__init__.py" for x in files):
+        # src/<pkg>/... with Python inside = a source root, regular or NAMESPACE package (Codex F.10a R2)
+        if len(parts) > 2 and parts[0] in ("src", "lib", "python") and f.endswith(".py"):
             roots.add(parts[0])
     return sorted(roots)
 
