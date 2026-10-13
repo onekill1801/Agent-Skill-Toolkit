@@ -37,9 +37,14 @@ def start(repo: str, base: str, spec: str, fixer_role: str, allow_default: bool)
     repo = os.path.abspath(repo)
     br = L.guard_branch(repo, allow_default)
     s = L.load_spec(repo, base, spec)                       # fail fast on a bad spec
+    resolved = L.resolve_base(repo, base or s["base"] or "")   # fail fast on a missing / unrelated base
+    try:
+        L.require_clean(repo, "at start")
+    except E.NeedsHuman as e:
+        raise PermissionError(str(e))
     with store_mod.Store() as st:
         t = st.add(L.KIND, f"{repo}@{br}", title=f"verify {os.path.basename(repo)}@{br}",
-                   data={"repo": repo, "branch": br, "base": base or s["base"] or "",
+                   data={"repo": repo, "branch": br, "base": resolved, "allow_default": bool(allow_default),
                          "spec_file": os.path.abspath(spec) if spec else "", "fixer_role": fixer_role},
                    max_attempts=3)
     return {"task_id": t["id"], "duplicate": t["duplicate"], "branch": br,

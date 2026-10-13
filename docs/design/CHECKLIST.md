@@ -1,7 +1,7 @@
 # Checklist triển khai — Agent-Skill-Toolkit
 
 > Theo dõi tiến độ kế hoạch trong [`agent-ecosystem.md`](agent-ecosystem.md). Cập nhật **mỗi lần** xong một phần.
-> Cập nhật lần cuối: 2026-10-13. Test: 368 xanh, 1 skip (Windows).
+> Cập nhật lần cuối: 2026-10-13. Test: 380 xanh, 1 skip (Windows).
 
 ## Quy trình mỗi phần
 
@@ -50,7 +50,7 @@ Ký hiệu: ✅ xong + Codex đồng thuận · 🔁 đã code, đang review/s�
 | F.6a | Luật tự đăng comment GitLab (`review_rules.py`) | ✅ | `20cb944` | — | mặc định `shadow`; cần `REVIEW_AUTO_POST_PROJECTS` |
 | F.6b | Executor tách biệt + duyệt Telegram gắn hash | ⛔ | | | **cần user Windows chuẩn + token GitLab chỉ đọc** |
 | F.1 | Làm rõ → AC, gom câu hỏi 1 lần, triage 4 làn + tự nâng làn | ⬜ | | | có sẵn `clarify`/`triage` |
-| F.2 | Thang kiểm local (build → test liên quan → suite → Codex tới GO) | ⬜ | | | **cần repo thử** |
+| F.2 | Thang kiểm local + vòng tự sửa (`workflows/verify/ladder.py`, `auto-dev/tools/verify.py`) | 🔁 | `20ececc` | vòng 1 đang chạy | bậc cmd / affected_tests (CodeGraph) / cross_review; spec đọc từ base ref; chạy thử trên chính toolkit: done (17 module test liên quan, 73 s). Repo Java (etask) chờ người dùng chọn |
 | F.3 | AC → test thật trong repo + bảng AC → bằng chứng | ⬜ | | | |
 | F.5 | Cổng vào: `mr_watch` / `atask_watch` / `group_watch` chỉ xếp hàng vào store | ⬜ | | | cần allowlist TChat (user id) |
 | F.7 | Điều phối nhiều việc + bảng tiến độ (Orca + aTask/`status.py`) | ⬜ | | | quyết định ghi tự động project "Agent Hub" |
@@ -65,11 +65,11 @@ Ký hiệu: ✅ xong + Codex đồng thuận · 🔁 đã code, đang review/s�
 | Cần | Dùng cho |
 |---|---|
 | Project + số MR để chạy thử | F.4c |
-| Repo thử cho thang kiểm | F.2 |
+| Repo thử cho thang kiểm (repo Java, vd etask) | F.2 |
 | Repo được tự đăng (`REVIEW_AUTO_POST_PROJECTS`), giữ `shadow` bao lâu | F.6a |
 | Allowlist TChat (user id) | F.5 |
 | Agent mặc định (đề xuất: code = Claude, review chéo = Codex) | F.1, F.2 |
-| Câu thông báo limit thật của Claude CLI / Codex | F.4a | Store bền + engine checkpoint + quota pause/resume + handoff | ✅ | `8520548` → `980412a` → `4a847a0` → `199a6f5` | GO (vòng 3) | lease token, heartbeat, input key, kill cây tiến trình; mẫu limit vẫn tự viết — cần câu thông báo thật |
+| Câu thông báo limit thật của Claude CLI / Codex | F.4a |
 | `environments.dev` (job Jenkins, context/namespace k8s, URL dev) | F.8 |
 | User Windows chuẩn + token GitLab chỉ đọc | F.6b |
 
@@ -83,5 +83,6 @@ Ký hiệu: ✅ xong + Codex đồng thuận · 🔁 đã code, đang review/s�
 | 2026-10-13 | F.4a + 0.7 (`980412a`) | 2 | **NO-GO**: xác nhận sửa 4/7; HIGH mới (claim đọc sau commit nhận nhầm token), MED key_fn, migration race, winexec quoting, quota còn bắt nhầm — sửa ở `4a847a0` |
 | 2026-10-13 | F.4b (`65f923d`) + xác nhận `199a6f5` | 1 | **NO-GO**: 2 HIGH (agent thừa hưởng token/quyền ghi; reaper Orca lấy lại job đang pause) + 3 MED (reconcile thiếu ca stale/head mới, Telegram gửi trùng khi crash, timeout trong không kill cây). `199a6f5` xác nhận FIXED cả 4 |
 | 2026-10-13 | F.4b (`01fdbae`) | 2 | **NO-GO**: chấp nhận hoãn cô lập OS sang F.6b; HIGH mới (lời duyệt giả có hash khớp được reconcile tự mở chặn), MED (khoá gửi duyệt chỉ ở flow) — sửa ở `b336e7f` |
+| 2026-10-13 | F.2 (`20ececc`) | 1 | đang chạy |
 | 2026-10-13 | F.4b (`b336e7f`) | 3 | **GO**: quarantine + khoá gửi duyệt chung đều FIXED; không có lỗi mới. Gợi ý thêm test tranh chấp đồng thời flow/direct |
 | 2026-10-13 | F.4a + 0.7 (`4a847a0`) | 3 | **GO**: chấp nhận 2 phản biện (finish khi lease hết hạn an toàn nhờ token; dừng hợp tác cho Python thuần). MED còn: kill cây tiến trình, quota JSON nhúng, tham số rỗng — sửa ở `199a6f5` (sẽ được xác nhận trong vòng review F.4b) |

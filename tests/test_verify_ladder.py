@@ -48,6 +48,14 @@ FAKE_AGENT = textwrap.dedent('''
         open(calc, "a").write("# tried\\n")
     elif mode == "delete_test":
         os.remove(os.path.join(repo, "tests", "test_calc.py"))
+    elif mode == "weaken":                    # make it green by gutting the assertion
+        t = os.path.join(repo, "tests", "test_calc.py")
+        open(t, "w").write(open(t).read().replace("self.assertEqual(calc.add(2, 3), 5)", "pass"))
+    elif mode == "rename_test":
+        os.replace(os.path.join(repo, "tests", "test_calc.py"), os.path.join(repo, "tests", "skip_calc.txt"))
+    elif mode == "switch_branch":
+        subprocess.run(["git", "-C", repo, "checkout", "-q", "main"])
+        open(calc, "w").write("def add(a, b):\\n    return a + b\\n")
     if mode != "nocommit":
         subprocess.run(["git", "-C", repo, "add", "-A"])
         subprocess.run(["git", "-C", repo, "commit", "-qm", "wip(verify): fix"], capture_output=True)
@@ -168,11 +176,105 @@ class LadderTest(unittest.TestCase):
         self.assertEqual(self.calls("fix"), 2)                  # max_fix_rounds_per_rung: 2
         self.assertIn("AssertionError", self.task()["last_error"])
 
-    def test_fixer_deleting_tests_is_stopped(self):
+    def test_fixer_touching_tests_is_stopped(self):
+        """Codex F.2 #3: deletion, gutted assertions and renames out of discovery all stop for a human."""
+        for mode in ("delete_test", "weaken", "rename_test"):
+            with self.subTest(mode=mode):
+                self.setUp()
+                self.break_code()
+                os.environ["FAKE_MODE"] = mode
+                self.assertEqual(self.start_and_work()[-1]["status"], "blocked")
+                self.assertIn("changes tests", self.task()["last_error"])
+                mock.patch.stopall()
+
+    def test_branch_switch_after_start_never_commits_elsewhere(self):
+        """Codex F.2 #1."""
         self.break_code()
-        os.environ["FAKE_MODE"] = "delete_test"
+        V.start(self.repo, "main", "", "implement", False)
+        git(self.repo, "checkout", "-q", "main")
+        ran = V.work("w", once=True, interval=0)["ran"]
+        self.assertEqual(ran[-1]["status"], "blocked")
+        self.assertIn("started for `feat/x`", self.task()["last_error"])
+        self.assertEqual(git(self.repo, "log", "-1", "--format=%s", "main"), "base")   # main untouched
+
+    def test_fixer_switching_branch_is_caught(self):
+        self.break_code()
+        os.environ["FAKE_MODE"] = "switch_branch"
         self.assertEqual(self.start_and_work()[-1]["status"], "blocked")
-        self.assertIn("deleted tests", self.task()["last_error"])
+        self.assertEqual(git(self.repo, "log", "-1", "--format=%s", "main"), "base")
+
+    def test_custom_and_release_default_branches_refused(self):
+        git(self.repo, "config", "init.defaultBranch", "feat/x")
+        with self.assertRaises(PermissionError):
+            V.start(self.repo, "main", "", "implement", False)
+        git(self.repo, "config", "--unset", "init.defaultBranch")
+        git(self.repo, "checkout", "-q", "-b", "release/2.1")
+        with self.assertRaises(PermissionError):
+            V.start(self.repo, "main", "", "implement", False)
+
+    def test_dirty_worktree_is_never_committed(self):
+        """Codex F.2 #2: user edits (tracked, staged, untracked) are not swept into a fix commit."""
+        self.break_code()
+        open(os.path.join(self.repo, "notes.txt"), "w").write("my private notes")
+        with self.assertRaises(PermissionError):
+            V.start(self.repo, "main", "", "implement", False)
+        os.remove(os.path.join(self.repo, "notes.txt"))
+        V.start(self.repo, "main", "", "implement", False)
+        open(os.path.join(self.repo, "README.md"), "w").write("wip")   # user starts editing meanwhile
+        git(self.repo, "add", "README.md")
+        ran = V.work("w", once=True, interval=0)["ran"]
+        self.assertEqual(ran[-1]["status"], "blocked")
+        self.assertIn("not clean", self.task()["last_error"])
+        self.assertNotIn("README.md", git(self.repo, "show", "--name-only", "--format=", "HEAD"))
+
+    def test_bad_base_fails_fast(self):
+        """Codex F.2 #4: a missing base is an error, never an 'empty diff' that passes review."""
+        with self.assertRaises((ValueError, RuntimeError)):
+            V.start(self.repo, "no-such-branch", "", "implement", False)
+
+    def test_verdict_parser_ignores_nested_verdicts_and_bad_schema(self):
+        """Codex F.2 #6."""
+        nested = json.dumps({"verdict": "NO-GO", "findings": [{"severity": "HIGH", "verdict": "GO", "title": "x"}]})
+        self.assertEqual(L.parse_verdict("noise " + nested)["verdict"], "NO-GO")
+        self.assertEqual(L.parse_verdict('{"verdict": "GO"}'), {})                 # findings missing
+        self.assertEqual(L.parse_verdict('{"verdict": "maybe", "findings": []}'), {})
+        self.assertEqual(L.parse_verdict('{"verdict":"NO-GO","findings":[]} {"verdict":"GO","findings":[]}')["verdict"], "GO")
+
+    def test_large_diff_is_split_and_oversized_file_refused(self):
+        """Codex F.2 #5."""
+        d = "".join(f"diff --git a/f{i}.py b/f{i}.py\n" + "+x\n" * 50 for i in range(10))
+        units = L.split_diff(d, 400)
+        self.assertGreater(len(units), 1)
+        self.assertEqual("".join(units), d)                                       # nothing dropped
+        from agent_skill_toolkit.workflows import engine as E
+        with self.assertRaises(E.NeedsHuman):
+            L.split_diff("diff --git a/big.py b/big.py\n" + "+y\n" * 1000, 400)
+
+    def test_affected_selection_failure_needs_cover_or_human(self):
+        """Codex F.2 #7."""
+        from agent_skill_toolkit.workflows import engine as E
+        job = {"repo": self.repo, "base": "main"}
+        self.break_code()
+        with mock.patch.object(L, "_affected", return_value=None):
+            res = L.rung_affected(None, {"name": "t", "covered_by": "suite", "run": ["x"]}, job)
+            self.assertIn("covers it", res["skipped"])
+            with self.assertRaises(E.NeedsHuman):
+                L.rung_affected(None, {"name": "t", "run": ["x"]}, job)
+        with self.assertRaises(ValueError):                                      # covered_by must be LATER
+            open(os.path.join(self.tmp, "bad.yml"), "w").write(
+                "verify:\n  ladder:\n    suite:\n      run: x\n    t:\n      kind: affected_tests\n"
+                "      covered_by: suite\n      run: y\n")
+            L.load_spec(self.repo, "main", os.path.join(self.tmp, "bad.yml"))
+
+    @unittest.skipUnless(os.name == "nt", "Windows launcher resolution")
+    def test_relative_launcher_resolves_in_the_repo(self):
+        """Codex F.2 #8: `checks/ok.cmd` is the repo's, whatever the worker's cwd."""
+        os.makedirs(os.path.join(self.repo, "checks"))
+        open(os.path.join(self.repo, "checks", "ok.cmd"), "w").write("@exit /b 0\r\n")
+        resolved = L.in_repo(self.repo, ["checks/ok.cmd", "--x"])
+        self.assertEqual(resolved[0], os.path.normpath(os.path.join(self.repo, "checks", "ok.cmd")))
+        out = subprocess.run(L.winexec.command(resolved), cwd=self.repo, capture_output=True)
+        self.assertEqual(out.returncode, 0)
 
     def test_default_branch_is_refused(self):
         git(self.repo, "checkout", "-q", "main")
