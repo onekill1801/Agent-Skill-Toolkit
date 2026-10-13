@@ -53,11 +53,20 @@ class ResolveTest(unittest.TestCase):
             for p in ('x" & echo PWNED_CMD & "', "%PATH% ^& !x!", "a | b", "line1\nline2"):   # cmd.exe metachars
                 with self.assertRaises(w.UnsafeLauncher, msg=p):
                     w.command(["plain", p])
-            self.assertEqual(w.command(["plain", "--version"]), ["cmd", "/c", shim, "--version"])
+            self.assertEqual(w.command(["plain", "--version"]), ["cmd", "/d", "/c", shim, "--version"])
+            with self.assertRaises(w.UnsafeLauncher):          # Codex R2: spaces break cmd /c quoting
+                w.command(["plain", "two words"])
 
 
 @unittest.skipUnless(os.name == "nt", "real cmd.exe / PowerShell behaviour")
 class WindowsLiveTest(unittest.TestCase):
+    def test_unresolved_batch_under_a_path_with_spaces_still_runs(self):
+        d = os.path.join(tempfile.mkdtemp(prefix="winexec-"), "Program Files X")
+        shim = _write(os.path.join(d, "plain.cmd"), "@echo off\necho GOT=%1\n")
+        with mock.patch("shutil.which", return_value=shim):
+            out = subprocess.run(w.command(["plain", "--version"]), capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.stdout.strip(), "GOT=--version", out.stderr)
+
     def test_powershell_file_gets_payloads_verbatim(self):
         d = tempfile.mkdtemp(prefix="winexec-live-")
         with open(os.path.join(d, "echo.ps1"), "w") as f:

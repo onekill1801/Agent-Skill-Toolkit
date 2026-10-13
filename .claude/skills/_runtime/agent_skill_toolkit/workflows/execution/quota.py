@@ -24,17 +24,25 @@ class QuotaExceeded(Exception):
         self.resume_at, self.backend, self.reason = float(resume_at or 0), backend, reason
 
 
-_QUOTA = [
-    r"usage limit (?:reached|exceeded|hit)", r"\bhit (?:your|the) (?:usage |rate )?limit\b",
+# A provider/CLI refusal is a line of its own: optional "Error:"-style prefix, then the phrase.
+# Text quoted inside an assertion, a log of someone else's API, or docs does not start a line
+# that way ("expected 429 Too Many Requests", "assert 'rate_limit_error' in msg").
+_PREFIX = r"^\s*(?:\[?[\w .-]{0,24}(?:error|warn(?:ing)?|fatal)\]?\s*[:\-]\s*)?(?:\W{0,3}\s*)"
+_PHRASES = [
+    r"(?:claude ai )?usage limit (?:reached|exceeded|hit)",
+    r"you(?:'ve| have) (?:hit|reached) your (?:usage |rate )?limit",
     r"(?:5|five)[- ]hour (?:usage )?limit (?:reached|hit)", r"weekly (?:usage )?limit (?:reached|hit)",
-    r"\brate[ _-]?limit(?:ed\b|_error\b| exceeded\b| reached\b)", r"\b429\b[^\n]{0,20}too many requests",
-    r"^\s*(?:error[:\s]+)?too many requests\b", r"insufficient_quota|exceeded your (?:current )?quota",
-    r"\boverloaded_error\b|\b529\b[^\n]{0,20}overloaded|^\s*(?:error[:\s]+)?overloaded\b",
-    r"credit balance is too low",
+    r"rate[ _-]?limit(?:ed| exceeded| reached)\b", r"(?:429:?\s*)?too many requests\b",
+    r"you exceeded your (?:current )?quota", r"credit balance is too low",
+    r"(?:529:?\s*)?overloaded\b", r"(?:rate_limit|overloaded)_error\b",
 ]
+_JSON_ERR = (r'"error"\s*:\s*\{[^{}]*"type"\s*:\s*"(?:rate_limit_error|overloaded_error)"'
+             r'|"code"\s*:\s*"insufficient_quota"')
+_QUOTA = [_PREFIX + "(?:" + "|".join(_PHRASES) + ")", _JSON_ERR]
 _AUTH = [
-    r"not logged in", r"please (?:log ?in|run .{0,20}login)", r"invalid (?:x-)?api[ _-]?key", r"authentication_error",
-    r"\b401\b[^\n]{0,40}(?:unauthori[sz]ed|authentication)", r"oauth token (?:has )?expired",
+    _PREFIX + r"(?:not logged in|please (?:log ?in|run .{0,20}login)|invalid (?:x-)?api[ _-]?key|"
+              r"oauth token (?:has )?expired|401\b[^\n]{0,40}(?:unauthori[sz]ed|authentication))",
+    r'"error"\s*:\s*\{[^{}]*"type"\s*:\s*"authentication_error"',
 ]
 _LIMIT_KIND = [("overloaded", r"overloaded|\b529\b"), ("rate_limit", r"rate[ _-]?limit|too many requests|\b429\b"),
                ("usage_limit", r".")]

@@ -127,6 +127,42 @@ class StoreTest(_Tmp):
             st.checkpoint(t["id"], st.claim("w")["lease_token"], "s", input_key="abc")
             self.assertEqual(st.last_checkpoint(t["id"])["input_key"], "abc")
 
+    def test_claim_returns_its_own_token_even_if_reclaimed_right_after_commit(self):
+        """Codex R2 (HIGH): a stall between commit and read must not hand us the next holder's token."""
+        t = self.st.add("k", "r")
+        real_tx = self.st._tx
+        import contextlib
+
+        @contextlib.contextmanager
+        def tx_then_reclaim():
+            with real_tx():
+                yield
+            with S.Store(self.st.path) as other:          # another worker re-claims immediately
+                other.db.execute("update tasks set lease_token='B-token' where id=?", (t["id"],))
+        with mock.patch.object(self.st, "_tx", tx_then_reclaim):
+            mine = self.st.claim("A")
+        self.assertNotEqual(mine["lease_token"], "B-token")
+        with self.assertRaises(S.LeaseLost):
+            self.st.checkpoint(t["id"], mine["lease_token"], "x")   # A is fenced, not B's twin
+
+    def test_concurrent_open_of_old_schema_migrates_once(self):
+        """Codex R2: two workers opening a pre-migration DB must not both ALTER TABLE."""
+        import sqlite3
+        path = os.path.join(self.dir, "old2.db")
+        con = sqlite3.connect(path)
+        con.executescript("create table tasks (id text primary key, kind text not null, ref text not null, "
+                          "title text default '', status text not null, step text default '', attempts integer "
+                          "default 0, max_attempts integer default 3, priority integer default 5, lease_owner "
+                          "text, lease_until real, resume_at real, last_error text, backend text, data text "
+                          "default '{}', created real not null, updated real not null);")
+        con.close()
+        code = (f"import runpy;runpy.run_path(r'{os.path.join(_SKILLS, '_runtime', 'bootstrap.py')}')['activate']();"
+                f"from agent_skill_toolkit.core import store as S;S.Store(r'{path}').close();print('ok')")
+        procs = [subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  text=True) for _ in range(6)]
+        outs = [p.communicate(timeout=60) for p in procs]
+        self.assertEqual([o[0].strip() for o in outs], ["ok"] * 6, [o[1][-300:] for o in outs])
+
     def test_concurrent_claims_across_processes_never_double_assign(self):
         for i in range(20):
             self.st.add("k", f"r{i}")
@@ -244,6 +280,50 @@ class EngineTest(_Tmp):
         self.assertEqual(runs, ["fetch", "build", "verify", "fetch", "build", "verify"])
         self.assertTrue(self.st.invalidate(t["id"]) >= 0)
 
+    def test_input_key_failure_is_handled_like_the_step(self):
+        """Codex R2: key_fn raising (quota on a GitLab lookup, or any error) must not escape."""
+        def key_quota(ctx):
+            raise E.QuotaExceeded(time.time() + 600, "gitlab", "429 on head lookup")
+        t = self.st.add("r", "1")
+        out = E.work_once(self.st, "w", {"r": [("fetch", lambda c: {}, key_quota)]})
+        self.assertEqual(out["status"], "paused_quota")
+        self.assertEqual(self.st.get(t["id"])["attempts"], 0)
+        t2 = self.st.add("r", "2", max_attempts=1)
+        out = E.work_once(self.st, "w", {"r": [("fetch", lambda c: {}, lambda c: 1 / 0)]})
+        self.assertEqual((out["status"], self.st.get(t2["id"])["status"]), ("failed", "failed"))
+
+    def test_ctx_run_kills_the_subprocess_when_the_lease_is_lost(self):
+        """Codex R2: losing the lease must stop a running build, not only set a flag."""
+        t = self.st.add("build", "1")
+
+        def build(ctx):
+            with S.Store(self.st.path) as other:
+                other.db.execute("update tasks set lease_token='thief' where id=?", (t["id"],))
+            t0 = time.time()
+            try:
+                ctx.run([sys.executable, "-c", "import time; time.sleep(30)"], poll=0.1)
+            finally:
+                ctx.elapsed = time.time() - t0
+            return {}
+        ctx_holder = {}
+        orig = E.StepContext.__init__
+
+        def init(self_, *a, **k):
+            orig(self_, *a, **k)
+            ctx_holder["ctx"] = self_
+        with mock.patch.object(E.StepContext, "__init__", init):
+            out = E.work_once(self.st, "w", {"build": [("build", build)]}, lease_s=0.3)
+        self.assertEqual(out["status"], "lease_lost")
+        self.assertLess(ctx_holder["ctx"].elapsed, 10)          # killed, did not run 30 s
+
+    def test_ctx_run_does_not_hang_on_large_output(self):
+        t = self.st.add("build", "big")
+        out = E.work_once(self.st, "w", {"build": [("b", lambda c: {
+            "n": len(c.run([sys.executable, "-c", "print('x'*2000000)"]).stdout)})]})
+        self.assertEqual(out["status"], "done")
+        self.assertGreater(out["outputs"]["b"]["n"], 1_000_000)
+        self.assertTrue(t["id"])
+
     def test_explicit_invalidation_forces_rerun(self):
         t = self.st.add("k", "1")
         runs = []
@@ -295,6 +375,9 @@ class QuotaTest(unittest.TestCase):
         for text in ("tests failed: expected HTTP 429 but got HTTP 500",
                      "Error: rate limit config is invalid",
                      "AssertionError: status 529 != 200",
+                     "expected 429 Too Many Requests from the mock server",          # Codex R2
+                     "    assert 'rate_limit_error' in msg",                          # Codex R2
+                     "log: upstream answered 429 Too Many Requests, we retried OK",
                      "docs: explain how we handle 429 Too Many Requests from upstream\n" + "ok\n" * 20 + "exit 1",
                      "def login(user): ...", "SyntaxError: invalid syntax", "update the rate limiter config"):
             self.assertEqual(self.c(text)["kind"], "error", text)

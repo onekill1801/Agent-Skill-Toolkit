@@ -78,12 +78,15 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute("pragma journal_mode=wal")
         self.db.execute("pragma busy_timeout=30000")
-        self.db.executescript(SCHEMA)
-        for table, cols in _MIGRATIONS.items():
-            have = {r["name"] for r in self.db.execute(f"pragma table_info({table})")}
-            for col, decl in cols.items():
-                if col not in have:
-                    self.db.execute(f"alter table {table} add column {col} {decl}")
+        with self._tx():                 # serialize schema setup: two workers may open an old DB at once
+            for stmt in (s.strip() for s in SCHEMA.split(";")):
+                if stmt:
+                    self.db.execute(stmt)
+            for table, cols in _MIGRATIONS.items():
+                have = {r["name"] for r in self.db.execute(f"pragma table_info({table})")}
+                for col, decl in cols.items():
+                    if col not in have:
+                        self.db.execute(f"alter table {table} add column {col} {decl}")
 
     def close(self):
         self.db.close()
@@ -162,7 +165,10 @@ class Store:
                             "resume_at=null, updated=? where id=?", (owner, token, now + lease_s, now, r["id"]))
             self._event(r["id"], "claimed", owner=owner, previous=prev,
                         reclaimed_from=r["lease_owner"] if prev == "running" else None)
-        return self.get(r["id"])
+            # snapshot INSIDE the transaction: reading after commit could return the token of a
+            # worker that re-claimed while we stalled (Codex review round 2)
+            claimed = _row(self.db.execute("select * from tasks where id=?", (r["id"],)).fetchone())
+        return claimed
 
     def _held(self, task_id: str, lease: str, allow_expired: bool = False):
         r = self.db.execute("select status, lease_token, lease_until from tasks where id=?", (task_id,)).fetchone()

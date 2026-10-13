@@ -52,6 +52,27 @@ class StepContext:
         """True once the lease is lost — a long step should stop and return."""
         return self._lost.is_set()
 
+    def run(self, argv: list, timeout: float = 3600, poll: float = 0.5, **kw):
+        """Run a subprocess for this step and KILL it if the lease is lost (pure-Python work can
+        only stop cooperatively via should_stop(); builds/tests/agents should go through here).
+        Returns CompletedProcess; raises LeaseLost when killed for losing the lease."""
+        import subprocess
+        kw.setdefault("stdin", subprocess.DEVNULL)
+        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             encoding="utf-8", errors="replace", **kw)
+        deadline = time.time() + timeout
+        while True:
+            try:   # communicate(timeout) keeps draining the pipes, so a chatty build can't fill them and hang
+                out, err = p.communicate(timeout=poll)
+                return subprocess.CompletedProcess(argv, p.returncode, out, err)
+            except subprocess.TimeoutExpired:
+                if self.should_stop() or time.time() > deadline:
+                    p.kill()
+                    p.communicate()
+                    if self.should_stop():
+                        raise store_mod.LeaseLost(f"task {self.task['id']}: lease lost, killed {argv[0]}")
+                    raise subprocess.TimeoutExpired(argv, timeout)
+
     def handoff(self, **sections):
         return handoff.write(self.task["id"], sections)
 
@@ -121,20 +142,22 @@ def run(st: store_mod.Store, task: dict, steps: list, lease_s: int = store_mod.D
         for i, spec in enumerate(steps):
             name, fn, key_fn = _step(spec)
             ctx.step = name
-            key = str(key_fn(ctx)) if key_fn else ""
-            cp = saved.get(name)
-            if rerun_from is None and cp and (cp.get("input_key") or "") == key:
-                outputs[name] = cp["data"]
-                continue
-            if rerun_from is None:
-                rerun_from = name
-                later = names[i + 1:]
-                if later:
-                    st.invalidate(tid, later, reason=f"{name} re-ran")
             t0 = time.time()
             try:
                 st.heartbeat(tid, ctx.lease, lease_s)
                 with _Heartbeat(st.path, tid, ctx.lease, lease_s, ctx._lost):
+                    # the input key may itself block or fail (e.g. reading the MR head from GitLab):
+                    # same lease renewal and the same error handling as the step
+                    key = str(key_fn(ctx)) if key_fn else ""
+                    cp = saved.get(name)
+                    if rerun_from is None and cp and (cp.get("input_key") or "") == key:
+                        outputs[name] = cp["data"]
+                        continue
+                    if rerun_from is None:
+                        rerun_from = name
+                        later = names[i + 1:]
+                        if later:
+                            st.invalidate(tid, later, reason=f"{name} re-ran")
                     result = fn(ctx) or {}
             except QuotaExceeded as q:
                 st.pause_quota(tid, ctx.lease, q.resume_at, q.backend, q.reason or str(q))

@@ -18,6 +18,7 @@ import shutil
 
 _BATCH = (".cmd", ".bat")
 _CMD_META = re.compile(r'[&|<>^%!"()\r\n]')
+_PLAIN = re.compile(r"[A-Za-z0-9_.,:/=@+\-]*")
 _NPM_JS = re.compile(r'"%dp0%\\([^"]+?\.(?:js|cjs|mjs))"', re.I)
 _PS1 = re.compile(r'-File\s+"%(?:~dp0|(?:SCRIPT_DIR|dp0)%)\\?([^"]+?\.ps1)"', re.I)
 
@@ -77,10 +78,13 @@ def command(argv: list) -> list:
     if prefix:
         return [*prefix, *argv[1:]]
     if os.path.splitext(exe)[1].lower() in _BATCH:
-        bad = [a for a in argv[1:] if _CMD_META.search(str(a))]
+        # Last resort: cmd.exe. Only plain tokens are allowed — no metacharacters and no spaces in
+        # the arguments, so the command line has at most the launcher's own quotes, which
+        # `cmd /c` keeps (Codex review round 2: multi-quote lines get their quotes stripped).
+        bad = [a for a in argv[1:] if _CMD_META.search(str(a)) or not _PLAIN.fullmatch(str(a))]
         if bad:
             raise UnsafeLauncher(f"{exe} can only run through cmd.exe, which would re-parse "
-                                 f"{len(bad)} argument(s) containing shell metacharacters; "
+                                 f"{len(bad)} argument(s) with spaces/metacharacters; "
                                  f"pass the text via stdin or install a non-batch launcher")
-        return ["cmd", "/c", exe, *argv[1:]]
+        return ["cmd", "/d", "/c", exe, *argv[1:]]
     return [exe, *argv[1:]]
