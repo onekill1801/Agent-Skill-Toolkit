@@ -187,18 +187,18 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
 
     try:
-        if a.cmd == "add":
-            out = add_job(a.project, a.iid, requester=a.requester, requester_id=a.requester_id,
-                          source=a.source, group=a.group, group_type=a.group_type,
-                          priority=a.priority, note=a.note)
-        elif a.cmd == "add-text":
-            refs = rc.parse_mr_refs(a.text, a.default_project)
-            if not refs:
-                return rc.pc.emit({"error": True, "message": "no MR reference found in text"})
-            out = {"added": [add_job(r["project"], r["iid"], requester=a.requester,
-                                     requester_id=a.requester_id, source=a.source, group=a.group,
-                                     group_type=a.group_type, priority=a.priority,
-                                     note=a.note or a.text)["job"]["id"] for r in refs]}
+        if a.cmd in ("add", "add-text"):
+            # every CLI enqueue goes through the intake gate + durable store (Codex F.5 #2);
+            # add_job() itself stays internal (called only after admission)
+            import review_flow
+            req = dict(requester=a.requester, requester_id=a.requester_id, source=a.source, group=a.group,
+                       group_type=a.group_type, priority=a.priority)
+            if a.cmd == "add":
+                res = review_flow.enqueue(a.project, a.iid, note=a.note, **req)
+                out = {"job": rc.load_job(res["job_id"]), "duplicate": res["job_duplicate"],
+                       "task_id": res["task_id"]}
+            else:
+                out = review_flow.enqueue_text(a.text, a.default_project, note=a.note or a.text, **req)
         elif a.cmd == "pending":
             out = pending()
             rc.pc.emit(out)
@@ -219,7 +219,7 @@ def main(argv=None) -> int:
             out = set_status(a.job_id, a.status, note=a.note)
         elif a.cmd == "cancel":
             out = set_status(a.job_id, "cancelled")
-    except (ValueError, RuntimeError, TimeoutError) as e:
+    except (ValueError, PermissionError, RuntimeError, TimeoutError) as e:
         out = {"error": True, "message": str(e)}
     return rc.pc.emit(out)
 

@@ -156,6 +156,29 @@ class ReviewFlowTest(unittest.TestCase):
             rf.enqueue_text("https://evil.example.com/grp/proj/-/merge_requests/42", source="fchat")
         with self.assertRaises(ValueError):
             rf.enqueue_text("chào cả nhà", source="fchat")
+        with self.assertRaises(ValueError):           # userinfo: the real host is evil.example.com
+            rf.enqueue_text("https://gitlab.example.vn:pw@evil.example.com/grp/proj/-/merge_requests/43",
+                            source="fchat")
+
+    def test_legacy_queue_cli_goes_through_the_gate(self):
+        """Codex F.5 #2: review_queue.py add / add-text = gated durable enqueue."""
+        import contextlib
+        import io
+        import review_queue as rq
+
+        def cli(*argv):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rq.main(list(argv))
+            return json.loads(buf.getvalue())
+        out = cli("add-text", "https://evil.example.com/grp/proj/-/merge_requests/44", "--source", "fchat")
+        self.assertTrue(out.get("error"))
+        self.assertFalse(rc.load_job("77-44"))
+        self.assertTrue(cli("add", "--project", "proj", "--iid", "45", "--source", "nobody").get("error"))
+        ok = cli("add", "--project", "proj", "--iid", "45", "--source", "fchat")
+        self.assertEqual(ok["job"]["id"], "77-45")
+        with S.Store() as st:
+            self.assertEqual(st.get(ok["task_id"])["data"]["intake"]["source"], "fchat")
 
     def test_quota_pauses_then_resumes_without_rerunning_finished_steps(self):
         rf.enqueue("proj", 6)

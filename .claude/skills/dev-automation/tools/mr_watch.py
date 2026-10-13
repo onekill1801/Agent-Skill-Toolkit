@@ -245,6 +245,11 @@ def _enqueue_review(mr) -> bool:
                             "--requester", "mr_watch", "--note", f"assigned to me: {mr.get('web_url', '')}"],
                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
         out = json.loads(p.stdout or "{}")
+        if not isinstance(out, dict):
+            out = {"error": True, "message": f"unexpected output: {str(out)[:100]}"}
+        elif p.returncode != 0 or not out.get("task_id") or not out.get("job_id"):
+            # a crash / empty answer is NOT "queued": the MR stays unmarked and is retried (Codex F.5 #4)
+            out = {"error": True, "message": out.get("message") or f"exit {p.returncode}: {(p.stderr or '')[-200:]}"}
     except (OSError, ValueError, subprocess.TimeoutExpired) as e:
         out = {"error": True, "message": str(e)}
     if out.get("error"):

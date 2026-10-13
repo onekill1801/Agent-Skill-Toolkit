@@ -33,19 +33,40 @@ def policy_file() -> str:
 
 
 def _policy() -> dict:
+    """The `intake` section, validated: {source: {"on": bool}}. Anything malformed is an error, never
+    "on" — an unreadable or mistyped switch must not silently mean "everything on" (Codex F.5 #5)."""
     try:
         with open(policy_file(), encoding="utf-8") as f:
-            return (json.load(f) or {}).get("intake") or {}
+            doc = json.load(f)
     except FileNotFoundError:
         return {}
     except (OSError, ValueError) as e:
-        # an unreadable policy must not silently mean "everything on"
         raise PermissionError(f"cannot read {policy_file()}: {e}")
+    intake = (doc or {}).get("intake", {}) if isinstance(doc, dict) else None
+    if not isinstance(intake, dict):
+        raise PermissionError(f"{policy_file()}: `intake` must be an object")
+    for name, entry in intake.items():
+        if not isinstance(entry, dict) or not isinstance(entry.get("on", True), bool):
+            raise PermissionError(f"{policy_file()}: intake.{name} must be {{\"on\": true|false}}")
+    return intake
 
 
 def source_on(source: str) -> bool:
-    entry = _policy().get(source)
-    return not (isinstance(entry, dict) and entry.get("on") is False)
+    return (_policy().get(source) or {}).get("on", True)
+
+
+def host_ok(authority: str, gitlab_url: str) -> bool:
+    """A URL authority (host[:port], as found in a message) is OUR GitLab: same hostname and port,
+    no userinfo (`good@evil` is evil). Empty configured URL = nothing matches."""
+    import urllib.parse
+    if not authority or "@" in authority or any(c in authority for c in "\\/?#"):
+        return False
+    try:
+        got = urllib.parse.urlsplit("//" + authority)
+        ours = urllib.parse.urlsplit(gitlab_url or "")
+        return bool(ours.hostname) and got.hostname == ours.hostname.lower() and got.port == ours.port
+    except ValueError:
+        return False
 
 
 def admit(source: str, kind: str) -> dict:

@@ -305,23 +305,18 @@ def enqueue(project, iid, role: str = "review", **request) -> dict:
             "task_duplicate": task["duplicate"]}
 
 
-def _gitlab_host() -> str:
-    import urllib.parse
-    return (urllib.parse.urlparse(rc.config.get("GITLAB_URL") or "").hostname or "").lower()
-
-
 def enqueue_text(text: str, default_project: str = "", role: str = "review", **request) -> dict:
     """MR references in free text (a chat message = DATA) -> review tasks. Links must point at
     our GitLab host (design §3); a foreign host is refused, not followed."""
     refs = rc.parse_mr_refs(text, default_project)
     if not refs:
         raise ValueError("no MR reference found in text")
-    ours = _gitlab_host()
+    gate.admit(request.get("source") or "manual", KIND)
+    ours = rc.config.get("GITLAB_URL") or ""
     added, refused = [], []
     for r in refs:
-        host = (r.get("host") or "").split(":")[0].lower()
-        if host and host != ours:
-            refused.append({"ref": f"{host}/{r['project']}!{r['iid']}", "reason": "not our GitLab host"})
+        if "host" in r and not gate.host_ok(r["host"], ours):
+            refused.append({"ref": f"{r['host']}/{r['project']}!{r['iid']}", "reason": "not our GitLab host"})
             continue
         try:
             out = enqueue(r["project"], r["iid"], role=role, **request)

@@ -358,6 +358,17 @@ def _process_one(gid, group_type, sender_name, sender_id, text, me):
     if intent != "build" and rccfg.get("FCHAT_WATCH_FREEFORM", "0") != "1":
         print(f"[{_now()}] [skip] {sender_name}: không phải review/build (FCHAT_WATCH_FREEFORM=0)")
         return
+    # cổng vào (F.5, design §3): người khác trong group = nguồn fchat (tin cậy thấp) → chỉ review_mr /
+    # investigate; build/deploy chỉ chủ tài khoản (self). Công tắc policy.json áp dụng cho mọi lối.
+    source = "self" if sender_id and sender_id == me else "fchat"
+    kind = "build" if intent == "build" else "investigate"
+    try:
+        gate.admit(source, kind)
+    except PermissionError as e:
+        print(f"[{_now()}] [DENY] {sender_name} ({sender_id}): {e}")
+        _post_tagged(gid, group_type, sender_name, sender_id,
+                     "⛔ Yêu cầu này không nhận từ group (chỉ nhận nhờ review MR / hỏi tra cứu).")
+        return
     print(f"[{_now()}] [TRIGGER] {sender_name}: {text!r} -> giao cho agent (build)…")
     # Báo nhận ngay vào group để mọi người biết bot đang làm gì. Giữ lại inc
     # để thu hồi nếu agent quyết định đây không phải yêu cầu (SKIP).

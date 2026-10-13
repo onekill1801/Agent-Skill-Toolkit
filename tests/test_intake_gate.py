@@ -50,6 +50,33 @@ class GateTest(unittest.TestCase):
         with self.assertRaises(PermissionError):
             gate.admit("fchat", "review_mr")
 
+    def test_malformed_switches_fail_closed(self):
+        """Codex F.5 #5: a mistyped switch must not mean 'on'."""
+        for bad in ({"intake": {"fchat": False}}, {"intake": {"fchat": {"on": "false"}}}, {"intake": []}, []):
+            self.policy(bad)
+            with self.assertRaises(PermissionError, msg=bad):
+                gate.admit("fchat", "review_mr")
+        self.policy({"intake": {"fchat": {}}, "other": 1})
+        self.assertTrue(gate.admit("fchat", "review_mr"))
+
+    def test_group_cannot_trigger_build(self):
+        """Codex F.5 #1: only the owner (self) may ask for a build from the group."""
+        with self.assertRaises(PermissionError):
+            gate.admit("fchat", "build")
+        self.assertTrue(gate.admit("fchat", "investigate"))
+        self.assertTrue(gate.admit("self", "build"))
+
+    def test_host_check(self):
+        """Codex F.5 #3: userinfo / port / lookalike hosts are not our GitLab."""
+        ours = "https://gitlab.example.vn"
+        self.assertTrue(gate.host_ok("gitlab.example.vn", ours))
+        self.assertTrue(gate.host_ok("GitLab.Example.VN", ours))
+        for bad in ("gitlab.example.vn:pw@evil.example.com", "evil.example.com", "gitlab.example.vn.evil.com",
+                    "gitlab.example.vn:8443", "x.gitlab.example.vn", "", "gitlab.example.vn\@evil"):
+            self.assertFalse(gate.host_ok(bad, ours), bad)
+        self.assertTrue(gate.host_ok("gitlab.example.vn:8443", "https://gitlab.example.vn:8443/"))
+        self.assertFalse(gate.host_ok("gitlab.example.vn", ""))
+
     def test_allowlist_is_by_user_id_only(self):
         self.assertTrue(gate.sender_allowed("U1", "u1, U2"))
         self.assertFalse(gate.sender_allowed("U3", "U1,Nguyen Van A"))
@@ -105,6 +132,12 @@ class MrWatchEnqueueTest(unittest.TestCase):
         fake.stdout = json.dumps({"error": True, "message": "switched off"})
         with mock.patch.object(self.mw.subprocess, "run", return_value=fake):
             self.assertFalse(self.mw._enqueue_review(self.mrs[0]))
+        # Codex F.5 #4: a crash with empty output is not "queued"
+        for out, rc in (("", 1), ("", 0), ("[]", 0), (json.dumps({"task_id": "t"}), 0),
+                        (json.dumps({"task_id": "t", "job_id": "j"}), 1)):
+            crash = mock.Mock(stdout=out, stderr="Traceback", returncode=rc)
+            with mock.patch.object(self.mw.subprocess, "run", return_value=crash):
+                self.assertFalse(self.mw._enqueue_review(self.mrs[0]), (out, rc))
 
 
 if __name__ == "__main__":
