@@ -291,10 +291,22 @@ class LadderTest(unittest.TestCase):
                 L.spec_launchers({"rungs": [{"name": "r", "run": argv}]})
         pats = L.spec_launchers({"rungs": [{"name": "r", "run": ["verify"], "protects": []}]})
         self.assertTrue(hits(pats, "verify"))                                   # bare launcher resolved in repo
-        for root in ("./", ".", "ci/..", "../outside"):
+        for root in ("./", ".", "ci/..", "../outside", "..", "/outside/check.py", "C:/outside/check.py",
+                     "c:\\x\\check.py", "//server/share/check.py"):
             with self.assertRaises(ValueError, msg=root):
                 L.spec_launchers({"rungs": [{"name": "r", "run": ["x"], "protects": [root]}]})
         self.assertEqual(L.spec_launchers({"rungs": [{"name": "rv", "kind": "cross_review"}]}), [])
+
+    def test_protection_is_case_insensitive(self):
+        """Codex F.2 R7: `run: [VERIFY]` executes the tracked `verify` on Windows."""
+        before = git(self.repo, "rev-parse", "HEAD")
+        open(os.path.join(self.repo, "verify"), "w").write("echo ok\n")
+        open(os.path.join(self.repo, "Tests_dir_marker.txt"), "w").write("x\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "launcher")
+        extra = L.spec_launchers({"rungs": [{"name": "r", "run": ["VERIFY"], "protects": ["CI/Check.sh"]}]})
+        self.assertTrue(L.protected_changes(self.repo, before, "HEAD", extra))
+        self.assertTrue(any(__import__("re").search(p, "ci/check.sh", __import__("re").I) for p in extra))
 
     def test_protection_fails_closed_on_git_errors(self):
         """Codex F.2 R3 NEW HIGH."""
