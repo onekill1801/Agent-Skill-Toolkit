@@ -129,7 +129,7 @@ class ProgramTest(unittest.TestCase):
         self.assertIn("«", self.prompts[0][2])                    # plan text quoted as data
         self.assertNotEqual(git(self.repo, "rev-parse", "main"), git(self.repo, "rev-parse", b1))   # main untouched
         rep = RF.program("status", type("A", (), {"program_id": pid})())
-        self.assertEqual(rep["progress"], "4/4")
+        self.assertEqual(rep["progress"], "6/6")                  # implement + verify + publish per slice
 
     def test_slice_without_change_blocks_its_dependents(self):
         mock.patch.object(P.agent_call, "run", side_effect=lambda *a, **k: "nothing to do").start()
@@ -264,6 +264,59 @@ class Round1Test(ProgramTest):
         with self.assertRaises(ValueError) as e:
             self.new()
         self.assertIn("cannot prove a refactor slice", str(e.exception))
+
+    def test_round2_weak_suite_and_pinned_spec(self):                        # Codex F.10b R2 #6/#7
+        weak = SPEC.replace("      protects: []\n      full_suite: true\n", "      protects: []\n") \
+                   .replace("      kind: ratchet", "      kind: ratchet\n      full_suite: true")
+        self.assertNotEqual(weak, SPEC)
+        spec_path = os.path.join(self.tmp, "weak.yml")
+        with open(spec_path, "w") as f:
+            f.write(weak)
+        args = type("A", (), {"repo": self.repo, "goal": "g2", "invariants": "", "slices": self.slices,
+                              "base": "main", "spec": spec_path, "program_id": ""})()
+        with self.assertRaises(ValueError):
+            RF.program("new", args)                                # a ratchet with full_suite is not a suite
+        good = os.path.join(self.tmp, "good.yml")
+        with open(good, "w") as f:
+            f.write(SPEC)
+        args.spec = good
+        out = RF.program("new", args)
+        with open(good, "w") as f:
+            f.write("verify: {}\n")                                # edited after approval: no effect
+        self.run_all(out["program"])
+        with S.Store() as st:
+            self.assertEqual({k["status"] for k in st.children(out["program"])}, {"done"})
+
+    def test_round2_publish_only_the_verified_commit(self):                  # Codex F.10b R2 new HIGH
+        out = self.new()
+        pid = out["program"]
+        self.work()
+        self.approve(pid)
+        real = P.step_publish
+
+        def moved_then_publish(ctx):                               # a commit lands AFTER verification
+            clone = ctx.data["worktree"]
+            with open(os.path.join(clone, "src", "late.py"), "w") as f:
+                f.write("late\n")
+            git(clone, "add", "-A")
+            git(clone, "commit", "-qm", "late")
+            return real(ctx)
+        mock.patch.dict(P.REGISTRY, {P.PUBLISH: [("publish", moved_then_publish)]}).start()
+        self.work()
+        with S.Store() as st:
+            pub = st.get(out["slices"][0]["publish"])
+        self.assertEqual(pub["status"], "blocked")
+        self.assertIn("moved after it was verified", pub["last_error"])
+        self.assertNotIn(out["slices"][0]["branch"], git(self.repo, "branch", "--list"))   # nothing published
+
+    def test_round2_open_verifications_keep_the_program_running(self):     # Codex F.10b R2 #2
+        out = self.new()
+        with S.Store() as st:
+            for sl in out["slices"]:
+                st.cancel(sl["implement"])
+            st.cancel(out["program"])
+        with self.assertRaises(ValueError):
+            self.new()                                             # verify / publish tasks still open
 
     def test_plan_is_created_atomically(self):                               # #8
         from agent_skill_toolkit.core import store as store_mod

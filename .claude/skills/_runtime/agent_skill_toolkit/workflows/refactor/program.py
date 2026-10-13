@@ -5,8 +5,10 @@ architecture ratchet and a full suite), merged one by one by a human (MR = a [WR
     program task  (kind refactor_program)  blocks until YOU approve the plan  -> done = plan approved
       slice s1     (kind refactor_slice)   clone + branch refactor/<run>-s1 at the pinned base SHA;
                                             agent implements; the branch is fetched back into your clone
-      verify s1    (kind verify)           the ladder on that branch
-      slice s2 ...                         one dependency -> starts from the VERIFIED commit of that slice;
+      verify s1    (kind verify)           the ladder on that branch, in the clone (its fixer may add commits)
+      publish s1   (kind refactor_publish) ONLY the commit the ladder proved green, under the APPROVED spec,
+                                            becomes refs/heads/<branch> in your clone (Codex F.10b R2)
+      slice s2 ...                         one dependency -> starts from the PUBLISHED commit of that slice;
                                             several -> starts from the base branch once YOU merged them all
 
 The whole plan is created in one transaction; an identical program cannot start while one runs; branch
@@ -25,7 +27,7 @@ from agent_skill_toolkit.workflows import engine as E
 from agent_skill_toolkit.workflows.execution import agent_call
 from agent_skill_toolkit.workflows.intake import lanes
 
-PROGRAM, SLICE = "refactor_program", "refactor_slice"
+PROGRAM, SLICE, PUBLISH = "refactor_program", "refactor_slice", "refactor_publish"
 WAIT_PLAN = "plan: "            # last_error prefix while the plan waits for your approval
 SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
 
@@ -79,9 +81,9 @@ def check_spec(repo: str, base_sha: str, spec_file: str = "") -> dict:
     from agent_skill_toolkit.workflows.verify import ladder as L
     spec = L.load_spec(repo, base_sha, spec_file)
     kinds = {r.get("kind", "cmd") for r in spec["rungs"]}
+    suite = any(r.get("full_suite") is True and r.get("kind", "cmd") == "cmd" and r.get("run") for r in spec["rungs"])
     missing = [x for x, ok in (("a `kind: ratchet` rung", "ratchet" in kinds),
-                               ("a `full_suite: true` rung", any(r.get("full_suite") for r in spec["rungs"])))
-               if not ok]
+                               ("a full suite (`kind: cmd` with `run` and `full_suite: true`)", suite)) if not ok]
     if missing:
         raise ValueError("the verify spec of this repo cannot prove a refactor slice — add " + " and ".join(missing))
     return spec
@@ -96,12 +98,17 @@ def create(st, repo: str, goal: str, invariants: str, slices: list, base: str, s
     repo = os.path.realpath(repo)
     base_ref = L.resolve_base(repo, base)
     base_sha = _git(repo, "rev-parse", f"{base_ref}^{{commit}}")       # pinned (Codex F.10b #6)
-    check_spec(repo, base_sha, spec_file)
+    spec = check_spec(repo, base_sha, spec_file)
     slices = parse_slices(slices)
     name = re.sub(r"[^a-z0-9]+", "-", goal.lower()).strip("-")[:30] or "program"
     run = uuid.uuid4().hex[:8]                                          # branch names carry it (#2)
+    if spec_file:                       # the APPROVED spec is pinned: a later edit of the file changes nothing
+        pinned = paths.state_dir("refactor-clones", run, "spec.yml")
+        with open(spec_file, encoding="utf-8") as src, open(pinned, "w", encoding="utf-8") as dst:
+            dst.write(src.read())
+        spec_file = pinned
     common = {"repo": repo, "goal": goal, "invariants": invariants, "base_ref": base_ref, "base": base_sha,
-              "spec_file": spec_file, "name": name, "run": run}
+              "spec_file": spec_file, "spec_hash": spec["hash"], "name": name, "run": run}
     nodes = [{"key": "program", "kind": PROGRAM, "ref": f"{repo}#{name}", "title": f"Refactor: {goal[:150]}",
               "priority": 6, "data": {**common, "slices": slices, "intake": gate.admit(source, PROGRAM)}}]
     branches = {}
@@ -113,7 +120,7 @@ def create(st, repo: str, goal: str, invariants: str, slices: list, base: str, s
                 else "merged")
         nodes.append({"key": f"impl:{s['id']}", "kind": SLICE, "ref": f"{run}:{s['id']}",
                       "title": f"{s['id']}: {s['title'][:120]}", "parent_key": "program",
-                      "depends_keys": ["program"] + [f"verify:{d}" for d in s["depends_on"]],
+                      "depends_keys": ["program"] + [f"publish:{d}" for d in s["depends_on"]],
                       "resource": f"slice:{clone}",
                       "data": {**common, "slice": s, "worktree": clone, "branch": branch, "start_mode": mode,
                                "deps": {d: branches[d] for d in s["depends_on"]}}})
@@ -123,23 +130,30 @@ def create(st, repo: str, goal: str, invariants: str, slices: list, base: str, s
                       "data": {"repo": clone, "branch": branch, "base": base_sha, "allow_default": False,
                                "acs": [{"id": f"AC{i}", "text": a} for i, a in enumerate(s["acs"], 1)],
                                "spec_file": spec_file, "fixer_role": "implement", "program_run": run,
-                               "slice": s["id"]}})
+                               "slice": s["id"], "program_repo": repo, "name": name}})
+        nodes.append({"key": f"publish:{s['id']}", "kind": PUBLISH, "ref": f"{run}:{s['id']}:publish",
+                      "title": f"publish {s['id']}", "parent_key": "program", "depends_keys": [f"verify:{s['id']}"],
+                      "data": {**common, "slice": s, "worktree": clone, "branch": branch}})
 
     def guard(db):
         import json as _json
-        for r in db.execute("select data from tasks where kind=? and status in ('queued','running','paused_quota',"
-                            "'blocked')", (SLICE,)):
+        for r in db.execute("select data from tasks where kind in (?,?,?) and status in ('queued','running',"
+                            "'paused_quota','blocked')", (SLICE, PUBLISH, "verify")):
             d = _json.loads(r["data"] or "{}")
-            if d.get("repo") == repo and d.get("name") == name:
+            if (d.get("program_repo") or d.get("repo")) == repo and d.get("name") == name:
                 return f"a program for {goal!r} is still running on this repo (run {d.get('run')}) — finish or cancel it"
         return ""
     out = st.add_graph(nodes, guard=guard)
     if out.get("duplicate"):
         return {"program": out["duplicate"], "duplicate": True}
     t = out["tasks"]
+    for sl in slices:                   # dependencies by task id (never searched for later — Codex F.10b R2)
+        if sl["depends_on"]:
+            st.patch_data(t[f"impl:{sl['id']}"], ("queued", "blocked"),
+                          dep_publish={d: t[f"publish:{d}"] for d in sl["depends_on"]})
     return {"program": t["program"], "duplicate": False, "run": run, "base": base_sha,
             "slices": [{"slice": s["id"], "implement": t[f"impl:{s['id']}"], "verify": t[f"verify:{s['id']}"],
-                        "branch": branches[s["id"]]} for s in slices]}
+                        "publish": t[f"publish:{s['id']}"], "branch": branches[s["id"]]} for s in slices]}
 
 
 # ----------------------------------------------------------------------------- program task
@@ -158,21 +172,26 @@ def step_plan(ctx) -> dict:
 # ----------------------------------------------------------------------------- slice task
 
 def _verified_sha(ctx, dep: str) -> str:
-    """The commit a dependency's verify task proved (its last valid rung checkpoint)."""
-    st, prog_run = ctx.store, ctx.data["run"]
-    for t in st.list(kind="verify", limit=500):
-        if (t.get("data") or {}).get("program_run") == prog_run and t["data"].get("slice") == dep:
-            if t["status"] != "done":
-                raise E.NeedsHuman(f"dependency {dep} is not verified ({t['status']})")
-            cps = [c for c in st.checkpoints(t["id"], valid_only=True) if (c.get("data") or {}).get("sha")]
-            if cps:
-                return cps[-1]["data"]["sha"]
-    raise E.NeedsHuman(f"no verified commit for dependency {dep}")
+    """The commit a dependency PUBLISHED (= proved green under the approved spec), by task id."""
+    tid = (ctx.data.get("dep_publish") or {}).get(dep)
+    t = ctx.store.get(tid) if tid else None
+    if not t:
+        raise E.NeedsHuman(f"dependency {dep}: its publish task is unknown — re-plan")
+    if t["status"] != "done":
+        raise E.NeedsHuman(f"dependency {dep} is not published ({t['status']})")
+    cp = next((c for c in reversed(ctx.store.checkpoints(tid, valid_only=True)) if c["step"] == "publish"), None)
+    if not cp or not (cp.get("data") or {}).get("sha"):
+        raise E.NeedsHuman(f"dependency {dep}: no published commit recorded")
+    return cp["data"]["sha"]
 
 
-def _snapshot(repo: str) -> dict:
-    return {"refs": _git(repo, "for-each-ref", "--format=%(refname) %(objectname)"),
-            "status": _git(repo, "status", "--porcelain", "--untracked-files=normal")}
+def _snapshot(repo: str, run: str) -> dict:
+    """Your clone's refs + working tree, minus this program's own branches (their publication by the
+    publish step is the only authorised change — concurrent slices must not alarm each other)."""
+    own = f"refs/heads/refactor/{run}-"
+    refs = [ln for ln in _git(repo, "for-each-ref", "--format=%(refname) %(objectname)").splitlines()
+            if not ln.startswith(own)]
+    return {"refs": refs, "status": _git(repo, "status", "--porcelain", "--untracked-files=normal")}
 
 
 def step_worktree(ctx) -> dict:
@@ -226,14 +245,14 @@ def step_implement(ctx) -> dict:
             raise E.NeedsHuman(f"{when}: {branch} no longer descends from its start {start[:10]}")
     check("before the agent")
     before_head = _git(clone, "rev-parse", "HEAD")
-    shared_before = _snapshot(repo)
+    shared_before = _snapshot(repo, d["run"])
     q = lambda t, n=600: lanes.quoted(t, n)                                    # noqa: E731
     prompt = IMPLEMENT.format(worktree=clone, branch=branch, goal=q(d.get("goal")), invariants=q(d.get("invariants") or "-"),
                               title=q(s["title"], 200), desc=q(s.get("desc") or "-", 3000),
                               acs=q("; ".join(s.get("acs") or []) or "-", 1500), slice=s["id"])
     text = agent_call.run(ctx, d.get("implement_role") or "implement", prompt, cwd=clone,
                           timeout=int(d.get("implement_timeout") or 3600))
-    if _snapshot(repo) != shared_before:
+    if _snapshot(repo, d["run"]) != shared_before:
         raise E.NeedsHuman(f"the agent changed your clone {repo} (refs or working tree) — check it by hand")
     check("after the agent")
     if _git(clone, "status", "--porcelain"):
@@ -242,12 +261,40 @@ def step_implement(ctx) -> dict:
     after = _git(clone, "rev-parse", "HEAD")
     if after == before_head:
         raise E.NeedsHuman(f"slice {s['id']}: the agent made no change:\n{text[-800:]}")
-    # publish ONLY this branch back to your clone (for the stacked slices and your MR)
-    _git(repo, "fetch", "--quiet", clone, f"+refs/heads/{branch}:refs/heads/{branch}")
     return {"sha": after, "commits": int(_git(clone, "rev-list", "--count", f"{start}..{after}")),
             "summary": text[-1500:]}
 
 
+def step_publish(ctx) -> dict:
+    """Publish the commit the verify ladder proved green — under the approved spec, every rung on the
+    same commit — as refs/heads/<branch> of your clone. Nothing else is published."""
+    from agent_skill_toolkit.workflows.verify import ladder as L
+    d = ctx.data
+    clone, branch, repo = d["worktree"], d["branch"], d["repo"]
+    vt = next((t for t in ctx.store.list(kind=L.KIND, limit=1000)
+               if (t.get("data") or {}).get("program_run") == d["run"] and t["data"].get("slice") == d["slice"]["id"]),
+              None)
+    if not vt or vt["status"] != "done":
+        raise E.NeedsHuman(f"slice {d['slice']['id']}: its verification is not done")
+    spec = L.load_spec(clone, d["base"], d.get("spec_file") or "")
+    if spec["hash"] != d["spec_hash"]:
+        raise E.NeedsHuman(f"slice {d['slice']['id']}: the verify spec changed since the plan was approved")
+    cps = {c["step"]: c for c in ctx.store.checkpoints(vt["id"], valid_only=True)}
+    keys = [str((cps.get(r["name"]) or {}).get("input_key") or "") for r in spec["rungs"]]
+    heads = {k.split(":", 1)[0] for k in keys}
+    if not keys or any(not k.endswith(":" + d["spec_hash"]) for k in keys) or len(heads) != 1:
+        raise E.NeedsHuman(f"slice {d['slice']['id']}: no complete green run of the approved spec on one commit")
+    sha = heads.pop()
+    if _git(clone, "rev-parse", f"refs/heads/{branch}") != sha:
+        raise E.NeedsHuman(f"slice {d['slice']['id']}: {branch} moved after it was verified — verify again")
+    _git(clone, "update-ref", f"refs/verified/{branch}", sha)
+    _git(repo, "fetch", "--quiet", clone, f"+refs/verified/{branch}:refs/heads/{branch}")
+    if _git(repo, "rev-parse", f"refs/heads/{branch}") != sha:
+        raise RuntimeError("publication did not land")
+    return {"sha": sha, "branch": branch}
+
+
 PROGRAM_STEPS = [("plan", step_plan)]
 SLICE_STEPS = [("worktree", step_worktree), ("implement", step_implement)]
-REGISTRY = {PROGRAM: PROGRAM_STEPS, SLICE: SLICE_STEPS}
+PUBLISH_STEPS = [("publish", step_publish)]
+REGISTRY = {PROGRAM: PROGRAM_STEPS, SLICE: SLICE_STEPS, PUBLISH: PUBLISH_STEPS}
