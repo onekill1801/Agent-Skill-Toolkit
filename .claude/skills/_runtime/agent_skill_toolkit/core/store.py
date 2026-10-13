@@ -185,6 +185,31 @@ class Store:
         q += " order by updated desc limit ?"
         return [_row(r) for r in self.db.execute(q, (*args, limit))]
 
+    def get_setting(self, key: str, default: str = None) -> str:
+        r = self.db.execute("select value from settings where key=?", (key,)).fetchone()
+        return r["value"] if r else default
+
+    def set_setting(self, key: str, value: str, by: str = "") -> None:
+        with self._tx():
+            self.db.execute("insert into settings(key, value) values (?, ?) "
+                            "on conflict(key) do update set value=excluded.value", (key, str(value)))
+            self._event(None, "setting", key=key, value=str(value)[:200], by=by or None)
+
+    def claim_policy(self) -> dict:
+        """Generic claim filter installed by a workflow (e.g. usage throttling, F.11):
+        {deny_kinds, deny_lanes, deny_sources, only_kinds, only_lanes, expires_at}. Expired or
+        missing = no filter; unreadable = only the safest work (nothing new is claimed)."""
+        raw = self.get_setting("claim_policy")
+        if not raw:
+            return {}
+        try:
+            p = json.loads(raw)
+        except ValueError:
+            return {"only_kinds": [], "only_lanes": [], "unreadable": True}
+        if not isinstance(p, dict) or float(p.get("expires_at") or 0) < time.time():
+            return {}
+        return p
+
     def capacity(self) -> int:
         r = self.db.execute("select value from settings where key='max_running'").fetchone()
         try:
@@ -220,6 +245,29 @@ class Store:
                     out["set"].append(r["id"])
         return out
 
+    @staticmethod
+    def _policy_sql(p: dict) -> tuple:
+        """SQL for claim_policy. Applies to NEW claims only: a task already running is never stopped,
+        and a paused / expired-lease task resumes only if the policy allows its kind / lane."""
+        sql, args = "", []
+        lane, source = "coalesce(json_extract(t.data,'$.lane'),'')", "coalesce(json_extract(t.data,'$.intake.source'),'')"
+        for col, key in (("t.kind", "deny_kinds"), (lane, "deny_lanes"), (source, "deny_sources")):
+            vals = [str(v) for v in p.get(key) or []]
+            if vals:
+                sql += f" and {col} not in ({','.join('?' * len(vals))})"
+                args += vals
+        if "only_kinds" in p or "only_lanes" in p:
+            ok_k, ok_l = [str(v) for v in p.get("only_kinds") or []], [str(v) for v in p.get("only_lanes") or []]
+            parts = []
+            if ok_k:
+                parts.append(f"t.kind in ({','.join('?' * len(ok_k))})")
+                args += ok_k
+            if ok_l:
+                parts.append(f"{lane} in ({','.join('?' * len(ok_l))})")
+                args += ok_l
+            sql += f" and ({' or '.join(parts) or '0'})"
+        return sql, args
+
     def running_count(self) -> int:
         return self.db.execute("select count(*) n from tasks where status='running' and lease_until>=?",
                                (time.time(),)).fetchone()["n"]
@@ -237,6 +285,7 @@ class Store:
             cap = self.capacity()
             if cap and self.running_count() >= cap:
                 return {}
+            pol_sql, pol_args = self._policy_sql(self.claim_policy())
             r = self.db.execute(
                 "select * from tasks t where ("
                 " t.status='queued'"
@@ -248,7 +297,8 @@ class Store:
                 "      and y.id!=t.id and y.status='running' and coalesce(y.lease_until,0)>=?))"
                 " and (coalesce(t.resource,'')='' or not exists (select 1 from tasks z where z.kind=t.kind"
                 "      and coalesce(z.resource,'')='' and z.status='running' and coalesce(z.lease_until,0)>=?))"
-                " order by t.priority, t.created limit 1", (now, now, *kinds, now, now)).fetchone()
+                + pol_sql +
+                " order by t.priority, t.created limit 1", (now, now, *kinds, now, now, *pol_args)).fetchone()
             if not r:
                 return {}
             prev = r["status"]

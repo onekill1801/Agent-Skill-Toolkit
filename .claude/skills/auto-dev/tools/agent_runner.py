@@ -55,6 +55,7 @@ runpy.run_path(os.path.join(_SKILLS, "_runtime", "bootstrap.py"))["activate"]()
 from agent_skill_toolkit.core import proc as proc_mod  # noqa: E402
 from agent_skill_toolkit.core import winexec  # noqa: E402
 from agent_skill_toolkit.workflows.execution import quota  # noqa: E402
+from agent_skill_toolkit.workflows.execution import usage as usage_mod  # noqa: E402
 
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_API_MODEL = config.get("ANTHROPIC_MODEL") or "claude-opus-5-5"
@@ -322,6 +323,22 @@ class _Slot:
                 pass
 
 
+def usage_tier() -> str:
+    """Current throttling tier (F.11): TOOLKIT_USAGE_TIER overrides; else the level reported to the
+    store (stale / missing / unreadable store = normal — throttling never blocks an agent turn)."""
+    forced = os.environ.get("TOOLKIT_USAGE_TIER", "").strip().lower()
+    if forced in ("normal", "save", "critical"):
+        return forced
+    try:
+        from agent_skill_toolkit.core import store as store_mod
+        if not os.path.exists(store_mod.default_path()):
+            return "normal"
+        with store_mod.Store() as st:
+            return usage_mod.level(st)["tier"]
+    except Exception:  # noqa: BLE001
+        return "normal"
+
+
 def run_role(prompt: str, role: str, *, system: str = None, cwd: str = None,
              timeout: int = CLI_TIMEOUT, avoid: tuple = ()) -> dict:
     """Run one turn for `role` using the first usable candidate. Returns
@@ -332,8 +349,14 @@ def run_role(prompt: str, role: str, *, system: str = None, cwd: str = None,
     if isinstance(specs, str):
         specs = [specs]
     tried = []
+    tier = usage_tier()
     for spec in specs:
         c = parse_candidate(spec)
+        if c["backend"] == "claude" and c["model"]:
+            down = usage_mod.model_for(role, c["model"], tier)       # model per step under throttling
+            if down != c["model"]:
+                tried.append({"spec": spec, "model": f"{c['model']} -> {down} ({tier})"})
+                c["model"] = down
         if c["backend"] in avoid:
             tried.append({"spec": spec, "skipped": "avoided"})
             continue

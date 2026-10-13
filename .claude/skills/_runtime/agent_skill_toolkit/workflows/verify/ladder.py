@@ -385,7 +385,9 @@ DIFF:
 def _agent(ctx, role: str, prompt: str, cwd: str, timeout: int) -> str:
     runner = os.path.join(paths.toolkit_root(), AGENT_RUNNER)
     argv = [sys.executable, runner, "--role", role, "--cwd", cwd, "--timeout", str(timeout)]
+    t0 = time.time()
     p = ctx.run(argv, timeout=timeout + 120, input=prompt)
+    ctx.usage("agent_runner", role, seconds=round(time.time() - t0, 1))     # budgets (F.11)
     if p.returncode != 0:
         try:
             err = json.loads((p.stdout or "").strip().splitlines()[-1])

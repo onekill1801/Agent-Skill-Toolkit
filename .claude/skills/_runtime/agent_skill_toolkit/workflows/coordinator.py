@@ -19,6 +19,7 @@ import time
 
 from agent_skill_toolkit.core import store as store_mod
 from agent_skill_toolkit.workflows import engine as E
+from agent_skill_toolkit.workflows.execution import usage
 
 ICON = {"queued": "⏳", "running": "🔄", "paused_quota": "⏸", "blocked": "✋", "done": "✅",
         "failed": "❌", "cancelled": "🚫"}
@@ -148,6 +149,10 @@ def board(st, include_closed_hours: float = 24, limit: int = 200) -> dict:
         emit(r, 0)
     summary = st.summary()
     head = " · ".join(f"{ICON.get(k, k)} {k} {v}" for k, v in sorted(summary["counts"].items()))
+    lv = usage.level(st)
+    summary["usage"] = lv
+    if lv["tier"] != "normal":
+        head += f"   ⚠ mức dùng {lv['pct']:.0f}% → {lv['tier']} (chỉ nhận việc được phép)"
     return {"summary": summary, "rows": rows, "text": "\n".join([head or "(trống)", ""] + lines)}
 
 

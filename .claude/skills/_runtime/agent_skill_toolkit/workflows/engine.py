@@ -31,7 +31,7 @@ import traceback
 
 from ..core import proc
 from ..core import store as store_mod
-from .execution import handoff, quota
+from .execution import handoff, quota, usage
 
 QuotaExceeded = quota.QuotaExceeded          # one exception type for runners and engine
 
@@ -153,6 +153,12 @@ def run(st: store_mod.Store, task: dict, steps: list, lease_s: int = store_mod.D
                     if rerun_from is None and cp and (cp.get("input_key") or "") == key:
                         outputs[name] = cp["data"]
                         continue
+                    over = usage.check_budgets(st, task)        # hard budgets (F.11), before any work
+                    if over:
+                        kind, msg, resume_at = over
+                        if kind == "daily":
+                            raise QuotaExceeded(resume_at, "budget", msg)
+                        raise NeedsHuman(msg)
                     if rerun_from is None:
                         rerun_from = name
                         later = names[i + 1:]

@@ -6,6 +6,8 @@ show the progress board (agent_skill_toolkit.workflows.coordinator).
     python coordinator.py board [--json] [--hours 24]        # progress board (open + closed in last N h)
     python coordinator.py accept <task_id> [--lane vua]      # accept an aTask proposal (atask_intake)
     python coordinator.py capacity [N]                       # show / set the SHARED cap on live tasks
+    python coordinator.py usage [PCT] [--source claude]      # report usage % -> throttling tier (6 h)
+    python coordinator.py budget [--daily-agent-runs N]      # hard cap on agent turns per day (0 = none)
 
 Kinds run: review_mr (mr-review/review_flow) · verify (verify.py) · atask_intake (proposal).
 `--parallel` = worker threads of this process; the cap on live tasks is ONE value stored in the
@@ -25,6 +27,7 @@ from pathlib import Path
 runpy.run_path(str(Path(__file__).resolve().parents[2] / "_runtime" / "bootstrap.py"))["activate"]()
 from agent_skill_toolkit.core import store as store_mod  # noqa: E402
 from agent_skill_toolkit.workflows import coordinator as C  # noqa: E402
+from agent_skill_toolkit.workflows.execution import usage as usage_mod  # noqa: E402
 from agent_skill_toolkit.workflows.intake import atask_flow  # noqa: E402
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -96,6 +99,11 @@ def main(argv=None) -> int:
     p.add_argument("--hours", type=float, default=24)
     p = sub.add_parser("capacity")
     p.add_argument("n", nargs="?", type=int, help="set the shared cap (0 = none); omit to show it")
+    p = sub.add_parser("usage")
+    p.add_argument("pct", nargs="?", type=float)
+    p.add_argument("--source", default="")
+    p = sub.add_parser("budget")
+    p.add_argument("--daily-agent-runs", type=int, default=None)
     p = sub.add_parser("accept")
     p.add_argument("task_id")
     p.add_argument("--lane", default="")
@@ -118,6 +126,16 @@ def main(argv=None) -> int:
                 print(b["text"])
                 return 0
             out = b
+        elif a.cmd == "usage":
+            with store_mod.Store() as st:
+                out = usage_mod.set_level(st, a.pct, a.source) if a.pct is not None else usage_mod.level(st)
+                out["claim_policy"] = st.claim_policy()
+        elif a.cmd == "budget":
+            with store_mod.Store() as st:
+                if a.daily_agent_runs is not None:
+                    st.set_setting("daily_agent_runs", str(max(0, a.daily_agent_runs)), by="cli")
+                out = {"daily_agent_runs": int(st.get_setting("daily_agent_runs") or 0),
+                       "today": usage_mod.agent_usage(st, since=usage_mod._local_midnight())}
         elif a.cmd == "capacity":
             with store_mod.Store() as st:
                 if a.n is not None:
