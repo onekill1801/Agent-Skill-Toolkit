@@ -71,22 +71,35 @@ def _pom_versions(path: str) -> dict:
     if props is not None:
         for p in props:
             raw[p.tag.split("}")[-1]] = (p.text or "").strip()
+    # Versions come only from what the build DECLARES — parent, dependencies, dependencyManagement,
+    # plugins — with ${...} resolved; an unused `x.version` property is not a dependency (Codex F.9 R3).
     out = {}
-    for tag, val in raw.items():
-        if tag.endswith(".version") and val:
-            out[tag[:-len(".version")]] = _resolve(val, raw)
-    # Spring Boot imported as a BOM / declared in dependencyManagement (no parent)
-    for dep in root.iter(f"{{{ns['m']}}}dependency" if ns else "dependency"):
-        art = (dep.findtext(q("artifactId"), "", ns) or "").strip()
-        ver = (dep.findtext(q("version"), "", ns) or "").strip()
-        if art == "spring-boot-dependencies" and ver:
-            out["spring-boot"] = _resolve(ver, raw) or ver
+
+    def family(art: str) -> str:
+        if art.startswith("spring-boot"):
+            return "spring-boot"
+        if "jhipster" in art:
+            return "jhipster"
+        return ""
+
+    for tag in ("dependency", "plugin"):
+        for el in root.iter(f"{{{ns['m']}}}{tag}" if ns else tag):
+            fam = family((el.findtext(q("artifactId"), "", ns) or "").strip())
+            ver = (el.findtext(q("version"), "", ns) or "").strip()
+            if fam and ver and fam not in out:
+                out[fam] = _resolve(ver, raw) or ver
     parent = root.find(q("parent"), ns)
     if parent is not None:
         art = (parent.findtext(q("artifactId"), "", ns) or "").strip()
         ver = (parent.findtext(q("version"), "", ns) or "").strip()
-        if art in ("spring-boot-starter-parent", "spring-boot-dependencies", "spring-boot-parent") and ver:
-            out["spring-boot"] = _resolve(ver, raw) or ver   # the parent is what is really built with
+        fam = family(art)
+        if fam and ver:
+            out[fam] = _resolve(ver, raw) or ver      # the parent is what is really built with
+    # the JDK level is a build setting, not a dependency
+    for prop in ("maven.compiler.release", "java.version", "maven.compiler.source"):
+        if raw.get(prop):
+            out["java"] = _resolve(raw[prop], raw) or raw[prop]
+            break
     return out
 
 

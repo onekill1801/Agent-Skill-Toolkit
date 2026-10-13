@@ -261,7 +261,13 @@ class Round1FixesTest(Base):
                     "<x.version>${missing}</x.version></properties></project>")
         v = scan._pom_versions(pom)
         self.assertEqual(v["spring-boot"], "3.5.1")                          # the parent wins
-        self.assertEqual(v["x"], "")
+        self.assertNotIn("x", v)                                            # unused property: not a dependency
+        pom3 = os.path.join(self.tmp, "pom3.xml")
+        with open(pom3, "w") as f:                                           # Codex F.9 R3
+            f.write("<project><properties><sb>2.6.3</sb><spring-boot.version>9.9.9</spring-boot.version></properties>"
+                    "<dependencies><dependency><groupId>org.springframework.boot</groupId>"
+                    "<artifactId>spring-boot</artifactId><version>${sb}</version></dependency></dependencies></project>")
+        self.assertEqual(scan._pom_versions(pom3), {"spring-boot": "2.6.3"})
 
     def test_accept_refuses_an_adr_older_than_the_code(self):                # R2 #2
         t = self.ready()
