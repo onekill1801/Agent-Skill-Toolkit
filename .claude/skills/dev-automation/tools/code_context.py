@@ -84,14 +84,25 @@ def index_state(repo: str, sync: bool = True) -> dict:
 
 
 def _cg_json(args: list, timeout: int = 120):
-    p = cg._run(args, timeout=timeout)
+    """(data, "") or (None, reason) — never raises: grep is the fallback (Codex F.12 #3)."""
+    try:
+        p = cg._run(args, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, f"codegraph {args[0]} failed: {type(e).__name__}: {e}"[:300]
+    if p.returncode != 0:
+        return None, f"codegraph {args[0]} exit {p.returncode}: {(p.stderr or p.stdout or '')[-200:]}"
     text = (p.stdout or "").strip()
     if not text.startswith(("{", "[")):
         return None, text[:300]          # e.g. 'Symbol "x" not found — did you mean: ...'
     try:
-        return json.loads(text), ""
+        data = json.loads(text)
     except ValueError:
         return None, text[:300]
+    if args[0] in ("callers", "impact") and not (isinstance(data, dict) and isinstance(data.get("definitions", []), list)):
+        return None, f"codegraph {args[0]}: unexpected answer shape"
+    if args[0] == "query" and not isinstance(data, list):
+        return None, "codegraph query: unexpected answer shape"
+    return data, ""
 
 
 def _rows(defs: list, key: str) -> list:
@@ -106,20 +117,33 @@ def _rows(defs: list, key: str) -> list:
 
 # ----------------------------------------------------------------------------- grep side
 
+def _inside(real: str, root_real: str) -> bool:
+    try:
+        return os.path.commonpath([os.path.normcase(real), os.path.normcase(root_real)]) == os.path.normcase(root_real)
+    except ValueError:                               # different drives
+        return False
+
+
 def _iter_code(repo: str):
-    for root, dirs, files in os.walk(repo):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]          # hidden dirs like .claude/ hold code too
+    """Code files of the repo. Never follows a symlink, never leaves the repo, never yields a file
+    whose real path looks like a secret (a `config.py` link to ~/.aws/credentials is skipped)."""
+    root_real = os.path.realpath(repo)
+    for root, dirs, files in os.walk(repo):                    # os.walk does not follow dir links
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not os.path.islink(os.path.join(root, d))]
         for f in files:
             path = os.path.join(root, f)
             rel = os.path.relpath(path, repo).replace("\\", "/")
-            if not f.endswith(CODE_EXT) or SECRET_FILE.search(rel):
+            if not f.endswith(CODE_EXT) or SECRET_FILE.search(rel) or os.path.islink(path):
+                continue
+            real = os.path.realpath(path)
+            if not _inside(real, root_real) or SECRET_FILE.search(os.path.relpath(real, root_real).replace("\\", "/")):
                 continue
             try:
-                if os.path.getsize(path) > MAX_FILE:
+                if os.path.getsize(real) > MAX_FILE:
                     continue
             except OSError:
                 continue
-            yield rel, path
+            yield rel, real
 
 
 def grep(repo: str, rx: re.Pattern, limit: int = 50) -> list:
@@ -167,6 +191,17 @@ def _answer(source: str, state: dict, **data) -> dict:
     return out
 
 
+def _same_symbol(node: dict, symbol: str) -> bool:
+    """`Foo.bar` must match the qualified name (suffix on a segment boundary); a bare `bar` matches by
+    name. Imports / files / variables are not definitions (Codex F.12 #4)."""
+    if node.get("kind") in ("file", "import", "variable"):
+        return False
+    if "." not in symbol:
+        return node.get("name") == symbol
+    q = (node.get("qualifiedName") or "").replace("::", ".")
+    return q == symbol or q.endswith("." + symbol)
+
+
 def callers(repo: str, symbol: str, limit: int = 20, sync: bool = True) -> dict:
     state = index_state(repo, sync)
     if state["usable"]:
@@ -188,7 +223,8 @@ def impact(repo: str, symbol: str, depth: int = 2, sync: bool = True) -> dict:
             rows = _rows(data.get("definitions"), "affected")
             files = sorted({r["file"] for r in rows})
             return _answer("codegraph", state, symbol=symbol, affected=rows, files=files,
-                           tests=[f for f in files if TEST_FILE.search(f)])
+                           tests=[f for f in files if TEST_FILE.search(f)], ambiguous=bool(data.get("ambiguous")),
+                           definitions=len(data.get("definitions") or []))
         state = {**state, "reason": f"codegraph: {note}"}
     rows = grep_usages(repo, symbol, 200)
     files = sorted({r["file"] for r in rows} | {r["file"] for r in grep_definitions(repo, symbol)})
@@ -199,15 +235,14 @@ def impact(repo: str, symbol: str, depth: int = 2, sync: bool = True) -> dict:
 def locate(repo: str, symbol: str, sync: bool = True) -> dict:
     state = index_state(repo, sync)
     if state["usable"]:
-        data, note = _cg_json(["query", _name(symbol), "-p", repo, "-j", "-l", "10"])
+        data, note = _cg_json(["query", _name(symbol), "-p", repo, "-j", "-l", "25"])
         if isinstance(data, list):
-            want = symbol.split(".")[-1]
             hits = [{"name": n.get("qualifiedName") or n.get("name"), "kind": n.get("kind"),
                      "file": (n.get("filePath") or "").replace("\\", "/"), "line": n.get("startLine")}
-                    for n in (r.get("node") or {} for r in data) if n.get("name") == want]
+                    for n in (r.get("node") or {} for r in data) if _same_symbol(n, symbol)]
             if hits:
-                return _answer("codegraph", state, symbol=symbol, definitions=hits)
-            note = "no exact match"
+                return _answer("codegraph", state, symbol=symbol, definitions=hits, ambiguous=len(hits) > 1)
+            note = f"no definition matching {symbol!r} exactly"
         state = {**state, "reason": f"codegraph: {note}"}
     return _answer("grep", state, symbol=symbol, definitions=grep_definitions(repo, symbol))
 
@@ -224,46 +259,85 @@ def definitions_many(repo: str, symbols: list, sync: bool = False, per: int = 5)
             name = _name(sym)
         except ValueError:
             continue
-        data, _ = _cg_json(["query", name, "-p", repo, "-j", "-l", "10"], timeout=60)
+        data, _ = _cg_json(["query", name, "-p", repo, "-j", "-l", "25"], timeout=60)
         hits = [{"name": n.get("qualifiedName") or n.get("name"), "kind": n.get("kind"),
                  "file": (n.get("filePath") or "").replace("\\", "/"), "line": n.get("startLine")}
                 for n in ((r.get("node") or {}) for r in (data or []) if isinstance(data, list))
-                if n.get("name") == name and n.get("kind") not in ("file", "import", "variable")]
+                if _same_symbol(n, sym)]
         if hits:
             out[sym] = hits[:per]
     return out
 
 
 # stack trace frames: java `at a.b.C.m(C.java:12)`, python `File "x/y.py", line 3, in f`,
-# node `at fn (/abs/x.js:10:5)`, go `/abs/x.go:42 +0x1d`
+# node `at fn (C:\x\y.js:10:5)` / `at /abs/x.js:10:5`, go `/abs/x.go:42 +0x1d`
+JVM = (".java", ".kt", ".scala", ".groovy")
 _FRAMES = (re.compile(r"\bat\s+(?P<sym>[\w$.<>]+)\((?P<file>[\w$.-]+\.(?:java|kt|scala|groovy)):(?P<line>\d+)\)"),
            re.compile(r'File "(?P<file>[^"]+\.py)", line (?P<line>\d+)(?:, in (?P<sym>[\w<>]+))?'),
-           re.compile(r"\bat\s+(?:(?P<sym>[\w$.<>]+)\s+\()?(?P<file>[^\s():]+\.[cm]?[jt]sx?):(?P<line>\d+):\d+\)?"),
-           re.compile(r"(?P<file>[^\s:]+\.go):(?P<line>\d+)\b"))
+           re.compile(r"\bat\s+(?:(?P<sym>[\w$.<>\[\] ]+?)\s+\()?(?P<file>(?:[A-Za-z]:[\\/]|[\\/]|\.{0,2}[\\/]?)"
+                      r"[^\n():]*?\.[cm]?[jt]sx?):(?P<line>\d+):\d+\)?"),
+           re.compile(r"(?P<file>(?:[A-Za-z]:[\\/])?[^\s:]+\.go):(?P<line>\d+)\b"))
+
+
+def _is_abs(f: str) -> bool:
+    return bool(re.match(r"^([A-Za-z]:[\\/]|/|\\\\)", f))
+
+
+def parse_frames(text: str, limit: int = 200) -> list:
+    out = []
+    for rx in _FRAMES:
+        for m in rx.finditer(text or ""):
+            out.append({"file": m.group("file").strip(), "line": int(m.group("line")),
+                        "symbol": ((m.groupdict().get("sym") or "") if "sym" in rx.groupindex else "").strip()})
+            if len(out) >= limit:
+                return out
+    return out
 
 
 def trace(repo: str, text: str, limit: int = 30) -> dict:
-    """Stack trace -> frames that live in THIS repo (file resolved by path suffix / package path)."""
-    files = [rel for rel, _ in _iter_code(repo)]
+    """Stack trace -> frames that live in THIS repo. A frame counts only when it can be tied to ONE
+    repo file for sure (Codex F.12 #2): JVM frames by package path + file name, absolute paths by
+    lying inside the repo, relative paths by a unique suffix. Library frames are dropped."""
+    raw = parse_frames(text)
+    if not raw:
+        return {"source": "trace", "frames": [], "files": []}          # no walk when there is no trace
+    root_real = os.path.realpath(repo)
+    by_base = {}
+    want = {os.path.basename(f["file"].replace("\\", "/")) for f in raw}
+    for rel, _ in _iter_code(repo):
+        b = rel.rsplit("/", 1)[-1]
+        if b in want:
+            by_base.setdefault(b, []).append(rel)
     frames, seen = [], set()
-    for rx in _FRAMES:
-        for m in rx.finditer(text or ""):
-            f = m.group("file").replace("\\", "/")
-            sym = (m.groupdict().get("sym") or "") if "sym" in rx.groupindex else ""
-            cands = [r for r in files if r == f or r.endswith("/" + f.lstrip("./")) or f.endswith("/" + r)]
-            if f.endswith((".java", ".kt", ".scala", ".groovy")) and sym and len(cands) != 1:
-                pkg = "/".join(re.sub(r"\$.*$", "", sym).split(".")[:-2])        # a.b.C.m -> a/b
-                cands = [r for r in cands if f"/{pkg}/" in f"/{r}"] if pkg else cands
-            if len(cands) != 1:
-                continue                       # not ours (library frame) or ambiguous
-            key = (cands[0], int(m.group("line")))
-            if key in seen:
-                continue
-            seen.add(key)
-            frames.append({"file": cands[0], "line": key[1], "symbol": sym})
-            if len(frames) >= limit:
-                break
-    return {"source": "trace", "frames": frames, "files": list(dict.fromkeys(f["file"] for f in frames))}
+    for fr in raw:
+        f = fr["file"].replace("\\", "/")
+        base = f.rsplit("/", 1)[-1]
+        cands = by_base.get(base, [])
+        if f.endswith(JVM) and "/" not in f:
+            sym = re.sub(r"\$.*$", "", fr["symbol"])
+            parts = sym.split(".")
+            pkg = "/".join(parts[:-2])                              # a.b.C.m -> a/b ; C.m -> ""
+            cands = [r for r in cands if (f"/{r}".endswith(f"/{pkg}/{base}") if pkg else r == base or
+                                          re.search(r"(^|/)(src/(main|test)/(java|kotlin|scala|groovy)/)" + re.escape(base) + "$", r))]
+        elif _is_abs(fr["file"]):
+            real = os.path.realpath(fr["file"])
+            if not _inside(real, root_real):
+                continue                                             # outside the repo: not ours
+            rel = os.path.relpath(real, root_real).replace("\\", "/")
+            cands = [r for r in cands if r == rel]
+        else:
+            rel = f.lstrip("./")
+            cands = [r for r in cands if r == rel or r.endswith("/" + rel)]
+        if len(cands) != 1:
+            continue                                                 # not ours, or ambiguous
+        key = (cands[0], fr["line"])
+        if key in seen:
+            continue
+        seen.add(key)
+        frames.append({"file": cands[0], "line": fr["line"], "symbol": fr["symbol"]})
+        if len(frames) >= limit:
+            break
+    return {"source": "trace", "frames": frames, "files": list(dict.fromkeys(x["file"] for x in frames))}
 
 
 def affected(repo: str, files: list, sync: bool = True) -> dict:

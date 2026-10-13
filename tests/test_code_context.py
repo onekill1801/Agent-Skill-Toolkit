@@ -179,6 +179,94 @@ class TraceTest(Base):
         self.assertIn("<code_locations>\nsrc/main/java/com/acme/api/InvoiceController.java:3", seen["p"])
 
 
+class Round1FixesTest(Base):
+    """Codex F.12 round 1."""
+
+    def test_symlinked_secret_is_never_read(self):                           # #1
+        self.no_codegraph()
+        outside = tempfile.mkdtemp(prefix="cc-out-")
+        secret = os.path.join(outside, "credentials")
+        with open(secret, "w") as f:
+            f.write("createInvoice = 'AKIA_SECRET'\n")
+        try:
+            os.symlink(secret, os.path.join(self.repo, "src", "config.py"))
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks need privileges on this machine")
+        self.assertNotIn("AKIA_SECRET", json.dumps(cc.callers(self.repo, "createInvoice")))
+
+    def test_links_and_escaping_real_paths_are_skipped(self):                # #1 without symlink rights
+        self.no_codegraph()
+        ctrl = os.path.join(self.repo, "src", "main", "java", "com", "acme", "api", "InvoiceController.java")
+        real_islink, real_realpath = os.path.islink, os.path.realpath
+        with mock.patch.object(cc.os.path, "islink", side_effect=lambda p: os.path.normcase(p) == os.path.normcase(ctrl)
+                               or real_islink(p)):
+            files = {r for r, _ in cc._iter_code(self.repo)}
+        self.assertNotIn("src/main/java/com/acme/api/InvoiceController.java", files)
+        outside = os.path.join(tempfile.gettempdir(), "elsewhere", "secret.py")
+        with mock.patch.object(cc.os.path, "realpath",
+                               side_effect=lambda p: outside if os.path.normcase(p) == os.path.normcase(ctrl)
+                               else real_realpath(p)):
+            files = {r for r, _ in cc._iter_code(self.repo)}
+        self.assertNotIn("src/main/java/com/acme/api/InvoiceController.java", files)
+        self.assertIn("src/main/java/com/acme/billing/InvoiceService.java", files)
+
+    def test_library_frames_are_not_attributed_to_repo_files(self):          # #2
+        for rel, body in {"src/main/java/com/acme/Servlet.java": "package com.acme;\nclass Servlet {}\n",
+                          "json/decoder.py": "def decode():\n    pass\n"}.items():
+            p = os.path.join(self.repo, rel)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w") as f:
+                f.write(body)
+        text = ("\tat org.springframework.web.Servlet.service(Servlet.java:99)\n"
+                '  File "C:\\Python\\lib\\json\\decoder.py", line 9, in decode\n'
+                "\tat com.acme.Servlet.run(Servlet.java:2)\n")
+        self.assertEqual(cc.trace(self.repo, text)["frames"],
+                         [{"file": "src/main/java/com/acme/Servlet.java", "line": 2, "symbol": "com.acme.Servlet.run"}])
+
+    def test_windows_node_paths_with_spaces(self):                           # #5
+        p = os.path.join(self.repo, "web app", "src", "app.js")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as f:
+            f.write("function boom() {}\n")
+        win = p.replace("/", "\\")
+        text = f"TypeError: x\n    at boom ({win}:10:5)\n    at Object.<anonymous> (node:internal/x.js:1:1)\n"
+        self.assertEqual(cc.trace(self.repo, text)["files"], ["web app/src/app.js"])
+
+    def test_no_trace_means_no_repo_walk(self):                              # #6
+        with mock.patch.object(cc, "_iter_code", side_effect=AssertionError("walked")):
+            self.assertEqual(cc.trace(self.repo, "plain failure text, no frames")["frames"], [])
+
+
+class Round1CodegraphTest(CodegraphTest):
+    def test_query_failure_falls_back_to_grep(self):                         # #3
+        orig = self.fake_run
+
+        def boom(args, timeout=120, **kw):
+            if args[0] == "callers":
+                raise subprocess.TimeoutExpired(args, timeout)
+            return orig(args, timeout, **kw)
+        cc.cg._run.side_effect = boom
+        out = cc.callers(self.repo, "createInvoice")
+        self.assertEqual(out["source"], "grep")
+        self.assertIn("TimeoutExpired", out["fallback"])
+
+    def test_ambiguity_and_qualified_names(self):                            # #4
+        self.answers["impact"] = json.dumps({"ambiguous": True, "definitions": [{"affected": []}, {"affected": []}]})
+        out = cc.impact(self.repo, "createInvoice")
+        self.assertEqual((out["ambiguous"], out["definitions"]), (True, 2))
+        self.answers["query"] = json.dumps([
+            {"node": {"name": "createInvoice", "kind": "method", "qualifiedName": "LegacyService.createInvoice",
+                      "filePath": "a.java", "startLine": 1}},
+            {"node": {"name": "createInvoice", "kind": "method", "qualifiedName": "InvoiceService.createInvoice",
+                      "filePath": "b.java", "startLine": 2}}])
+        out = cc.locate(self.repo, "InvoiceService.createInvoice")
+        self.assertEqual(([d["file"] for d in out["definitions"]], out["ambiguous"]), (["b.java"], False))
+        self.assertTrue(cc.locate(self.repo, "createInvoice")["ambiguous"])
+        out = cc.locate(self.repo, "Other.createInvoice")
+        self.assertEqual(out["source"], "grep")
+        self.assertIn("exactly", out["fallback"])
+
+
 class GroundingTest(Base):
     def test_scout_ranks_the_defining_file_first(self):
         import grounding
