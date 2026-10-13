@@ -214,7 +214,21 @@ def sect_feedback():
     return out
 
 
-_ALL = {"daemons": sect_daemons, "runs": sect_runs, "queue": sect_queue,
+def sect_tasks():
+    """Durable store (F.4a/F.7): the progress board of `coordinator.py board`. Missing DB = no tasks."""
+    import runpy
+    from pathlib import Path
+    runpy.run_path(str(Path(__file__).resolve().parents[2] / "_runtime" / "bootstrap.py"))["activate"]()
+    from agent_skill_toolkit.core import store as store_mod
+    from agent_skill_toolkit.workflows import coordinator as coord
+    if not os.path.exists(store_mod.default_path()):
+        return {"text": "", "rows": []}
+    with store_mod.Store() as st:
+        b = coord.board(st)
+    return {"text": b["text"], "rows": b["rows"], "summary": b["summary"]}
+
+
+_ALL = {"tasks": sect_tasks, "daemons": sect_daemons, "runs": sect_runs, "queue": sect_queue,
         "approvals": sect_approvals, "feedback": sect_feedback}
 
 
@@ -229,6 +243,16 @@ def _errline(section):
 
 def _render(data):
     lines = ["=" * 60, "TOOLKIT STATUS", "=" * 60]
+
+    if "tasks" in data:
+        lines += ["", "## Tasks (store — coordinator.py board)"]
+        tk = data["tasks"]
+        if _errline(tk):
+            lines.append(f"  (error: {tk['error']})")
+        elif not tk.get("rows"):
+            lines.append("  (no tasks)")
+        else:
+            lines += ["  " + x for x in tk["text"].splitlines()[:CAP * 3]]
 
     if "daemons" in data:
         lines += ["", "## Daemons"]
@@ -314,7 +338,7 @@ def main():
     ap = argparse.ArgumentParser(description="Consolidated toolkit status (read-only).")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--section", default=None,
-                    help="comma list: daemons,runs,queue,approvals,feedback (default all)")
+                    help="comma list: tasks,daemons,runs,queue,approvals,feedback (default all)")
     args = ap.parse_args()
 
     want = ([s.strip() for s in args.section.split(",") if s.strip()]

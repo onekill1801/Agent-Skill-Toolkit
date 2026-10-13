@@ -76,7 +76,9 @@ def start(repo: str, base: str, spec: str, fixer_role: str, allow_default: bool,
                    data={"repo": repo, "branch": br, "base": resolved, "allow_default": bool(allow_default),
                          "acs": acs or [],
                          "spec_file": os.path.abspath(spec) if spec else "", "fixer_role": fixer_role},
-                   max_attempts=3)
+                   max_attempts=3,
+                   # one working tree: two branches of the same checkout must never verify at once
+                   resource="repo:" + os.path.normcase(os.path.realpath(repo)))
         if t["duplicate"] and (t["data"].get("acs") or []) != (acs or []):
             # an open task for this branch has DIFFERENT ACs: never drop the new ones silently (F.3 #4)
             if not update_acs:

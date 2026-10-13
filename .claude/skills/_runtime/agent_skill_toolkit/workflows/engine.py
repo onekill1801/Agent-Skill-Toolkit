@@ -186,9 +186,9 @@ def run(st: store_mod.Store, task: dict, steps: list, lease_s: int = store_mod.D
 
 
 def work_once(st: store_mod.Store, owner: str, registry: dict, kinds: tuple = (),
-              lease_s: int = store_mod.DEFAULT_LEASE_S) -> dict:
+              lease_s: int = store_mod.DEFAULT_LEASE_S, max_running: int = 0) -> dict:
     """Claim one runnable task whose kind is in `registry` {kind: steps} and run it."""
-    task = st.claim(owner, kinds or tuple(registry), lease_s)
+    task = st.claim(owner, kinds or tuple(registry), lease_s, max_running=max_running)
     if not task:
         return {"status": "idle"}
     steps = registry.get(task["kind"])

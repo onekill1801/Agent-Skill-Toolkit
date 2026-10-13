@@ -46,12 +46,15 @@ create index if not exists cp_task on checkpoints(task_id, id);
 create table if not exists events (
   id integer primary key autoincrement, task_id text, ts real not null, kind text not null, data text);
 create index if not exists ev_task on events(task_id, id);
+create table if not exists deps (
+  task_id text not null, depends_on text not null, primary key (task_id, depends_on));
+create index if not exists deps_on on deps(depends_on);
 create table if not exists usage (
   id integer primary key autoincrement, task_id text, step text, backend text, model text,
   tokens_in integer, tokens_out integer, seconds real, ts real not null);
 """
 # columns added after the first release of the schema (ALTER for existing databases)
-_MIGRATIONS = {"tasks": {"lease_token": "text"},
+_MIGRATIONS = {"tasks": {"lease_token": "text", "resource": "text", "parent": "text"},
                "checkpoints": {"input_key": "text", "valid": "integer default 1"}}
 
 
@@ -122,8 +125,12 @@ class Store:
 
     # ------------------------------------------------------------------ tasks
     def add(self, kind: str, ref: str, *, title: str = "", data: dict = None, priority: int = 5,
-            max_attempts: int = 3) -> dict:
-        """Create a task, or return the open one with the same (kind, ref)."""
+            max_attempts: int = 3, resource: str = "", parent: str = "", depends_on=()) -> dict:
+        """Create a task, or return the open one with the same (kind, ref).
+        resource:   exclusive key (e.g. "repo:<path>@<branch>") - two tasks holding the same key never
+                    run at the same time (design 5.2 owner_conflict)
+        parent:     id of the request / program this task belongs to (progress board grouping)
+        depends_on: task ids that must be DONE before this one can be claimed"""
         now = time.time()
         with self._tx():
             cur = self.db.execute(
@@ -131,12 +138,21 @@ class Store:
                 (kind, ref, *OPEN)).fetchone()
             if cur:
                 return {**_row(cur), "duplicate": True}
+            deps = [d for d in dict.fromkeys(depends_on or ()) if d]
+            for d in deps:
+                if not self.db.execute("select 1 from tasks where id=?", (d,)).fetchone():
+                    raise ValueError(f"depends_on: no task {d}")
+            if parent and not self.db.execute("select 1 from tasks where id=?", (parent,)).fetchone():
+                raise ValueError(f"parent: no task {parent}")
             tid = uuid.uuid4().hex[:12]
             self.db.execute("insert into tasks(id, kind, ref, title, status, priority, max_attempts, data, "
-                            "created, updated) values (?,?,?,?,?,?,?,?,?,?)",
+                            "created, updated, resource, parent) values (?,?,?,?,?,?,?,?,?,?,?,?)",
                             (tid, kind, ref, title, "queued", priority, max_attempts,
-                             json.dumps(data or {}, ensure_ascii=False), now, now))
-            self._event(tid, "added", task_kind=kind, ref=ref)
+                             json.dumps(data or {}, ensure_ascii=False), now, now, resource or None,
+                             parent or None))
+            for d in deps:
+                self.db.execute("insert into deps(task_id, depends_on) values (?,?)", (tid, d))
+            self._event(tid, "added", task_kind=kind, ref=ref, depends_on=deps or None)
         return {**self.get(tid), "duplicate": False}
 
     def get(self, task_id: str) -> dict:
@@ -153,19 +169,31 @@ class Store:
         q += " order by updated desc limit ?"
         return [_row(r) for r in self.db.execute(q, (*args, limit))]
 
-    def claim(self, owner: str, kinds: tuple = (), lease_s: int = DEFAULT_LEASE_S) -> dict:
+    def running_count(self) -> int:
+        return self.db.execute("select count(*) n from tasks where status='running' and lease_until>=?",
+                               (time.time(),)).fetchone()["n"]
+
+    def claim(self, owner: str, kinds: tuple = (), lease_s: int = DEFAULT_LEASE_S, max_running: int = 0) -> dict:
         """Atomically take the next runnable task: queued, paused_quota whose time has come,
         or running with an expired lease (crashed holder). Highest priority (lowest number) first.
+        Skipped: tasks with a dependency not DONE yet, and tasks whose `resource` is held by another
+        live task. max_running > 0 = global cap on live tasks (all kinds, all processes).
         The returned task carries `lease_token` — pass it to every later call."""
         now = time.time()
-        kind_sql = f" and kind in ({','.join('?' * len(kinds))})" if kinds else ""
+        kind_sql = f" and t.kind in ({','.join('?' * len(kinds))})" if kinds else ""
         with self._tx():
+            if max_running and self.running_count() >= max_running:
+                return {}
             r = self.db.execute(
-                "select * from tasks where ("
-                " status='queued'"
-                " or (status='paused_quota' and coalesce(resume_at,0)<=?)"
-                " or (status='running' and coalesce(lease_until,0)<?))" + kind_sql +
-                " order by priority, created limit 1", (now, now, *kinds)).fetchone()
+                "select * from tasks t where ("
+                " t.status='queued'"
+                " or (t.status='paused_quota' and coalesce(t.resume_at,0)<=?)"
+                " or (t.status='running' and coalesce(t.lease_until,0)<?))" + kind_sql +
+                " and not exists (select 1 from deps d join tasks x on x.id=d.depends_on"
+                "                 where d.task_id=t.id and x.status!='done')"
+                " and (coalesce(t.resource,'')='' or not exists (select 1 from tasks y where y.resource=t.resource"
+                "      and y.id!=t.id and y.status='running' and coalesce(y.lease_until,0)>=?))"
+                " order by t.priority, t.created limit 1", (now, now, *kinds, now)).fetchone()
             if not r:
                 return {}
             prev = r["status"]
@@ -306,6 +334,31 @@ class Store:
             if n:
                 self._event(task_id, "resolved", status=status, by=by, note=note or None)
         return bool(n)
+
+    def deps_of(self, task_id: str) -> list:
+        return [r["depends_on"] for r in self.db.execute("select depends_on from deps where task_id=?", (task_id,))]
+
+    def children(self, parent: str) -> list:
+        return [_row(r) for r in self.db.execute("select * from tasks where parent=? order by created", (parent,))]
+
+    def block_orphans(self) -> list:
+        """Queued / paused tasks that can never run because a dependency FAILED or was CANCELLED ->
+        blocked (a human re-plans) instead of waiting forever. Returns the ids blocked."""
+        out = []
+        with self._tx():
+            rows = self.db.execute(
+                "select t.id, x.id dep, x.status dst from tasks t join deps d on d.task_id=t.id "
+                "join tasks x on x.id=d.depends_on where t.status in ('queued','paused_quota') "
+                "and x.status in ('failed','cancelled')").fetchall()
+            for r in rows:
+                if r["id"] in out:
+                    continue
+                why = f"dependency {r['dep']} is {r['dst']}"
+                self.db.execute("update tasks set status='blocked', last_error=?, updated=? where id=? "
+                                "and status in ('queued','paused_quota')", (why, time.time(), r["id"]))
+                self._event(r["id"], "blocked", error=why)
+                out.append(r["id"])
+        return out
 
     def cancel(self, task_id: str, by: str = ""):
         with self._tx():
