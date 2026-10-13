@@ -556,21 +556,60 @@ def rung_ac_coverage(ctx, rung: dict, job: dict) -> dict:
 def rung_ratchet(ctx, rung: dict, job: dict) -> dict:
     """Architecture ratchet (F.10): rules + baseline read from the BASE ref (a branch cannot loosen
     them); HEAD may not add a violation; the count only goes down. Fixable: the fixer removes the
-    new violation in production code (it may not touch .agent/)."""
+    new violation in production code (it may not touch .agent/). Not fixable (a human decides): a
+    HEAD that weakens the policy, a covered file that cannot be scanned, a covered file moved out of
+    its rule's scope, a scan that runs too long."""
     from agent_skill_toolkit.workflows.refactor import ratchet as R
     base, repo = job["base"], job["repo"]
     rules_path = rung.get("rules") or R.RULES_FILE
     baseline_path = rung.get("baseline") or R.BASELINE_FILE
+
+    def stop(msg):
+        return {"passed": False, "fixable": False, "summary": msg}
     try:
-        rules = R.parse_rules(git(repo, "show", f"{base}:{rules_path}"))
+        rules_text = git(repo, "show", f"{base}:{rules_path}")
     except RuntimeError as e:
-        return {"passed": False, "fixable": False, "summary": f"no {rules_path} on {base[:8]}: {e}"}
+        return stop(f"no {rules_path} on {base[:8]}: {e}")
     try:
+        rules = R.parse_rules(rules_text)
         baseline = R.parse_baseline(git(repo, "show", f"{base}:{baseline_path}", check=False))
+        head_rules_text = git(repo, "show", f"HEAD:{rules_path}", check=False)
+        head_rules = R.parse_rules(head_rules_text) if head_rules_text else []
+        head_bl = R.parse_baseline(git(repo, "show", f"HEAD:{baseline_path}", check=False))
     except ValueError as e:
-        return {"passed": False, "fixable": False, "summary": str(e)}
-    now = R.violations(repo, rules)
-    cmp = R.compare(baseline, now)
+        return stop(f"ratchet policy unreadable: {e}")
+    weaker = R.policy_weakened(rules, head_rules, baseline, head_bl)
+    if weaker:                       # merging this would weaken the policy for every later branch (Codex F.10a #1)
+        return stop("this branch weakens the architecture policy — a human must review it: " + "; ".join(weaker[:5]))
+    # files moved out of a rule's path scope while they still had violations (Codex F.10a #4)
+    moved, renames = [], {}
+    for ln in git(repo, "diff", "--name-status", "-M", f"{base}...HEAD", check=False).splitlines():
+        parts = ln.split("\t")
+        if len(parts) == 3 and parts[0].startswith("R"):
+            old, new = parts[1], parts[2]
+            renames[old] = new
+            for r in rules:
+                if r["_files"].search(old) and not r["_files"].search(new) and r["_pkg"] is None and \
+                        any(k.startswith(f"{r['id']}|{old}|") for k in baseline):
+                    moved.append(f"{old} -> {new} (rule {r['id']})")
+    if moved:
+        return stop("files with known violations moved out of their rule's scope — review (or give the rule a "
+                    "`package` selector): " + "; ".join(moved[:5]))
+    try:
+        res = R.scan_isolated(repo, rules_text, float(rung.get("timeout", 300)))
+    except (TimeoutError, RuntimeError, ValueError) as e:
+        return stop(f"ratchet scan failed closed: {e}")
+    if res["unscanned"]:
+        return stop("covered files could not be scanned: " + "; ".join(f"{u['file']} ({u['why']})"
+                                                                         for u in res["unscanned"][:5]))
+    now = res["violations"]
+    # a renamed file keeps its known violations (identity = rule|file|statement)
+    carried = {}
+    for k, n in baseline.items():
+        rid, f, stmt = k.split("|", 2)
+        k2 = f"{rid}|{renames.get(f, f)}|{stmt}"
+        carried[k2] = carried.get(k2, 0) + n
+    cmp = R.compare(carried, now)
     summary = f"ratchet {cmp['baseline']} -> {cmp['now']}"
     if cmp["new"]:
         summary += " — NEW violations (remove them; the baseline only shrinks):\n" + "\n".join(

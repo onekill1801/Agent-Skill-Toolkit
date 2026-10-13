@@ -12,8 +12,7 @@ from agent_skill_toolkit.workflows.proposal import scan
 from agent_skill_toolkit.workflows.refactor import ratchet
 
 JAVA_PKG = re.compile(r"^\s*package\s+([\w.]+)\s*;", re.M)
-JAVA_IMPORT = re.compile(r"^\s*import\s+(?:static\s+)?([\w.]+)\s*;", re.M)
-PY_IMPORT = re.compile(r"^\s*(?:from\s+(\.*[\w.]*)\s+import|import\s+([\w.]+))", re.M)
+JAVA_IMPORT = re.compile(r"^\s*import\s+(?:static\s+)?([\w.]+?)(?:\.\*)?\s*;", re.M)   # wildcards too (#10)
 TEST_PATH = re.compile(r"(^|/)(tests?|src/test)/|(^|/)test_[^/]*\.py$|Test\.java$|_test\.py$", re.I)
 
 
@@ -46,9 +45,45 @@ def _java_modules(files: list, read, depth: int) -> dict:
     return {f: ".".join(p.split(".")[:len(base) + depth]) or p for f, p in pkgs.items()}
 
 
-def _py_module(rel: str) -> str:
+def _py_roots(files: list) -> list:
+    """Source roots: a directory holding top-level packages (`src/` layout) or the repo root."""
+    roots = set()
+    for f in files:
+        parts = f.split("/")
+        if len(parts) > 2 and parts[0] in ("src", "lib", "python") and parts[2:] and \
+                any(x == "/".join(parts[:2]) + "/__init__.py" for x in files):
+            roots.add(parts[0])
+    return sorted(roots)
+
+
+def _py_dotted(rel: str, roots: list) -> str:
+    """tools/x/y.py -> tools.x.y ; src/pkg/a.py (src root) -> pkg.a ; pkg/__init__.py -> pkg"""
     parts = rel.split("/")
-    return parts[0] if len(parts) > 1 else os.path.splitext(parts[0])[0]
+    if parts[0] in roots and len(parts) > 1:
+        parts = parts[1:]
+    parts[-1] = os.path.splitext(parts[-1])[0]
+    if parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(parts)
+
+
+def _py_imports(rel: str, dotted: str, text: str) -> list:
+    """Absolute dotted names imported by a file; relative imports resolved against its package (#9)."""
+    import ast
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    pkg = dotted.split(".") if rel.endswith("__init__.py") else dotted.split(".")[:-1]
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            out += [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            base = pkg[:len(pkg) - (node.level - 1)] if node.level else []
+            mod = ".".join([*base, *(node.module.split(".") if node.module else [])])
+            out += [mod] + [f"{mod}.{a.name}" if mod else a.name for a in node.names]
+    return [x for x in out if x]
 
 
 def run(repo: str, depth: int = 1, hotspot_days: int = 90) -> dict:
@@ -58,8 +93,12 @@ def run(repo: str, depth: int = 1, hotspot_days: int = 90) -> dict:
     py = [f for f in files if f.endswith(".py") and not TEST_PATH.search(f)]
     jmod = _java_modules(java, read, depth)
     mod_of = dict(jmod)
-    mod_of.update({f: _py_module(f) for f in py})
+    roots = _py_roots(files)
+    py_dotted = {f: _py_dotted(f, roots) for f in py}
+    py_mod = {f: ".".join(d.split(".")[:depth]) for f, d in py_dotted.items() if d}
+    mod_of.update(py_mod)
     modules = sorted(set(mod_of.values()))
+    py_modules = sorted(set(py_mod.values()), key=len, reverse=True)
     edges = {}
     java_prefixes = sorted(set(jmod.values()), key=len, reverse=True)
     for f, m in mod_of.items():
@@ -71,10 +110,10 @@ def run(repo: str, depth: int = 1, hotspot_days: int = 90) -> dict:
                 if t:
                     targets.add(t)
         else:
-            for a, b in PY_IMPORT.findall(text):
-                name = (a or b).lstrip(".").split(".")[0]
-                if name in modules:
-                    targets.add(name)
+            for imp in _py_imports(f, py_dotted.get(f, ""), text):
+                t = next((p for p in py_modules if imp == p or imp.startswith(p + ".")), None)
+                if t:
+                    targets.add(t)
         for t in targets - {m}:
             edges[(m, t)] = edges.get((m, t), 0) + 1
     tests = {}

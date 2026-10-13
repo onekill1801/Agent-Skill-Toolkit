@@ -73,10 +73,21 @@ class RatchetTest(Base):
 
     def test_identity_ignores_line_numbers(self):
         rules = R.parse_rules(json.dumps(RULES))
-        before = R.violations(self.repo, rules)
+        before = R.scan(self.repo, rules)["violations"]
         self.assertEqual(sum(before.values()), 2)
         self.write(J + "web/TaskController.java", "package com.acme.web;\n\n\n// moved\nimport com.acme.repository.TaskRepo;\n")
-        self.assertEqual(R.compare(before, R.violations(self.repo, rules))["new"], {})
+        self.assertEqual(R.compare(before, R.scan(self.repo, rules)["violations"])["new"], {})
+
+    def test_init_never_reinitialises_an_empty_baseline(self):   # Codex F.10a #6
+        self.write(R.BASELINE_FILE, json.dumps({"violations": {}}))
+        with self.assertRaises(ValueError):
+            RF.ratchet("init", self.repo)
+
+    def test_failed_check_exits_nonzero(self):                   # Codex F.10a #7
+        RF.ratchet("init", self.repo)
+        self.write(J + "web/AdminController.java", "package com.acme.web;\nimport com.acme.repository.X;\n")
+        git(self.repo, "add", "-A")
+        self.assertEqual(RF.main(["ratchet", "check", "--repo", self.repo]), 1)
 
     def test_cli_init_check_tighten(self):
         out = RF.ratchet("init", self.repo)
@@ -103,20 +114,91 @@ class RatchetRungTest(Base):
         job = {"repo": self.repo, "base": git(self.repo, "rev-parse", "main")}
         return L.rung_ratchet(None, {"name": "arch", "kind": "ratchet"}, job)
 
-    def test_branch_cannot_loosen_its_own_rules(self):
+    def branch(self):
         RF.ratchet("init", self.repo)
         git(self.repo, "add", "-A")
         git(self.repo, "commit", "-qm", "baseline")
         git(self.repo, "checkout", "-qb", "feat/x")
-        self.write(J + "web/AdminController.java", "package com.acme.web;\nimport com.acme.repository.X;\n")
-        self.write(".agent/architecture.json", json.dumps({"rules": [{"id": "nothing", "files": "nope", "deny": "nope"}]}))
+
+    def commit(self, msg="change"):
         git(self.repo, "add", "-A")
-        git(self.repo, "commit", "-qm", "violate + loosen")
+        git(self.repo, "commit", "-qm", msg)
+
+    def test_new_violation_is_red_and_fixable(self):
+        self.branch()
+        self.write(J + "web/AdminController.java", "package com.acme.web;\nimport com.acme.repository.X;\n")
+        self.commit()
         res = self.run_rung()
         self.assertFalse(res["passed"])
         self.assertNotIn("fixable", res)                         # the fixer may remove it in production code
         self.assertIn("AdminController", res["summary"])
         self.assertEqual((res["baseline_count"], res["count"]), (2, 3))
+
+    def test_branch_cannot_weaken_the_policy(self):              # Codex F.10a #1
+        self.branch()
+        self.write(".agent/architecture.json", json.dumps({"rules": [{"id": "nothing", "files": "nope", "deny": "nope"}]}))
+        self.commit("loosen")
+        res = self.run_rung()
+        self.assertEqual((res["passed"], res["fixable"]), (False, False))
+        self.assertIn("removed", res["summary"])
+        git(self.repo, "checkout", "-q", "main")
+        git(self.repo, "checkout", "-qb", "feat/y")
+        bl = json.load(open(os.path.join(self.repo, R.BASELINE_FILE)))
+        bl["violations"]["web-no-repo|x.java|import a.repository.B"] = 1
+        self.write(R.BASELINE_FILE, json.dumps(bl))
+        self.commit("grow baseline")
+        self.assertIn("baseline grew", self.run_rung()["summary"])
+
+    def test_reformatting_cannot_hide_a_violation(self):         # Codex F.10a #3
+        self.branch()
+        self.write(J + "web/AdminController.java", "package com.acme.web;\nimport\n  com.acme.repository . X;\n"
+                   "/* import com.acme.repository.Y; */\n")
+        self.commit()
+        res = self.run_rung()
+        self.assertFalse(res["passed"])
+        self.assertEqual(res["count"], 3)                         # the commented-out one is not counted
+
+    def test_oversized_covered_file_fails_closed(self):          # Codex F.10a #2
+        self.branch()
+        self.write(J + "web/TaskController.java", "package com.acme.web;\nimport com.acme.repository.TaskRepo;\n"
+                   + "// pad\n" * (R.MAX_FILE // 7 + 10))
+        self.commit()
+        res = self.run_rung()
+        self.assertEqual((res["passed"], res["fixable"]), (False, False))
+        self.assertIn("could not be scanned", res["summary"])
+
+    def test_moving_a_file_out_of_scope_is_not_a_fix(self):      # Codex F.10a #4
+        self.branch()
+        os.makedirs(os.path.join(self.repo, J + "other"), exist_ok=True)
+        git(self.repo, "mv", J + "web/UserController.java", J + "other/UserController.java")
+        self.commit("move")
+        res = self.run_rung()
+        self.assertEqual((res["passed"], res["fixable"]), (False, False))
+        self.assertIn("moved out", res["summary"])
+
+    def test_package_selector_follows_the_code(self):            # Codex F.10a #4
+        rules = {"rules": [dict(RULES["rules"][0], package=r"\.web(\.|$)")]}
+        self.write(".agent/architecture.json", json.dumps(rules))
+        self.commit("package selector")
+        self.branch()
+        os.makedirs(os.path.join(self.repo, J + "other"), exist_ok=True)
+        git(self.repo, "mv", J + "web/UserController.java", J + "other/UserController.java")
+        self.commit("move")
+        res = self.run_rung()
+        self.assertTrue(res["passed"])
+        self.assertEqual(res["count"], 2)                         # still counted where it moved
+
+    def test_long_statements_do_not_collide(self):               # Codex F.10a #5
+        a, b = "import com.acme.repository." + "A" * 400, "import com.acme.repository." + "A" * 399 + "B"
+        self.assertNotEqual(R.identity("r", "f", a), R.identity("r", "f", b))
+
+    def test_expensive_regex_is_cut_off(self):                   # Codex F.10a #8
+        self.write(".agent/architecture.json", json.dumps({"rules": [{"id": "dos", "files": r"\.java$",
+                                                                       "deny": r"^(a+)+$"}]}))
+        self.write(J + "web/Evil.java", "a" * 40 + "b;\n")
+        self.commit("evil")
+        with self.assertRaises(TimeoutError):
+            R.scan_isolated(self.repo, open(os.path.join(self.repo, ".agent/architecture.json")).read(), timeout=2)
 
     def test_missing_rules_on_base_blocks(self):
         git(self.repo, "rm", "-q", ".agent/architecture.json")
@@ -141,6 +223,19 @@ class SurveyTest(Base):
         md = survey.markdown(s)
         self.assertIn("com.acme.service ↔ com.acme.web", md)
         self.assertIn("Module chưa có file test", md)
+
+    def test_python_src_layout_relative_imports_and_java_wildcards(self):   # Codex F.10a #9 / #10
+        for rel, body in {"src/a/__init__.py": "", "src/a/x.py": "from ..b import y\nimport os, b.z\n",
+                          "src/b/__init__.py": "", "src/b/y.py": "from a import x\n", "src/b/z.py": "",
+                          J + "util/Helpers.java": "package com.acme.util;\nimport com.acme.service.*;\n"}.items():
+            self.write(rel, body)
+        git(self.repo, "add", "-A")
+        s = survey.run(self.repo)
+        edges = {(e["from"], e["to"]) for e in s["edges"]}
+        self.assertIn(("a", "b"), edges)
+        self.assertIn(("b", "a"), edges)
+        self.assertIn(["a", "b"], s["cycles"])
+        self.assertIn(("com.acme.util", "com.acme.service"), edges)
 
     def test_cli_writes_the_report(self):
         out = RF.main(["survey", "--repo", self.repo, "--out", os.path.join(self.tmp, "s.md")])

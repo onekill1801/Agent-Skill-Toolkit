@@ -46,12 +46,16 @@ def ratchet(action: str, repo: str, base: str = "") -> dict:
     text = _file(repo, R.RULES_FILE, base)
     if not text:
         raise ValueError(f"{R.RULES_FILE} not found — write the rules first (see refactor.py --help)")
-    rules = R.parse_rules(text)
-    now = R.violations(repo, rules)
+    R.parse_rules(text)                                  # validate before the isolated scan
+    res = R.scan_isolated(repo, text)
+    if res["unscanned"]:
+        raise ValueError("covered files could not be scanned: " + "; ".join(
+            f"{u['file']} ({u['why']})" for u in res["unscanned"][:5]))
+    now = res["violations"]
     path = os.path.join(repo, R.BASELINE_FILE)
     have = R.parse_baseline(_file(repo, R.BASELINE_FILE, base))
     if action == "init":
-        if have:
+        if os.path.exists(path):                         # even an EMPTY baseline is never re-initialised
             raise ValueError(f"{R.BASELINE_FILE} already exists — use `tighten` (the baseline only shrinks)")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
@@ -93,9 +97,10 @@ def main(argv=None) -> int:
             if a.action != "check" and a.base:
                 raise ValueError("--base only applies to `check`")
             out = ratchet(a.action, a.repo, a.base)
-    except (ValueError, RuntimeError) as e:
+    except (ValueError, RuntimeError, TimeoutError) as e:
         out = {"error": True, "message": str(e)}
-    return pc.emit(out)
+    rc = pc.emit(out)
+    return 1 if out.get("passed") is False else rc      # a failed check fails the shell step (Codex F.10a #7)
 
 
 if __name__ == "__main__":
