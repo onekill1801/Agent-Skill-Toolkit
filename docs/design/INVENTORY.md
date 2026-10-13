@@ -65,8 +65,12 @@
 
 ## Cạnh runtime → script skill (subprocess)
 
-- `('agent_skill_toolkit.workflows.execution.agent_call', 'agent_runner.py')` → `agents run through agent_runner`
-- `('agent_skill_toolkit.workflows.verify.ladder', 'agent_runner.py')` → `agents run through agent_runner`
+- `('agent_skill_toolkit.workflows.execution.agent_call', '.claude/skills/auto-dev/tools/agent_runner.py')` → `agents run through agent_runner`
+- `('agent_skill_toolkit.workflows.intake.atask_flow', 'coordinator.py')` → `tells the human how to accept`
+- `('agent_skill_toolkit.workflows.proposal.flow', 'proposals.py')` → `tells the human how to go / decide`
+- `('agent_skill_toolkit.workflows.proposal.scan', 'proposals.py')` → `digest tells the human how to go / reject`
+- `('agent_skill_toolkit.workflows.refactor.program', 'refactor.py')` → `tells the human how to approve`
+- `('agent_skill_toolkit.workflows.verify.ladder', '.claude/skills/auto-dev/tools/agent_runner.py')` → `agents run through agent_runner`
 - `('agent_skill_toolkit.workflows.verify.unittest_junit', 'unittest_junit.py')` → `its own argparse prog name`
 
 ## Tool của skill (107 file; 11 là vỏ dùng runtime)
@@ -181,7 +185,7 @@
 | tchat-automation | `ws_client.py` |  |  | 147 |
 | team-registry | `team.py` |  | bootstrap, get, list, match, remove, set | 223 |
 
-## Test: 31 file, 580 hàm test
+## Test: 31 file, 582 hàm test
 
 - `test_agent_init.py`
 - `test_agentkit.py`

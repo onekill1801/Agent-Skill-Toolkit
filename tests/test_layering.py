@@ -38,19 +38,41 @@ EXCEPTIONS = {
     ("agent_skill_toolkit.workflows.verify.ladder", "agent_skill_toolkit.workflows.refactor.ratchet"):
         "ratchet.parse_*/scan_isolated/compare: the `kind: ratchet` rung",
 }
-# (runtime module, script file name it names) — subprocess / path edges AST imports cannot see.
+# (runtime module, FULL script path it names) — subprocess / path edges AST imports cannot see. The whole
+# path is the identity: another `agent_runner.py` elsewhere is a different edge (Codex R R2 #2).
 RUNTIME_EDGES = {
-    ("agent_skill_toolkit.workflows.verify.ladder", "agent_runner.py"): "agents run through agent_runner",
-    ("agent_skill_toolkit.workflows.execution.agent_call", "agent_runner.py"): "agents run through agent_runner",
+    ("agent_skill_toolkit.workflows.verify.ladder", ".claude/skills/auto-dev/tools/agent_runner.py"):
+        "agents run through agent_runner",
+    ("agent_skill_toolkit.workflows.execution.agent_call", ".claude/skills/auto-dev/tools/agent_runner.py"):
+        "agents run through agent_runner",
     ("agent_skill_toolkit.workflows.verify.unittest_junit", "unittest_junit.py"): "its own argparse prog name",
+    # CLI names quoted in instructions shown to a HUMAN (blocked-task messages), never executed
+    ("agent_skill_toolkit.workflows.intake.atask_flow", "coordinator.py"): "tells the human how to accept",
+    ("agent_skill_toolkit.workflows.proposal.flow", "proposals.py"): "tells the human how to go / decide",
+    ("agent_skill_toolkit.workflows.proposal.scan", "proposals.py"): "digest tells the human how to go / reject",
+    ("agent_skill_toolkit.workflows.refactor.program", "refactor.py"): "tells the human how to approve",
 }
+# runtime modules that START processes, whatever the target (a variable argv cannot be resolved statically)
+SPAWNERS = {
+    "agent_skill_toolkit.core.proc": "the process-tree runner everything else uses",
+    "agent_skill_toolkit.workflows.engine": "StepContext.run: steps run their commands through proc",
+    "agent_skill_toolkit.workflows.verify.ladder": "git + the repo's verify commands + agents",
+    "agent_skill_toolkit.workflows.refactor.ratchet": "git ls-files + the isolated scan child",
+    "agent_skill_toolkit.workflows.refactor.program": "git clone / worktree / fetch for slices",
+    "agent_skill_toolkit.workflows.proposal.scan": "git log for hotspots",
+    "agent_skill_toolkit.workflows.proposal.flow": "git rev-parse for the input key",
+    "agent_skill_toolkit.workflows.execution.agent_call": "agent_runner",
+}
+SPAWN_CALLS = {"subprocess.run", "subprocess.Popen", "subprocess.call", "subprocess.check_call",
+               "subprocess.check_output", "os.system", "os.popen", "proc.run", "ctx.run", "os.startfile"}
 # (runtime module, loader) — dynamic imports / sys.path changes, each with its reason (design §B.2)
 DYNAMIC = {
     ("agent_skill_toolkit.workflows.verify.unittest_junit", "sys.path.insert"):
         "discovers the PRODUCT repo's tests: its cwd goes on sys.path, like `python -m unittest`",
 }
-LOADERS = {("importlib", "import_module"), ("importlib", "__import__"), ("runpy", "run_path"),
-           ("runpy", "run_module"), ("sys.path", "insert"), ("sys.path", "append"), ("sys.path", "extend")}
+LOADERS = {"importlib.import_module", "importlib.__import__", "builtins.__import__", "runpy.run_path",
+           "runpy.run_module", "sys.path.insert", "sys.path.append", "sys.path.extend", "imp.load_source",
+           "importlib.util.spec_from_file_location"}
 
 
 def modules():
@@ -135,17 +157,40 @@ def violations() -> dict:
     return out
 
 
-def _call_name(node) -> tuple:
-    f = node.func
-    if isinstance(f, ast.Attribute):
-        owner = f.value
-        if isinstance(owner, ast.Attribute) and isinstance(owner.value, ast.Name):
-            return (f"{owner.value.id}.{owner.attr}", f.attr)          # sys.path.insert
-        if isinstance(owner, ast.Name):
-            return (owner.id, f.attr)                                  # importlib.import_module
-    if isinstance(f, ast.Name) and f.id == "__import__":
-        return ("importlib", "__import__")
-    return ("", "")
+def _aliases(tree) -> dict:
+    """local name -> qualified name, from `import x as y` / `from x import y as z` (Codex R R2 #1)."""
+    out = {"__import__": "builtins.__import__"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for al in node.names:
+                out[al.asname or al.name.split(".")[0]] = al.name if al.asname else al.name.split(".")[0]
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for al in node.names:
+                out[al.asname or al.name] = f"{node.module}.{al.name}"
+    return out
+
+
+def _qualname(expr, aliases: dict) -> str:
+    parts = []
+    while isinstance(expr, ast.Attribute):
+        parts.append(expr.attr)
+        expr = expr.value
+    if isinstance(expr, ast.Name):
+        parts.append(aliases.get(expr.id, expr.id))
+        return ".".join(reversed(parts))
+    return ""
+
+
+def _calls(tree):
+    aliases = _aliases(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            yield node, _qualname(node.func, aliases)
+        elif isinstance(node, (ast.AugAssign, ast.Assign)):            # sys.path += [...] / sys.path = [...]
+            targets = [node.target] if isinstance(node, ast.AugAssign) else node.targets
+            for t in targets:
+                if _qualname(t, aliases) == "sys.path":
+                    yield node, "sys.path.extend"
 
 
 def dynamic_loaders() -> dict:
@@ -153,11 +198,19 @@ def dynamic_loaders() -> dict:
     for mod, path, _ in modules():
         with open(path, encoding="utf-8") as f:
             tree = ast.parse(f.read())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                owner, fn = _call_name(node)
-                if (owner, fn) in LOADERS:
-                    out[(mod, f"{owner}.{fn}")] = True
+        for _, name in _calls(tree):
+            if name in LOADERS:
+                out[(mod, name)] = True
+    return out
+
+
+def spawners() -> set:
+    out = set()
+    for mod, path, _ in modules():
+        with open(path, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        if any(name in SPAWN_CALLS for _, name in _calls(tree)):
+            out.add(mod)
     return out
 
 
@@ -171,10 +224,19 @@ def script_names() -> set:
         docs = {id(n.body[0].value) for n in ast.walk(tree)
                 if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.body
                 and isinstance(n.body[0], ast.Expr) and isinstance(n.body[0].value, ast.Constant)}
+        joined = set()
+        for node in ast.walk(tree):                      # os.path.join(".claude", ..., "x.py") -> one full path
+            if isinstance(node, ast.Call) and node.args and all(
+                    isinstance(a, ast.Constant) and isinstance(a.value, str) for a in node.args):
+                full = "/".join(a.value.strip("/\\") for a in node.args)
+                if re.search(r"(^|/)[A-Za-z][\w-]*\.py$", full):
+                    out.add((mod, full.replace("\\", "/")))
+                    joined |= {id(a) for a in node.args}
         for node in ast.walk(tree):
-            if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docs:
-                for m in re.finditer(r"(?:^|[/\\])([A-Za-z][\w-]*\.py)\b", node.value):
-                    out.add((mod, m.group(1)))
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docs \
+                    and id(node) not in joined:
+                for m in re.finditer(r"((?:[\w.-]+[/\\])*(?<![\w])[A-Za-z][\w-]*\.py)\b", node.value):
+                    out.add((mod, m.group(1).replace("\\", "/")))
     return out
 
 
@@ -196,6 +258,27 @@ class LayeringTest(unittest.TestCase):
     def test_runtime_edges_to_skill_scripts_are_declared(self):
         self.assertEqual(script_names(), set(RUNTIME_EDGES), "a runtime module names a script: declare the edge")
 
+    def test_process_spawners_are_declared(self):
+        self.assertEqual(spawners(), set(SPAWNERS), "a runtime module starts processes: declare it in SPAWNERS")
+
+    def test_exceptions_never_grow_beyond_main(self):
+        """Independent baseline (Codex R R2 #3): the EXCEPTIONS of this file on `main` (or LAYERING_BASE).
+        A branch may remove entries, never add: growing the list needs the change to land on main first."""
+        import subprocess
+        base = os.environ.get("LAYERING_BASE", "main")
+        p = subprocess.run(["git", "-C", _ROOT, "show", f"{base}:tests/test_layering.py"], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace")
+        if p.returncode != 0:
+            self.skipTest(f"no {base}:tests/test_layering.py to compare with")
+        tree = ast.parse(p.stdout)
+        old = next((ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign)
+                    and any(isinstance(t, ast.Name) and t.id == "EXCEPTIONS" for t in n.targets)), {})
+        old_keys = {k for k in old}
+        grown = [k for k in EXCEPTIONS if k not in old_keys and
+                 (k[0], k[1]) not in {(a.split(".")[-1], b) for a, b in old_keys}]
+        if old and all(isinstance(k[0], str) and k[0].startswith("agent_skill_toolkit.") for k in old):
+            self.assertEqual(grown, [], f"exceptions added since {base} — they may only shrink")
+
     def test_dynamic_loaders_are_declared(self):
         self.assertEqual(set(dynamic_loaders()), set(DYNAMIC), "dynamic import / sys.path change: declare it")
 
@@ -215,6 +298,8 @@ class LayeringTest(unittest.TestCase):
         files2 = {"core/rel.py": "from ..workflows import engine\n",
                   "core/dyn.py": "import importlib, sys, subprocess\nimportlib.import_module('x')\n"
                                  "sys.path.insert(0, 'y')\nsubprocess.run(['python', 'tools/review_common.py'])\n",
+                  "core/alias.py": "from importlib import import_module as im\nimport runpy as r\nimport sys\n"
+                                   "im('x')\nr.run_path('y')\nsys.path += ['z']\n",
                   "workflows/engine_extra.py": "", "workflows/a/z.py": "from agent_skill_toolkit.workflows import engine_extra\n"}
         for rel, body in files2.items():
             p = os.path.join(tmp, rel)
@@ -232,8 +317,11 @@ class LayeringTest(unittest.TestCase):
             ("agent_skill_toolkit.workflows.a.z", "agent_skill_toolkit.workflows.engine_extra"),
         ])
         self.assertEqual(set(loaders), {("agent_skill_toolkit.core.dyn", "importlib.import_module"),
-                                        ("agent_skill_toolkit.core.dyn", "sys.path.insert")})
-        self.assertIn(("agent_skill_toolkit.core.dyn", "review_common.py"), scripts)
+                                        ("agent_skill_toolkit.core.dyn", "sys.path.insert"),
+                                        ("agent_skill_toolkit.core.alias", "importlib.import_module"),
+                                        ("agent_skill_toolkit.core.alias", "runpy.run_path"),
+                                        ("agent_skill_toolkit.core.alias", "sys.path.extend")})
+        self.assertIn(("agent_skill_toolkit.core.dyn", "tools/review_common.py"), scripts)
         self.assertEqual(area("agent_skill_toolkit.core.store"), "core")
         self.assertEqual(area("agent_skill_toolkit.workflows.engine"), "workflows")
         self.assertEqual(area("agent_skill_toolkit.workflows.verify.ladder"), "workflows.verify")
