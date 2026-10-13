@@ -34,11 +34,11 @@ Ký hiệu: ✅ xong + Codex đồng thuận · 🔁 đã code, đang review/s�
 
 | # | Việc | Trạng thái | Commit | Codex | Ghi chú |
 |---|---|---|---|---|---|
-| R.M1 | Kiểm kê: đồ thị import + cạnh runtime, API công khai, baseline test | 🟡 | | | đã đo đồ thị import (1 vòng thật), baseline 332 test xanh; chưa có file kiểm kê |
+| R.M1 | Kiểm kê: đồ thị import + cạnh runtime, API công khai, baseline test | ✅ | `b889d86` → `7548c6d` | GO (vòng 4, cùng R.M6) | `_runtime/inventory.py` → `docs/design/INVENTORY.md` (module, đồ thị vùng, ngoại lệ, cạnh runtime, mọi tool + CLI kể cả lệnh con đăng ký trong vòng lặp, test) |
 | R.M2 | `_runtime` + bootstrap; kiểm cài plugin | 🟡 | `8520548` | GO (cùng F.4a) | bootstrap + package chạy từ mọi cwd/agentkit; **chưa thử cài marketplace / Orca / Codex** |
-| R.M3 | Tách primitive chung vào `core` (env, UTF-8, lock), giữ wrapper | ⬜ | | | |
+| R.M3 | Tách primitive chung vào `core` (env, UTF-8, lock), giữ wrapper | 🟡 | `b889d86` | GO (bước 1) | bước 1 xong: `core/text.py` (clean/literal/quoted/one_line), `intake.lanes` re-export; còn env, UTF-8, lock |
 | R.M4 | Chuyển `mr-review` sang `workflows/mr_review` + `integrations/gitlab` | ⬜ | | | |
-| R.M6 | Mở rộng dần + test layering (bánh cóc) | ⬜ | | | |
+| R.M6 | Mở rộng dần + test layering (bánh cóc) | ✅ | `b889d86` → `7548c6d` → `a4b2ecd` → `cbb8275` | GO (vòng 4) | `tests/test_layering.py`: luật §B.2 bằng AST (kể cả import tương đối + alias), loader động / `sys.path` / script path / module chạy tiến trình đều phải khai báo; ngoại lệ theo cặp module, có hợp đồng, chỉ giảm so với `main` (bật khi nhánh merge); 6 → 4 ngoại lệ |
 
 ## Track F — tính năng (§14)
 
@@ -126,3 +126,7 @@ Ký hiệu: ✅ xong + Codex đồng thuận · 🔁 đã code, đang review/s�
 | 2026-10-14 | F.10b (`6699b6a`) | 3 | **NO-GO**: snapshot bỏ qua nhánh của chính chương trình — sửa ở `e365d84` |
 | 2026-10-14 | F.10b (`e365d84`) | 4 | **NO-GO**: chỉ kiểm đích, agent reset được nhánh đã publish — sửa ở `d36a862` |
 | 2026-10-14 | F.10b (`d36a862`) | 5 | **GO** |
+| 2026-10-14 | R.M1/R.M6 (`b889d86`) | 1 | **NO-GO**: 2 HIGH (import động lọt; cạnh script dò sót) + 4 MED (ngoại lệ theo vùng, import tương đối, tiền tố vùng chung, CLI trong vòng lặp) — sửa ở `7548c6d` |
+| 2026-10-14 | R.M1/R.M6 (`7548c6d`) | 2 | **NO-GO**: FIXED 3/6; alias loader, định danh script, mốc độc lập — sửa ở `a4b2ecd` |
+| 2026-10-14 | R.M1/R.M6 (`a4b2ecd`) | 3 | **NO-GO**: `proc.run` qua import đầy đủ; mốc rỗng không kiểm — sửa ở `cbb8275` |
+| 2026-10-14 | R.M1/R.M6 (`cbb8275`) | 4 | **GO** |
