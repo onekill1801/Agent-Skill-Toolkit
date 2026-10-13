@@ -52,7 +52,7 @@ Ký hiệu: ✅ xong + Codex đồng thuận · 🔁 đã code, đang review/s�
 | F.1 | Làm rõ → AC, gom câu hỏi 1 lần, triage 4 làn + tự nâng làn | ✅ | `12b4e42` → `bf35c5d` → `b1c43ab` | GO (vòng 3) | làn quyết định tier/mode/debate; đề xuất chỉ khi là câu hỏi; nội dung task được làm sạch + «trích» + vô hiệu markup |
 | F.2 | Thang kiểm local + vòng tự sửa (`workflows/verify/ladder.py`, `auto-dev/tools/verify.py`) | ✅ | `20ececc` … `09f6b76` (8 commit) | GO (vòng 8) | worktree sạch + đúng nhánh trước mỗi bậc; pending fix bền; mọi bậc chạy lệnh khai `protects`; thay đổi test/cấu hình/spec/launcher → người duyệt; chạy thử trên toolkit: done. Repo Java chờ người dùng chọn |
 | F.3 | AC → test thật trong repo + bảng AC → bằng chứng | ✅ | `d516752` → `28cae3d` → `e5b5bbd` → `fa4ceb5` | GO (vòng 4) | AC chỉ tính khi testcase JUnit của LẦN CHẠY NÀY pass, từ file test đổi trên nhánh (khớp đủ package, không mơ hồ); thiếu test cho AC → người xử lý (không tự sửa); báo cáo chỉ tin kết quả cùng spec + cùng lần chạy suite; `verify.py start --ac/--ac-file`, `report` |
-| F.5 | Cổng vào: `mr_watch` / `atask_watch` / `group_watch` chỉ xếp hàng vào store | ⬜ | | | cần allowlist TChat (user id) |
+| F.5 | Cổng vào: `mr_watch` / `atask_watch` / `group_watch` chỉ xếp hàng vào store | ✅ | `32257f7` → `fd921b3` → `0905ba4` | GO (vòng 3) | `intake/gate.py`: nguồn → độ tin cậy + loại việc, công tắc `work/policy.json` (sai định dạng = tắt), allowlist theo user id, link MR đúng host+port, không userinfo; `review_queue add/add-text` cũng qua cổng; người trong group chỉ được agent CHỈ ĐỌC, build chỉ chủ tài khoản; `mr_watch` mặc định xếp vào store; `atask_watch --mode store` (mặc định direct tới F.7). **Cần bạn đổi `FCHAT_REVIEW_ALLOWED` sang user id** |
 | F.7 | Điều phối nhiều việc + bảng tiến độ (Orca + aTask/`status.py`) | ⬜ | | | quyết định ghi tự động project "Agent Hub" |
 | F.8 | Thang kiểm mở rộng: deploy dev, health pod, smoke UI, e2e, bench | ⛔ | | | **cần `environments.dev` trong `projects.json`** |
 | F.9 | Làn Đề xuất (ADR + debate) + quét chủ động hằng tuần | ⬜ | | | |
@@ -97,3 +97,6 @@ Ký hiệu: ✅ xong + Codex đồng thuận · 🔁 đã code, đang review/s�
 | 2026-10-13 | F.3 (`28cae3d`) | 2 | **NO-GO**: FIXED 3/5; report JUnit cũ còn được tính, checkpoint coverage/suite lệch commit; HIGH mới: Java khớp theo tên class đơn — sửa ở `e5b5bbd` |
 | 2026-10-13 | F.3 (`e5b5bbd`) | 3 | **NO-GO**: HIGH tiền tố package (`com/original.java`) giả làm file test — sửa ở `fa4ceb5` |
 | 2026-10-13 | F.3 (`fa4ceb5`) | 4 | **GO** |
+| 2026-10-13 | F.5 (`32257f7`) | 1 | **NO-GO**: 3 HIGH (TChat build/freeform lách cổng; `review_queue add/add-text` lách cổng; userinfo lách kiểm host) + 2 MED (mr_watch mất MR khi tiến trình chết; policy sai kiểu = bật) — sửa ở `fd921b3` |
+| 2026-10-13 | F.5 (`fd921b3`) | 2 | **NO-GO**: FIXED 4/5; câu hỏi tự do từ group vẫn chạy agent đủ quyền — sửa ở `0905ba4` (agent chỉ đọc) |
+| 2026-10-13 | F.5 (`0905ba4`) | 3 | **GO** |
