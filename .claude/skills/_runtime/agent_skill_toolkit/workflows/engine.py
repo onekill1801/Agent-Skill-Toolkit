@@ -31,7 +31,7 @@ import traceback
 
 from ..core import proc
 from ..core import store as store_mod
-from .execution import handoff, quota, usage
+from .execution import handoff, quota
 
 QuotaExceeded = quota.QuotaExceeded          # one exception type for runners and engine
 
@@ -64,9 +64,12 @@ class StepContext:
         """Run a subprocess for this step and KILL ITS TREE if the lease is lost (pure-Python work can
         only stop cooperatively via should_stop(); builds/tests/agents should go through here).
         Returns CompletedProcess; raises LeaseLost when killed for losing the lease."""
+        # the task / step travel with every subprocess: agent_runner charges its turns to this task's
+        # budget (F.11) whoever started it
+        env = dict(kw.get("env") or os.environ, TOOLKIT_TASK_ID=self.task["id"], TOOLKIT_STEP=self.step or "")
         try:
             return proc.run(argv, input=input, timeout=timeout, should_stop=self.should_stop, poll=poll,
-                            cwd=kw.get("cwd"), env=kw.get("env"))
+                            cwd=kw.get("cwd"), env=env)
         except InterruptedError:
             raise store_mod.LeaseLost(f"task {self.task['id']}: lease lost, killed {argv[0]}")
 
@@ -153,12 +156,6 @@ def run(st: store_mod.Store, task: dict, steps: list, lease_s: int = store_mod.D
                     if rerun_from is None and cp and (cp.get("input_key") or "") == key:
                         outputs[name] = cp["data"]
                         continue
-                    over = usage.check_budgets(st, task)        # hard budgets (F.11), before any work
-                    if over:
-                        kind, msg, resume_at = over
-                        if kind == "daily":
-                            raise QuotaExceeded(resume_at, "budget", msg)
-                        raise NeedsHuman(msg)
                     if rerun_from is None:
                         rerun_from = name
                         later = names[i + 1:]

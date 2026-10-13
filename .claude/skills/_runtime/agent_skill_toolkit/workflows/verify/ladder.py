@@ -385,9 +385,7 @@ DIFF:
 def _agent(ctx, role: str, prompt: str, cwd: str, timeout: int) -> str:
     runner = os.path.join(paths.toolkit_root(), AGENT_RUNNER)
     argv = [sys.executable, runner, "--role", role, "--cwd", cwd, "--timeout", str(timeout)]
-    t0 = time.time()
-    p = ctx.run(argv, timeout=timeout + 120, input=prompt)
-    ctx.usage("agent_runner", role, seconds=round(time.time() - t0, 1))     # budgets (F.11)
+    p = ctx.run(argv, timeout=timeout + 120, input=prompt)      # agent_runner charges the turn (F.11)
     if p.returncode != 0:
         try:
             err = json.loads((p.stdout or "").strip().splitlines()[-1])
@@ -395,6 +393,8 @@ def _agent(ctx, role: str, prompt: str, cwd: str, timeout: int) -> str:
             err = {"message": (p.stderr or p.stdout or "")[-400:]}
         if err.get("kind") == "quota":
             raise E.QuotaExceeded(err.get("resume_at") or time.time() + 1800, role, err.get("message", ""))
+        if err.get("kind") == "budget":
+            raise E.NeedsHuman(f"agent ({role}): {err.get('message', '')[:300]}")
         raise RuntimeError(f"agent ({role}) failed: {str(err.get('message', ''))[:300]}")
     return p.stdout or ""
 

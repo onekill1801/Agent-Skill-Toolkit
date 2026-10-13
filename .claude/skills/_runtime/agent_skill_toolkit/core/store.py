@@ -202,13 +202,17 @@ class Store:
         raw = self.get_setting("claim_policy")
         if not raw:
             return {}
+        deny_all = {"only_kinds": [], "only_lanes": [], "unreadable": True}
         try:
             p = json.loads(raw)
-        except ValueError:
-            return {"only_kinds": [], "only_lanes": [], "unreadable": True}
-        if not isinstance(p, dict) or float(p.get("expires_at") or 0) < time.time():
-            return {}
-        return p
+            expires = float(p["expires_at"])
+        except (ValueError, TypeError, KeyError):
+            return deny_all                # malformed = nothing new is claimed (Codex F.11 #6)
+        lists = ("deny_kinds", "deny_lanes", "deny_sources", "only_kinds", "only_lanes")
+        if not isinstance(p, dict) or any(k in p and not (isinstance(p[k], list) and
+                                                          all(isinstance(v, str) for v in p[k])) for k in lists):
+            return deny_all
+        return p if expires >= time.time() else {}
 
     def capacity(self) -> int:
         r = self.db.execute("select value from settings where key='max_running'").fetchone()

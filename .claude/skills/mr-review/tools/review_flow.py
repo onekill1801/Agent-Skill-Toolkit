@@ -222,8 +222,7 @@ def step_review(ctx) -> dict:
             "--cwd", paths.toolkit_root(), "--timeout", str(timeout)]
     t0 = time.time()
     before = _protected_snapshot(job["id"])
-    p = ctx.run(argv, timeout=timeout + 120, input=prompt)
-    ctx.usage("agent_runner", ctx.data.get("role", "review"), seconds=round(time.time() - t0, 1))
+    p = ctx.run(argv, timeout=timeout + 120, input=prompt)       # agent_runner charges the turn (F.11)
     after = _protected_snapshot(job["id"])
     touched = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
     if touched:     # a review agent edited approval / job / posting code: quarantine, a human must look
@@ -238,6 +237,8 @@ def step_review(ctx) -> dict:
             err = {"message": (p.stderr or p.stdout or "")[-400:]}
         if err.get("kind") == "quota":
             raise E.QuotaExceeded(err.get("resume_at") or time.time() + 1800, "agent", err.get("message", ""))
+        if err.get("kind") == "budget":
+            raise E.NeedsHuman(f"review agent: {err.get('message', '')[:300]}")
         raise RuntimeError(f"review agent failed: {err.get('message', '')[:400]}")
     review = rp.load_review(job)            # FileNotFoundError -> attempt counted
     errs = rp.validate(job, review)

@@ -245,10 +245,57 @@ def _run_api(prompt, system, model, max_tokens, timeout) -> str:
     return "\n".join(p for p in parts if p).strip()
 
 
+class AgentBudgetError(AgentRunError):
+    """This task's agent budget is spent (kind "budget": a human decides). Daily cap / exhausted usage
+    raise AgentQuotaError instead (pause until the reset)."""
+
+
+def _effective_model(backend: str, model: str, cmd_template: str) -> str:
+    if backend == "api":
+        return model or DEFAULT_API_MODEL
+    if cmd_template or backend not in CLI_PRESETS:
+        return model or ""
+    return model or CLI_PRESETS[backend]["default_model"] or ""
+
+
+def _charged_turn(backend, model, role, timeout, notes, fn):
+    """Every REAL agent turn goes through here (Codex F.11 #1/#2/#7): the claude model follows the
+    usage tier, the turn is reserved atomically against the daily cap / the task's budget BEFORE it
+    starts (worst case = its timeout), then settled to the real duration. The task comes from
+    TOOLKIT_TASK_ID (set by the workflow engine for every subprocess); none = daily cap only."""
+    from agent_skill_toolkit.core import store as store_mod
+    tier = usage_tier()
+    if backend == "claude" and model:
+        down = usage_mod.model_for(role, model, tier)
+        if down != model:
+            if notes is not None:
+                notes.append({"model": f"{model} -> {down} ({tier})"})
+            model = down
+    task_id, step = os.environ.get("TOOLKIT_TASK_ID", ""), os.environ.get("TOOLKIT_STEP", "")
+    with store_mod.Store() as st:
+        try:
+            res = usage_mod.reserve(st, task_id, step, backend, model, timeout)
+        except usage_mod.BudgetSpent as b:
+            if b.kind == "quota":
+                raise AgentQuotaError(str(b), {"kind": "quota", "resume_at": b.resume_at,
+                                               "retry_other_backend": False})
+            raise AgentBudgetError(str(b), {"kind": "budget", "retry_other_backend": False})
+    t0 = time.time()
+    try:
+        return fn(model, int(max(1, res["timeout"])))
+    finally:
+        try:
+            with store_mod.Store() as st:
+                usage_mod.settle(st, res["row"], round(time.time() - t0, 1))
+        except Exception:  # noqa: BLE001 — accounting failure keeps the worst case, never hides output
+            pass
+
+
 def run_turn(prompt: str, *, system: str = None, backend: str = "claude",
              model: str = None, cmd_template: str = None, prompt_via: str = None,
              timeout: int = CLI_TIMEOUT, max_tokens: int = DEFAULT_MAX_TOKENS,
-             dry_run_text: str = None, cwd: str = None, env_extra: dict = None) -> str:
+             dry_run_text: str = None, cwd: str = None, env_extra: dict = None,
+             role: str = "", notes: list = None) -> str:
     """Run one headless agent turn; return raw stdout text. Raises AgentRunError.
 
     `dry_run_text` (or backend='dry-run') short-circuits to a canned response so
@@ -260,10 +307,13 @@ def run_turn(prompt: str, *, system: str = None, backend: str = "claude",
         if dry_run_text is None:
             raise AgentRunError("backend 'dry-run' requires dry_run_text.")
         return dry_run_text
+    eff = _effective_model(backend, model, cmd_template)
     if backend == "api":
-        return _run_api(prompt, system, model, max_tokens, timeout)
-    return _run_cli(prompt, system, backend, model, cmd_template, prompt_via, timeout,
-                    cwd=cwd, env_extra=env_extra)
+        return _charged_turn(backend, eff, role, timeout, notes,
+                             lambda m, t: _run_api(prompt, system, m, max_tokens, t))
+    return _charged_turn(backend, eff, role, timeout, notes,
+                         lambda m, t: _run_cli(prompt, system, backend, m, cmd_template, prompt_via, t,
+                                               cwd=cwd, env_extra=env_extra))
 
 
 # --------------------------------------------------------------------------- role routing
@@ -349,14 +399,8 @@ def run_role(prompt: str, role: str, *, system: str = None, cwd: str = None,
     if isinstance(specs, str):
         specs = [specs]
     tried = []
-    tier = usage_tier()
     for spec in specs:
         c = parse_candidate(spec)
-        if c["backend"] == "claude" and c["model"]:
-            down = usage_mod.model_for(role, c["model"], tier)       # model per step under throttling
-            if down != c["model"]:
-                tried.append({"spec": spec, "model": f"{c['model']} -> {down} ({tier})"})
-                c["model"] = down
         if c["backend"] in avoid:
             tried.append({"spec": spec, "skipped": "avoided"})
             continue
@@ -368,7 +412,7 @@ def run_role(prompt: str, role: str, *, system: str = None, cwd: str = None,
             continue
         try:
             text = run_turn(prompt, system=system, backend=c["backend"], model=c["model"],
-                            timeout=timeout, cwd=cwd,
+                            timeout=timeout, cwd=cwd, role=role, notes=tried,
                             env_extra=_account_env(cfg, c["backend"], c["account"]))
             return {"text": text, "used": spec, "tried": tried}
         except AgentRunError as e:

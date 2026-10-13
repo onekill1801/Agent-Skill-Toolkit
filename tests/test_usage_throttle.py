@@ -46,8 +46,8 @@ class Base(unittest.TestCase):
 
 class TierTest(Base):
     def test_thresholds(self):
-        self.assertEqual([U.tier_of(p) for p in (None, 0, 79.9, 80, 94, 95, 100)],
-                         ["normal", "normal", "normal", "save", "save", "critical", "critical"])
+        self.assertEqual([U.tier_of(p) for p in (None, 0, 79.9, 80, 94, 95, 99.9, 100)],
+                         ["normal", "normal", "normal", "save", "save", "critical", "critical", "exhausted"])
         with self.assertRaises(ValueError):
             U.set_level(self.st, 120)
 
@@ -93,52 +93,121 @@ class TierTest(Base):
         self.assertEqual(U.model_for("log_read", "sonnet", "critical"), "haiku")
         self.assertEqual(U.model_for("implement", "opus", "normal"), "opus")
 
-    def test_agent_runner_downgrades_claude_models(self):
-        import agent_runner as ar
-        with open(os.path.join(self.tmp, "agents.json"), "w") as f:
-            json.dump({"roles": {"implement": ["claude:opus@work"], "log_read": ["claude:sonnet"]}}, f)
+    def test_malformed_policy_denies_all(self):                           # Codex F.11 #6
+        self.add_mix()
+        for bad in ("[]", '{"only_kinds": "review_mr", "expires_at": 9e12}', '{"deny_kinds": [1], "expires_at": 9e12}',
+                    '{"deny_kinds": [], "expires_at": "soon"}', '{"deny_kinds": []}'):
+            self.st.set_setting("claim_policy", bad)
+            self.assertEqual(self.st.claim_policy().get("unreadable"), True, bad)
+            self.assertEqual(self.st.claim("w"), {}, bad)
+
+    def test_exhausted_claims_nothing(self):                              # Codex F.11 #5
+        self.add_mix()
+        U.set_level(self.st, 100, resets_at=time.time() + 3600)
+        self.assertEqual(self.refs_claimable(), [])
+
+
+FAKE_CLI = "{py} -c \"import sys; sys.stdin.read(); print('ok')\""
+
+
+class TurnBudgetTest(Base):
+    """Budgets are enforced per AGENT TURN in agent_runner (Codex F.11 #1-#4, #7)."""
+
+    def setUp(self):
+        super().setUp()
+        import agent_runner
+        self.ar = agent_runner
+        self.cli = FAKE_CLI.format(py=sys.executable.replace("\\", "/"))
+
+    def turn(self, **env):
+        with mock.patch.dict(os.environ, env):
+            return self.ar.run_turn("p", backend="custom", cmd_template=self.cli, timeout=60)
+
+    def test_every_turn_is_charged_to_the_task(self):
+        t = self.st.add("k", "x", data={"budget": {"agent_runs": 2}})
+        self.assertEqual(self.turn(TOOLKIT_TASK_ID=t["id"]), "ok")
+        self.assertEqual(self.turn(TOOLKIT_TASK_ID=t["id"]), "ok")
+        with self.assertRaises(self.ar.AgentBudgetError) as e:
+            self.turn(TOOLKIT_TASK_ID=t["id"])
+        self.assertEqual(e.exception.classification["kind"], "budget")
+        used = U.agent_usage(self.st, t["id"])
+        self.assertEqual(used["runs"], 2)
+        self.assertLess(used["seconds"], 60)                  # settled to the real duration
+
+    def test_seconds_budget_shortens_and_then_refuses(self):
+        t = self.st.add("k", "x", data={"budget": {"agent_seconds": 30}})
+        res = U.reserve(self.st, t["id"], "s", "claude", "sonnet", 600)
+        self.assertEqual(res["timeout"], 30)                   # only what is left
+        with self.assertRaises(U.BudgetSpent):                 # unsettled = worst case still counts
+            U.reserve(self.st, t["id"], "s", "claude", "sonnet", 600)
+
+    def test_daily_cap_covers_every_caller(self):
+        self.st.set_setting("daily_agent_runs", "1")
+        self.assertEqual(self.turn(), "ok")                    # a direct call, no task
+        with self.assertRaises(self.ar.AgentQuotaError) as e:
+            self.turn(TOOLKIT_TASK_ID="whatever")
+        self.assertEqual(e.exception.classification["resume_at"], U.next_local_midnight() + 60)
+
+    def test_exhausted_refuses_turns(self):
+        U.set_level(self.st, 100)
+        with self.assertRaises(self.ar.AgentQuotaError):
+            self.turn()
+
+    def test_concurrent_turns_never_exceed_the_cap(self):
+        import threading
+        self.st.set_setting("daily_agent_runs", "3")
+        ok, refused = [], []
+
+        def go():
+            with S.Store() as st:
+                try:
+                    U.reserve(st, "", "", "claude", "", 60)
+                    ok.append(1)
+                except U.BudgetSpent:
+                    refused.append(1)
+        ts = [threading.Thread(target=go) for _ in range(8)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        self.assertEqual((len(ok), len(refused)), (3, 5))
+
+    def test_engine_steps_without_agents_are_never_blocked(self):          # Codex F.11 #4
+        t = self.st.add("k", "x", data={"budget": {"agent_runs": 0}})
+        res = E.run(self.st, self.st.claim("w"), [("build", lambda ctx: {}), ("post", lambda ctx: {})])
+        self.assertEqual(res["status"], "done")
+        self.assertEqual(self.st.get(t["id"])["status"], "done")
+
+    def test_engine_passes_the_task_to_subprocesses(self):
+        t = self.st.add("k", "x")
+        seen = {}
+
+        def step(ctx):
+            p = ctx.run([sys.executable, "-c", "import os; print(os.environ['TOOLKIT_TASK_ID'], os.environ['TOOLKIT_STEP'])"])
+            seen["out"] = p.stdout.split()
+            return {}
+        E.run(self.st, self.st.claim("w"), [("probe", step)])
+        self.assertEqual(seen["out"], [t["id"], "probe"])
+
+    def test_model_follows_the_tier_on_every_path(self):                   # Codex F.11 #7
         seen = []
-        with mock.patch.object(ar, "run_turn", side_effect=lambda *a, **k: seen.append(k["model"]) or "ok"):
+        with mock.patch.object(self.ar, "_run_cli", side_effect=lambda pr, sy, be, m, *a, **k: seen.append(m) or "ok"):
             with mock.patch.dict(os.environ, {"TOOLKIT_USAGE_TIER": "save"}):
-                out = ar.run_role("p", "implement")
-                ar.run_role("p", "log_read")
-            ar.run_role("p", "implement")                        # store has no report -> normal
-        self.assertEqual(seen, ["sonnet", "haiku", "opus"])
+                self.ar.run_turn("p", backend="claude", model="opus")              # direct call
+                self.ar.run_turn("p", backend="claude", model="opus", role="log_read")
+                with open(os.path.join(self.tmp, "agents.json"), "w") as f:
+                    json.dump({"roles": {"implement": ["claude:opus@work"], "x": ["claude"]}}, f)
+                out = self.ar.run_role("p", "implement")
+                self.ar.run_role("p", "x")                                       # bare candidate: default model
+            self.ar.run_turn("p", backend="claude", model="opus")                  # normal tier
+        self.assertEqual(seen, ["sonnet", "haiku", "sonnet", "sonnet", "opus"])
         self.assertIn("opus -> sonnet", json.dumps(out["tried"]))
 
-
-class BudgetTest(Base):
-    def steps(self):
-        def agent_step(ctx):
-            ctx.usage(U.AGENT_BACKEND, "implement", seconds=30)
-            return {}
-        return [("a1", agent_step), ("a2", agent_step), ("a3", agent_step)]
-
-    def test_task_budget_blocks(self):
-        t = self.st.add("k", "x", data={"budget": {"agent_runs": 2}})
-        res = E.run(self.st, self.st.claim("w"), self.steps())
-        self.assertEqual(res["status"], "blocked")
-        self.assertEqual(res["step"], "a3")
-        self.assertIn("2/2 agent runs", self.st.get(t["id"])["last_error"])
-
-    def test_task_seconds_budget(self):
-        self.st.add("k", "x", data={"budget": {"agent_seconds": 45}})
-        res = E.run(self.st, self.st.claim("w"), self.steps())
-        self.assertEqual((res["status"], res["step"]), ("blocked", "a3"))
-
-    def test_daily_cap_pauses_until_midnight(self):
-        self.st.set_setting("daily_agent_runs", "1")
-        t = self.st.add("k", "x")
-        res = E.run(self.st, self.st.claim("w"), self.steps())
-        self.assertEqual((res["status"], res["step"]), ("paused_quota", "a2"))
-        got = self.st.get(t["id"])
-        self.assertEqual(got["attempts"], 0)
-        self.assertGreater(got["resume_at"], time.time())
-        self.assertLessEqual(got["resume_at"], U._local_midnight() + 86400 + 61)
-
-    def test_no_budget_runs_everything(self):
-        self.st.add("k", "x")
-        self.assertEqual(E.run(self.st, self.st.claim("w"), self.steps())["status"], "done")
+    def test_dst_safe_midnight(self):
+        m = U.next_local_midnight()
+        lt = time.localtime(m)
+        self.assertEqual((lt.tm_hour, lt.tm_min), (0, 0))
+        self.assertGreater(m, time.time())
 
 
 class CliTest(Base):

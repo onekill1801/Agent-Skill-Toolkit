@@ -102,6 +102,7 @@ def main(argv=None) -> int:
     p = sub.add_parser("usage")
     p.add_argument("pct", nargs="?", type=float)
     p.add_argument("--source", default="")
+    p.add_argument("--resets-at", type=float, default=None, help="epoch of the provider reset, if known")
     p = sub.add_parser("budget")
     p.add_argument("--daily-agent-runs", type=int, default=None)
     p = sub.add_parser("accept")
@@ -128,14 +129,15 @@ def main(argv=None) -> int:
             out = b
         elif a.cmd == "usage":
             with store_mod.Store() as st:
-                out = usage_mod.set_level(st, a.pct, a.source) if a.pct is not None else usage_mod.level(st)
+                out = (usage_mod.set_level(st, a.pct, a.source, resets_at=a.resets_at) if a.pct is not None
+                       else usage_mod.level(st))
                 out["claim_policy"] = st.claim_policy()
         elif a.cmd == "budget":
             with store_mod.Store() as st:
                 if a.daily_agent_runs is not None:
                     st.set_setting("daily_agent_runs", str(max(0, a.daily_agent_runs)), by="cli")
                 out = {"daily_agent_runs": int(st.get_setting("daily_agent_runs") or 0),
-                       "today": usage_mod.agent_usage(st, since=usage_mod._local_midnight())}
+                       "today": usage_mod.agent_usage(st, since=usage_mod.local_midnight())}
         elif a.cmd == "capacity":
             with store_mod.Store() as st:
                 if a.n is not None:
