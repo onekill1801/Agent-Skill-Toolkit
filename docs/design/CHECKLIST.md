@@ -1,7 +1,7 @@
 # Checklist triển khai — Agent-Skill-Toolkit
 
 > Theo dõi tiến độ kế hoạch trong [`agent-ecosystem.md`](agent-ecosystem.md). Cập nhật **mỗi lần** xong một phần.
-> Cập nhật lần cuối: 2026-10-13. Test: 403 xanh, 1 skip (Windows).
+> Cập nhật lần cuối: 2026-10-13. Test: 410 xanh, 1 skip (Windows).
 
 ## Quy trình mỗi phần
 
@@ -49,7 +49,7 @@ Ký hiệu: ✅ xong + Codex đồng thuận · 🔁 đã code, đang review/s�
 | F.4c | Chạy thử review 1 MR thật (shadow) | ⛔ | | | **cần project + số MR** |
 | F.6a | Luật tự đăng comment GitLab (`review_rules.py`) | ✅ | `20cb944` | — | mặc định `shadow`; cần `REVIEW_AUTO_POST_PROJECTS` |
 | F.6b | Executor tách biệt + duyệt Telegram gắn hash | ⛔ | | | **cần user Windows chuẩn + token GitLab chỉ đọc** |
-| F.1 | Làm rõ → AC, gom câu hỏi 1 lần, triage 4 làn + tự nâng làn | 🔁 | `12b4e42` | chờ review (sau F.2) | `workflows/intake/lanes.py`; `triage.py` thêm kind/lane/profile + `upgrade`; `clarify.py bundle` |
+| F.1 | Làm rõ → AC, gom câu hỏi 1 lần, triage 4 làn + tự nâng làn | ✅ | `12b4e42` → `bf35c5d` → `b1c43ab` | GO (vòng 3) | làn quyết định tier/mode/debate; đề xuất chỉ khi là câu hỏi; nội dung task được làm sạch + «trích» + vô hiệu markup |
 | F.2 | Thang kiểm local + vòng tự sửa (`workflows/verify/ladder.py`, `auto-dev/tools/verify.py`) | ✅ | `20ececc` … `09f6b76` (8 commit) | GO (vòng 8) | worktree sạch + đúng nhánh trước mỗi bậc; pending fix bền; mọi bậc chạy lệnh khai `protects`; thay đổi test/cấu hình/spec/launcher → người duyệt; chạy thử trên toolkit: done. Repo Java chờ người dùng chọn |
 | F.3 | AC → test thật trong repo + bảng AC → bằng chứng | ⬜ | | | |
 | F.5 | Cổng vào: `mr_watch` / `atask_watch` / `group_watch` chỉ xếp hàng vào store | ⬜ | | | cần allowlist TChat (user id) |
@@ -88,5 +88,8 @@ Ký hiệu: ✅ xong + Codex đồng thuận · 🔁 đã code, đang review/s�
 | 2026-10-13 | F.2 (`bcf4bef`) | 3 | **NO-GO**: chấp nhận cách phát hiện commit nhánh khác; HIGH: script do interpreter chạy chưa bảo vệ, protection fail-open khi git lỗi; MED covered_by |
 | 2026-10-13 | F.2 (`6aaeb21`, `bbf35af`, `bf842ad`, `1f69504`) | 4–7 | **NO-GO** từng vòng vì đoán script từ argv luôn lọt → đổi thiết kế: mọi bậc chạy lệnh phải khai `protects`, launcher luôn được bảo vệ, chuẩn hoá path, không phân biệt hoa thường, từ chối path ngoài repo |
 | 2026-10-13 | F.2 (`09f6b76`) | 8 | **GO** |
+| 2026-10-13 | F.1 (`12b4e42`) | 1 | **NO-GO**: HIGH làn lớn vẫn giữ mode auto/skip_debate; MED đề xuất bắt nhầm câu mệnh lệnh, thiếu làm rõ lại, giả mạo mục trong tin nhắn, giả định che đề xuất |
+| 2026-10-13 | F.1 (`bf35c5d`) | 2 | **NO-GO**: FIXED 3/5; còn thiếu epic/defect, markup trong «…» vẫn hoạt động |
+| 2026-10-13 | F.1 (`b1c43ab`) | 3 | **GO** |
 | 2026-10-13 | F.4b (`b336e7f`) | 3 | **GO**: quarantine + khoá gửi duyệt chung đều FIXED; không có lỗi mới. Gợi ý thêm test tranh chấp đồng thời flow/direct |
 | 2026-10-13 | F.4a + 0.7 (`4a847a0`) | 3 | **GO**: chấp nhận 2 phản biện (finish khi lease hết hạn an toàn nhờ token; dừng hợp tác cho Python thuần). MED còn: kill cây tiến trình, quota JSON nhúng, tham số rỗng — sửa ở `199a6f5` (sẽ được xác nhận trong vòng review F.4b) |
