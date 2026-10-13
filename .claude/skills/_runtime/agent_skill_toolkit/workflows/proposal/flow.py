@@ -68,7 +68,11 @@ def _head(repo: str) -> str:
 
 
 def input_key(ctx) -> str:
-    d = ctx.data
+    return key_for(ctx.data)
+
+
+def key_for(d: dict) -> str:
+    """Identity of what a proposal is about: repo HEAD + question / criteria / evidence."""
     q = hashlib.sha256(json.dumps([d.get("question"), d.get("criteria"), d.get("evidence")],
                                   ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
     return f"{_head(d.get('repo') or '')}:{q}"

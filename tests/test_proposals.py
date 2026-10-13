@@ -263,6 +263,39 @@ class Round1FixesTest(Base):
         self.assertEqual(v["spring-boot"], "3.5.1")                          # the parent wins
         self.assertEqual(v["x"], "")
 
+    def test_accept_refuses_an_adr_older_than_the_code(self):                # R2 #2
+        t = self.ready()
+        with open(os.path.join(self.repo, "src", "Later.java"), "w") as f:
+            f.write("class Later {}\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "later")
+        with self.assertRaises(ValueError) as e:
+            P.cmd_decide(t, "accept", "")
+        self.assertIn("refresh", str(e.exception))
+        P.cmd_refresh(t)
+        self.work()
+        self.assertEqual(P.cmd_decide(t, "accept", "")["decision"], "accept")
+
+    def test_unknown_versions_and_boms_are_reported(self):                    # R2 #6
+        pom = os.path.join(self.tmp, "bom", "pom.xml")
+        os.makedirs(os.path.dirname(pom))
+        with open(pom, "w") as f:
+            f.write("<project><properties><java.version>${jdk}</java.version><sb>2.6.3</sb></properties>"
+                    "<dependencyManagement><dependencies><dependency><groupId>org.springframework.boot</groupId>"
+                    "<artifactId>spring-boot-dependencies</artifactId><version>${sb}</version><type>pom</type>"
+                    "<scope>import</scope></dependency></dependencies></dependencyManagement></project>")
+        keys = {f["key"]: f for f in scan.deps(os.path.dirname(pom))}
+        self.assertEqual(keys["dep:spring-boot"]["evidence"]["version"], "2.6.3")
+        self.assertEqual(keys["dep-unknown:java"]["kind"], "unknown")
+
+    def test_legacy_rejections_are_migrated(self):                            # R2 new
+        with S.Store() as st:
+            st.set_setting("proposal_rejected", json.dumps([P._ref(self.repo, "dep:java")]))
+        keys = [f["key"] for f in P.cmd_scan(self.repo, True, 30, "")["findings"]]
+        self.assertNotIn("dep:java", keys)
+        with S.Store() as st:
+            self.assertIsNone(st.get_setting("proposal_rejected"))
+
     def test_hotspots_qualify_before_ranking(self):                          # #7
         for i in range(4):
             with open(os.path.join(self.repo, "src", "A.py"), "a") as f:

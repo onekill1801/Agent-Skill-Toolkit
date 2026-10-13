@@ -4,6 +4,7 @@
     python proposals.py scan --repo DIR [--enqueue] [--days 90] [--out FILE]   # "Đề xuất tuần" (no tokens)
     python proposals.py new  --repo DIR --question "Nâng Spring Boot lên 3.x?" [--criteria "..."]
     python proposals.py go <task_id>                       # [Làm]: start a scan candidate (debate -> ADR)
+    python proposals.py refresh <task_id>                  # regenerate an ADR whose repo / question changed
     python proposals.py decide <task_id> accept|reject --reason "..."
     python proposals.py list
 
@@ -40,6 +41,8 @@ def cmd_scan(repo: str, enqueue: bool, days: int, out: str) -> dict:
     if not os.path.isdir(repo):
         raise ValueError(f"no such repo: {repo}")
     with store_mod.Store() as st:
+        _migrate_legacy(st)
+
         def rejected(f):
             return any(st.get_setting(REJECTED + _ref(repo, k)) is not None for k in [f["key"], *f.get("aliases", [])])
         findings = [f for f in scan.run(repo, days=days) if not rejected(f)]
@@ -118,6 +121,10 @@ def cmd_decide(task_id: str, decision: str, reason: str) -> dict:
         cp = next((c for c in reversed(st.checkpoints(task_id, valid_only=True)) if c["step"] == "adr"), None)
         if not cp:
             raise ValueError(f"{task_id} has no valid ADR — it must be regenerated (coordinator.py work)")
+        if cp.get("input_key") != flow.key_for(t["data"]):
+            # the code or the question moved since this ADR was written: never accept stale evidence
+            raise ValueError(f"{task_id}: the repo or the question changed since the ADR was written — "
+                             f"run `proposals.py refresh {task_id}` to regenerate it")
         path = cp["data"].get("path") or ""
         try:
             with open(path, encoding="utf-8") as f:
@@ -133,6 +140,33 @@ def cmd_decide(task_id: str, decision: str, reason: str) -> dict:
             raise ValueError(f"{task_id} changed while deciding — look again")
     return {"task_id": task_id, "decision": "accept", "adr": path,
             "next": "copy the ADR into the repo's .agent/decisions/ and open a task (lane vua / lon) for it"}
+
+
+def cmd_refresh(task_id: str) -> dict:
+    """Regenerate the ADR of a proposal waiting for a decision (evidence + debate re-run when the code
+    or the question changed; unchanged steps are reused)."""
+    with store_mod.Store() as st:
+        t = _task(st, task_id)
+        if t["status"] != "blocked" or not str(t.get("last_error") or "").startswith(flow.WAIT_DECISION):
+            raise ValueError(f"{task_id} is not waiting for a decision")
+        st.unblock(task_id, by="human:refresh")
+    return {"task_id": task_id, "refreshing": True, "next": "coordinator.py work"}
+
+
+def _migrate_legacy(st) -> int:
+    """Rejections stored by the first version (one JSON list) -> one row per ref, once (Codex F.9 R2)."""
+    raw = st.get_setting("proposal_rejected")
+    if raw is None:
+        return 0
+    try:
+        refs = [r for r in json.loads(raw) if isinstance(r, str)]
+    except ValueError:
+        refs = []
+    with st._tx():
+        for r in refs:
+            st.db.execute("insert or ignore into settings(key, value) values (?, ?)", (REJECTED + r, "migrated"))
+        st.db.execute("delete from settings where key='proposal_rejected'")
+    return len(refs)
 
 
 def cmd_list() -> list:
@@ -154,6 +188,7 @@ def main(argv=None) -> int:
     p.add_argument("--question", required=True)
     p.add_argument("--criteria", default="")
     sub.add_parser("go").add_argument("task_id")
+    sub.add_parser("refresh").add_argument("task_id")
     p = sub.add_parser("decide")
     p.add_argument("task_id")
     p.add_argument("decision", choices=["accept", "reject"])
@@ -167,6 +202,8 @@ def main(argv=None) -> int:
             out = cmd_new(a.repo, a.question, a.criteria)
         elif a.cmd == "go":
             out = cmd_go(a.task_id)
+        elif a.cmd == "refresh":
+            out = cmd_refresh(a.task_id)
         elif a.cmd == "decide":
             out = cmd_decide(a.task_id, a.decision, a.reason)
         else:

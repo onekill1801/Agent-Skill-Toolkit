@@ -75,12 +75,18 @@ def _pom_versions(path: str) -> dict:
     for tag, val in raw.items():
         if tag.endswith(".version") and val:
             out[tag[:-len(".version")]] = _resolve(val, raw)
+    # Spring Boot imported as a BOM / declared in dependencyManagement (no parent)
+    for dep in root.iter(f"{{{ns['m']}}}dependency" if ns else "dependency"):
+        art = (dep.findtext(q("artifactId"), "", ns) or "").strip()
+        ver = (dep.findtext(q("version"), "", ns) or "").strip()
+        if art == "spring-boot-dependencies" and ver:
+            out["spring-boot"] = _resolve(ver, raw) or ver
     parent = root.find(q("parent"), ns)
     if parent is not None:
         art = (parent.findtext(q("artifactId"), "", ns) or "").strip()
-        ver = _resolve((parent.findtext(q("version"), "", ns) or "").strip(), raw)
+        ver = (parent.findtext(q("version"), "", ns) or "").strip()
         if art in ("spring-boot-starter-parent", "spring-boot-dependencies", "spring-boot-parent") and ver:
-            out["spring-boot"] = ver                # the parent is what is really built with
+            out["spring-boot"] = _resolve(ver, raw) or ver   # the parent is what is really built with
     return out
 
 
@@ -117,8 +123,17 @@ def deps(repo: str) -> list:
     for name, (ver, src) in sorted(found.items()):
         key = "jhipster" if name.startswith("jhipster") else name
         rule = EOL.get(key)
+        if not rule:
+            continue
         parsed = _ver(ver)
-        if not rule or not parsed or parsed[1] >= rule[0]:
+        if not parsed:
+            # a version we cannot read (unresolved ${...}, <20, *, ranges): said so, never guessed
+            out.append({"key": f"dep-unknown:{key}", "kind": "unknown", "score": 15,
+                        "title": f"Không xác định được phiên bản {key} (khai báo {ver or '—'})",
+                        "evidence": {"file": src, "property": name, "declared": ver or "",
+                                     "why": f"cannot check against: {rule[1]}"}})
+            continue
+        if parsed[1] >= rule[0]:
             continue
         kind, have = parsed
         gap = (rule[0][0] - have[0]) * 10 + max(0, rule[0][1] - have[1])
@@ -167,7 +182,7 @@ def hotspots(repo: str, days: int = 90, top: int = 5, min_changes: int = 5) -> l
     return out
 
 
-def file_history(repo: str, path: str, cap: int = 20) -> list:
+def file_history(repo: str, path: str, cap: int = 0) -> list:
     """Every path this file had (git log --follow): a rejected hotspot stays rejected after a rename
     (Codex F.9 #4)."""
     try:
@@ -176,7 +191,8 @@ def file_history(repo: str, path: str, cap: int = 20) -> list:
     except (OSError, subprocess.SubprocessError):
         return [path]
     names = [x.strip() for x in p.stdout.splitlines() if x.strip()] if p.returncode == 0 else []
-    return list(dict.fromkeys([path, *names]))[:cap]
+    out = list(dict.fromkeys([path, *names]))           # the FULL rename chain (Codex F.9 R2)
+    return out[:cap] if cap else out
 
 
 # ----------------------------------------------------------------------------- run / digest
