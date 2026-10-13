@@ -265,6 +265,15 @@ class LadderTest(unittest.TestCase):
         self.assertTrue(any(_re.search(p, "checks/run.py") for p in pats))
         self.assertTrue(any(_re.search(p, "scripts/t.js") for p in pats))
         self.assertFalse(any(_re.search(p, "src/calc.py") for p in pats))     # production code stays fixable
+        # Codex F.2 R4: options with values and subcommands before the script
+        for argv, script in ((["python", "-W", "ignore", "checks/run.py"], "checks/run.py"),
+                             (["deno", "run", "--allow-read", "ci/check.ts"], "ci/check.ts"),
+                             (["bash", "-e", "ci/check.sh"], "ci/check.sh")):
+            pats = L.spec_launchers({"rungs": [{"name": "r", "run": argv}]})
+            self.assertTrue(any(_re.search(p, script) for p in pats), argv)
+        with self.assertRaises(ValueError):                                     # cannot tell -> refuse
+            L.spec_launchers({"rungs": [{"name": "r", "run": ["node", "."]}]})
+        self.assertEqual(L.spec_launchers({"rungs": [{"name": "r", "run": ["node", "."], "protect_ok": True}]}), [])
 
     def test_protection_fails_closed_on_git_errors(self):
         """Codex F.2 R3 NEW HIGH."""

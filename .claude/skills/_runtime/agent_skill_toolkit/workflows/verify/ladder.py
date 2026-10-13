@@ -169,9 +169,11 @@ def load_spec(repo: str, base: str = "", spec_file: str = "") -> dict:
         if cov and cov not in suites:
             raise ValueError(f"`{r['name']}`.covered_by must name a LATER `cmd` rung declared `full_suite: true` "
                              f"(got {cov!r})")
-    return {"base": v.get("base"), "rungs": rungs, "budgets": v.get("budgets") or {},
+    spec = {"base": v.get("base"), "rungs": rungs, "budgets": v.get("budgets") or {},
             "protected": list(v.get("protected") or []),
             "hash": hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]}
+    spec["launchers"] = spec_launchers(spec)          # validates ambiguous interpreter commands up front
+    return spec
 
 
 def argv_of(run) -> list:
@@ -425,6 +427,13 @@ def protected_changes(repo: str, before: str, after: str, extra: list = ()) -> l
     return out
 
 
+_SCRIPT = re.compile(r"\.(py|pyw|js|mjs|cjs|ts|mts|cts|jsx|tsx|sh|bash|zsh|ps1|psm1|rb|pl|php|groovy|kts|"
+                     r"jar|bat|cmd)$", re.I)
+# flags that make an interpreter run a MODULE or INLINE code instead of a repo script — per
+# interpreter (`-e` is inline code for node/ruby/perl but "exit on error" for bash)
+_INLINE_FLAGS = {r"python[\d.]*|py": ("-m", "-c"), r"node|bun": ("-e", "--eval", "-p", "--print"),
+                 r"deno": ("eval",), r"bash|sh|zsh": ("-c",), r"pwsh|powershell": ("-Command", "-c", "-command"),
+                 r"ruby|perl": ("-e",), r"php": ("-r",)}
 _INTERPRETERS = re.compile(r"^(python[\d.]*|py|node|deno|bun|bash|sh|zsh|pwsh|powershell|ruby|perl|php|"
                            r"groovy|kotlin|java|cmd)(\.exe)?$", re.I)
 
@@ -448,11 +457,19 @@ def spec_launchers(spec: dict) -> list:
         if not os.path.isabs(a0) and ("/" in a0 or "\\" in a0 or a0.startswith(".") or "." in a0):
             out.append(pat(a0))
         if _INTERPRETERS.match(os.path.basename(a0)):
-            script = next((a for a in argv[1:] if not a.startswith("-")), "")
-            flags = [a for a in argv[1:argv.index(script)]] if script else []
-            if script and "-m" not in flags and "-c" not in flags and "/c" not in [f.lower() for f in flags] \
-                    and not os.path.isabs(script):
-                out.append(pat(script))
+            rest = argv[1:]
+            exe = re.sub(r"(\.exe)$", "", os.path.basename(a0).lower())
+            inline = next((v for k, v in _INLINE_FLAGS.items() if re.fullmatch(k, exe)), ())
+            if any(a in inline for a in rest):
+                continue                          # module / inline code: no repo script is executed
+            # every argument that looks like a script file is protected — not "the first non-option",
+            # which is wrong for `python -W ignore x.py` or `deno run x.ts` (Codex F.2 R4)
+            scripts = [a for a in rest if not a.startswith("-") and _SCRIPT.search(a) and not os.path.isabs(a)]
+            if not scripts and not r.get("protect_ok"):
+                raise ValueError(f"rung `{r.get('name', '?')}`: cannot tell which repo script `{' '.join(argv)[:80]}` "
+                                 "runs — name it explicitly, or list it in verify.protected and set "
+                                 "`protect_ok: true` on the rung")
+            out += [pat(a) for a in scripts]
     return out
 
 
@@ -528,7 +545,7 @@ def _job(ctx, spec: dict) -> dict:
     d = ctx.data
     return {**d, "base": resolve_base(d["repo"], d.get("base") or spec["base"] or ""),
             "budgets": spec["budgets"], "protected": spec["protected"], "rungs": spec["rungs"],
-            "launchers": spec_launchers(spec)}
+            "launchers": spec["launchers"]}
 
 
 def steps_for(task_data: dict) -> list:
