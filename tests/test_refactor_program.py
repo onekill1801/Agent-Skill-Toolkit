@@ -327,6 +327,39 @@ class Round1Test(ProgramTest):
         self.assertIn("changed your clone", s2["last_error"])
         self.assertIn("-s1", s2["last_error"])
 
+    def test_round4_reset_to_the_published_commit_is_not_a_publication(self):   # Codex F.10b R4
+        state = {}
+
+        def agent(ctx, role, prompt, cwd="", timeout=900, read_only=False):
+            sid = ctx.data["slice"]["id"]
+            with open(os.path.join(cwd, "src", f"{sid}.py"), "w") as f:
+                f.write(f"# {sid}\n")
+            if sid == "s2":                                        # resets s1 from the human's B back to A
+                git(self.repo, "update-ref", f"refs/heads/{state['b1']}", state["a"])
+            return "done"
+        mock.patch.object(P.agent_call, "run", side_effect=agent).start()
+        out = self.new()
+        state["b1"] = out["slices"][0]["branch"]
+        real_worktree = P.step_worktree
+
+        def human_advances_then_worktree(ctx):
+            if ctx.data["slice"]["id"] == "s2":                    # the human commits on s1 after publication
+                state["a"] = git(self.repo, "rev-parse", state["b1"])
+                git(self.repo, "checkout", "-q", state["b1"])
+                with open(os.path.join(self.repo, "src", "human.py"), "w") as f:
+                    f.write("h\n")
+                git(self.repo, "add", "-A")
+                git(self.repo, "commit", "-qm", "human work")
+                git(self.repo, "checkout", "-q", "main")
+            return real_worktree(ctx)
+        mock.patch.dict(P.REGISTRY, {P.SLICE: [("worktree", human_advances_then_worktree),
+                                               ("implement", P.step_implement)]}).start()
+        self.run_all(out["program"])
+        with S.Store() as st:
+            s2 = st.get(out["slices"][1]["implement"])
+        self.assertEqual(s2["status"], "blocked")
+        self.assertIn("changed your clone", s2["last_error"])
+
     def test_round2_open_verifications_keep_the_program_running(self):     # Codex F.10b R2 #2
         out = self.new()
         with S.Store() as st:

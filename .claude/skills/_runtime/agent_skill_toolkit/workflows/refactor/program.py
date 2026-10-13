@@ -192,23 +192,26 @@ def _snapshot(repo: str) -> dict:
     return {"refs": refs, "status": _git(repo, "status", "--porcelain", "--untracked-files=normal")}
 
 
-def _published(ctx) -> dict:
-    """{branch: sha} this program legitimately published so far (publish checkpoints, by task id)."""
+def _publications(ctx, since: float, until: float) -> dict:
+    """{ref: (old, new)} publications by this program's publish steps that happened INSIDE the window
+    (their checkpoint time), with the exact transition they recorded."""
     out = {}
     for sid, tid in (ctx.data.get("publish_ids") or {}).items():
-        cp = next((c for c in reversed(ctx.store.checkpoints(tid, valid_only=True)) if c["step"] == "publish"), None)
-        if cp and (cp.get("data") or {}).get("sha"):
-            out[f"refs/heads/{cp['data']['branch']}"] = cp["data"]["sha"]
+        for c in ctx.store.checkpoints(tid, valid_only=True):
+            d = c.get("data") or {}
+            if c["step"] == "publish" and d.get("sha") and since <= float(c.get("ts") or 0) <= until:
+                out[f"refs/heads/{d['branch']}"] = (d.get("prev"), d["sha"])
     return out
 
 
-def _unauthorised(before: dict, after: dict, published: dict) -> list:
-    """Ref / working-tree changes in your clone other than a publication by this program (a concurrent
-    slice's publish step moving ITS branch to ITS verified commit) — Codex F.10b R3."""
+def _unauthorised(before: dict, after: dict, publications: dict) -> list:
+    """Ref / working-tree changes in your clone other than an EXACT publication transition (old -> new)
+    made by this program's publish step during the agent's turn (Codex F.10b R3/R4): an agent resetting
+    a published branch back to its published commit is NOT a publication."""
     bad = []
     for ref in sorted(set(before["refs"]) | set(after["refs"])):
         old, new = before["refs"].get(ref), after["refs"].get(ref)
-        if old != new and not (new is not None and published.get(ref) == new):
+        if old != new and publications.get(ref) != (old, new):
             bad.append(f"{ref}: {(old or '-')[:10]} -> {(new or 'deleted')[:10]}")
     if before["status"] != after["status"]:
         bad.append("working tree changed")
@@ -266,6 +269,8 @@ def step_implement(ctx) -> dict:
             raise E.NeedsHuman(f"{when}: {branch} no longer descends from its start {start[:10]}")
     check("before the agent")
     before_head = _git(clone, "rev-parse", "HEAD")
+    import time as _time
+    t_before = _time.time()
     shared_before = _snapshot(repo)
     q = lambda t, n=600: lanes.quoted(t, n)                                    # noqa: E731
     prompt = IMPLEMENT.format(worktree=clone, branch=branch, goal=q(d.get("goal")), invariants=q(d.get("invariants") or "-"),
@@ -273,7 +278,7 @@ def step_implement(ctx) -> dict:
                               acs=q("; ".join(s.get("acs") or []) or "-", 1500), slice=s["id"])
     text = agent_call.run(ctx, d.get("implement_role") or "implement", prompt, cwd=clone,
                           timeout=int(d.get("implement_timeout") or 3600))
-    bad = _unauthorised(shared_before, _snapshot(repo), _published(ctx))
+    bad = _unauthorised(shared_before, _snapshot(repo), _publications(ctx, t_before, _time.time() + 1))
     if bad:
         raise E.NeedsHuman(f"the agent changed your clone {repo} — check it by hand: " + "; ".join(bad[:5]))
     check("after the agent")
@@ -307,11 +312,14 @@ def step_publish(ctx) -> dict:
     sha = heads.pop()
     if _git(clone, "rev-parse", f"refs/heads/{branch}") != sha:
         raise E.NeedsHuman(f"slice {d['slice']['id']}: {branch} moved after it was verified — verify again")
+    prev = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False) or None
+    if prev not in (None, sha):
+        raise E.NeedsHuman(f"{branch} already points elsewhere in your clone ({prev[:10]}) — not overwriting it")
     _git(clone, "update-ref", f"refs/verified/{branch}", sha)
-    _git(repo, "fetch", "--quiet", clone, f"+refs/verified/{branch}:refs/heads/{branch}")
+    _git(repo, "fetch", "--quiet", clone, f"refs/verified/{branch}:refs/heads/{branch}")    # no + : never forced
     if _git(repo, "rev-parse", f"refs/heads/{branch}") != sha:
         raise RuntimeError("publication did not land")
-    return {"sha": sha, "branch": branch}
+    return {"sha": sha, "branch": branch, "prev": prev}
 
 
 PROGRAM_STEPS = [("plan", step_plan)]
