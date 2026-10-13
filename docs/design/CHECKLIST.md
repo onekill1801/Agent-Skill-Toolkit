@@ -58,7 +58,7 @@ Ký hiệu: ✅ xong + Codex đồng thuận · 🔁 đã code, đang review/s�
 | F.9 | Làn Đề xuất (ADR + debate) + quét chủ động hằng tuần | ⬜ | | | |
 | F.10 | Làn Lớn (refactor: khảo sát, lưới an toàn, bánh cóc, lát cắt) | ⬜ | | | |
 | F.11 | Điều tiết theo mức dùng (80% / 95%), model theo bước, ngân sách cứng | ✅ | `b26077a` → `0a23507` → `a989e1d` → `b8159f7` → `d59e5fe` | GO (vòng 5) | mức dùng do bạn/script khai (`coordinator.py usage PCT [--resets-at]`, hết hạn 6 h — toolkit không tự đọc được % subscription); ≥80%: dừng làn Đề xuất + quét tuần, opus→sonnet, vai nhẹ→haiku; ≥95%: chỉ review_mr + làn Nhỏ; 100%: không nhận việc, từ chối lượt agent tới reset. Ngân sách giữ chỗ **theo từng lượt agent** (atomic, tính trường hợp xấu nhất): task (lượt/giây) → chặn; trần lượt/ngày → dừng tới 0h; lượt API chạy trong tiến trình con bị giết đúng hạn |
-| F.12 | `code_context.py` (CodeGraph mặc định, grep dự phòng) cho grounding / fix_loop | 🟡 | `166bcf7` | | đã có `cg.py` cho review MR |
+| F.12 | `code_context.py` (CodeGraph mặc định, grep dự phòng) cho grounding / fix_loop | ✅ | `166bcf7` → `7b917c4` → `84fed60` → `bc785de` | GO (vòng 2) | `callers/impact/locate/affected/trace/status`; CodeGraph chỉ khi index mới (cũ → sync 1 lần, lỗi/sai định dạng → grep), luôn ghi `source` + lý do; grep không theo symlink, không đọc secret; tên đầy đủ chỉ khớp đúng định nghĩa, grep chỉ trả *ứng viên*; `trace` stack Java (cả inner class)/Python/Node (Windows)/Go → file trong repo, bỏ frame thư viện; fix_loop nhận `<code_locations>`; grounding scout xếp file định nghĩa symbol lên đầu |
 
 ## Thông tin đang chờ người dùng
 
@@ -109,3 +109,5 @@ Ký hiệu: ✅ xong + Codex đồng thuận · 🔁 đã code, đang review/s�
 | 2026-10-14 | F.11 (`a989e1d`) | 3 | **NO-GO**: API chỉ thôi chờ chứ không huỷ; `proc.run` chạy lố 1 nhịp poll — sửa ở `b8159f7` |
 | 2026-10-14 | F.11 (`b8159f7`) | 4 | **NO-GO**: watchdog không huỷ được DNS/kết nối → POST sau hạn — sửa ở `d59e5fe` (tiến trình con) |
 | 2026-10-14 | F.11 (`d59e5fe`) | 5 | **GO** (khe hở kiểm-rồi-gửi chấp nhận được cho kiểm soát ngân sách) |
+| 2026-10-14 | F.12 (`7b917c4`) | 1 | **NO-GO**: HIGH symlink lộ secret qua grep + 4 MED (frame thư viện gán vào file repo, lỗi truy vấn không rơi về grep, che mơ hồ / tên đầy đủ, đường dẫn Node Windows) + LOW quét repo khi không có trace — sửa ở `84fed60` |
+| 2026-10-14 | F.12 (`84fed60`) | 2 | **GO** (còn MED: `../`, dữ liệu lồng sai kiểu, grep cho tên đầy đủ, inner class — đã sửa ở `bc785de`) |
