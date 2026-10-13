@@ -261,6 +261,14 @@ class Round2Test(RatchetRungTest):
         git(self.repo, "add", "-A")
         found = sorted(k.split("|", 2)[2] for k in R.scan(self.repo, rules)["violations"])
         self.assertEqual(found, ['import type {X} from \'../repository/x\'', 'import { Repo, Other } from "./repository"'])
+        # Codex F.10a R4: declarations before an import must not swallow it
+        self.write("web/app.ts", 'export function helper() { return 1 }\nimport { Repo } from "./repository";\n'
+                   'export const enabled = true\nimport Default, { a } from "./repository/z"\n'
+                   'import * as all from "../repository/all"\nexport * from "./api"\n')
+        git(self.repo, "add", "-A")
+        found = sorted(k.split("|", 2)[2] for k in R.scan(self.repo, rules)["violations"])
+        self.assertEqual(found, ['import * as all from "../repository/all"', 'import Default, { a } from "./repository/z"',
+                                 'import { Repo } from "./repository"'])
 
     def test_long_statement_moved_out_is_caught(self):                       # Codex F.10a R3
         long_import = "import com.acme.repository." + ".".join(["sub"] * 120) + ".Thing;"

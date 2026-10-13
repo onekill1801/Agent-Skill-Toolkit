@@ -35,8 +35,14 @@ SEMI = (".java", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".cs", ".php", ".
         ".dart", ".rs")
 JS = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
 # whole JS/TS module declarations: braces and optional `;` must not split them (Codex F.10a R3)
-JS_DECL = re.compile(r"""\b(?:import|export)\b[^;'"`]*?\bfrom\s*(['"])[^'"]*\1|\bimport\s*(['"])[^'"]*\2|"""
-                     r"""\bimport\s*\(\s*(['"])[^'"]*\3\s*\)|\brequire\s*\(\s*(['"])[^'"]*\4\s*\)""", re.S)
+# Between `import`/`export` and `from` only the declaration's own grammar is allowed (a default name,
+# `* as x`, `{ ... }` without nested braces), so a declaration never swallows the code before it
+# (`export function f() {...}` followed by an import — Codex F.10a R4).
+_BINDINGS = r"""(?:type\s+)?(?:[\w$]+\s*(?:,\s*)?)?(?:\*\s*(?:as\s+[\w$]+)?|\{[^{}]*\})?"""
+JS_DECL = re.compile(r"""\bimport\s+""" + _BINDINGS + r"""\s*from\s*(['"])[^'"\n]*\1|"""
+                     r"""\bexport\s+(?:type\s+)?(?:\*\s*(?:as\s+[\w$]+)?|\{[^{}]*\})\s*from\s*(['"])[^'"\n]*\2|"""
+                     r"""\bimport\s*(['"])[^'"\n]*\3|\bimport\s*\(\s*(['"])[^'"\n]*\4\s*\)|"""
+                     r"""\brequire\s*\(\s*(['"])[^'"\n]*\5\s*\)""")
 # ... or with a newline (`;` optional): Kotlin / Scala / Groovy / Go / Swift (Codex F.10a R2)
 NEWLINE = (".kt", ".kts", ".scala", ".groovy", ".go", ".swift")
 C_LIKE = SEMI + NEWLINE
