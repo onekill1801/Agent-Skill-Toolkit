@@ -13,6 +13,11 @@ imports for Python), so reformatting cannot hide a violation (#3). A rule covers
 (`files`) OR by declared package (`package`), so moving a file elsewhere does not launder it (#4).
 A covered file that cannot be scanned (too big, symlink, unreadable) FAILS the check (#2). Scans run
 in a child process with a time limit (a pathological rule regex cannot hang the ladder, #8).
+
+Limits (the ratchet is a guard against regressions that a human reviews in the MR, not a security
+boundary): a violation moved to uncovered code is caught when its statement is unchanged; moving a
+file AND rewriting the forbidden statement itself is not detected — prefer `package` selectors,
+which follow the code wherever it moves.
 """
 
 import hashlib
@@ -28,6 +33,10 @@ MAX_FILE = 2 * 2 ** 20
 # statements end with `;` (newlines are just whitespace) ...
 SEMI = (".java", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".cs", ".php", ".c", ".cc", ".cpp", ".h", ".hpp",
         ".dart", ".rs")
+JS = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
+# whole JS/TS module declarations: braces and optional `;` must not split them (Codex F.10a R3)
+JS_DECL = re.compile(r"""\b(?:import|export)\b[^;'"`]*?\bfrom\s*(['"])[^'"]*\1|\bimport\s*(['"])[^'"]*\2|"""
+                     r"""\bimport\s*\(\s*(['"])[^'"]*\3\s*\)|\brequire\s*\(\s*(['"])[^'"]*\4\s*\)""", re.S)
 # ... or with a newline (`;` optional): Kotlin / Scala / Groovy / Go / Swift (Codex F.10a R2)
 NEWLINE = (".kt", ".kts", ".scala", ".groovy", ".go", ".swift")
 C_LIKE = SEMI + NEWLINE
@@ -139,6 +148,11 @@ def statements(rel: str, text: str) -> list:
         body = re.sub(r"\\\n", " ", text)                  # joined continuation lines
         out += [" ".join(ln.split()) for ln in body.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
         return out
+    if rel.endswith(JS):
+        code = _strip_c_comments(text)
+        decls = [" ".join(m.group(0).split()) for m in JS_DECL.finditer(code)]
+        rest = " ".join(JS_DECL.sub(" ", code).split())
+        return decls + [s.strip() for s in re.split(r"[;{}]", rest) if s.strip()]
     if rel.endswith(SEMI):
         flat = " ".join(_strip_c_comments(text).split())
         flat = re.sub(r"\s*\.\s*", ".", flat)            # `a . b` is `a.b` in these languages
@@ -240,7 +254,8 @@ def scan(repo: str, rules: list, renames: dict = None) -> dict:
                     out[k] = out.get(k, 0) + 1
             for r in others:
                 if r["_deny"].search(stmt):
-                    outside.setdefault(r["id"], set()).add(stmt)
+                    # same statement form as an identity (long ones carry the digest — Codex F.10a R3)
+                    outside.setdefault(r["id"], set()).add(identity(r["id"], "", stmt).split("|", 2)[2])
     renames_out = []
     for old, new in (renames or {}).items():
         for r in rules:

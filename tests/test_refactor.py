@@ -253,6 +253,29 @@ class Round2Test(RatchetRungTest):
         found = [k for k in R.scan(self.repo, rules)["violations"] if "K.kt" in k]
         self.assertEqual(found, ["web-no-repo|" + J + "web/K.kt|import com.acme.repository.X"])
 
+    def test_js_ts_named_and_semicolonless_imports(self):                    # Codex F.10a R3
+        rules = R.parse_rules(json.dumps({"rules": [{"id": "ui-no-repo", "files": r"\.tsx?$",
+                                                     "deny": r"^import\b.*repository"}]}))
+        self.write("web/app.ts", 'import { Repo, Other } from "./repository"\nimport type {X} from \'../repository/x\';\n'
+                   "export function f() { return 1 }\n")
+        git(self.repo, "add", "-A")
+        found = sorted(k.split("|", 2)[2] for k in R.scan(self.repo, rules)["violations"])
+        self.assertEqual(found, ['import type {X} from \'../repository/x\'', 'import { Repo, Other } from "./repository"'])
+
+    def test_long_statement_moved_out_is_caught(self):                       # Codex F.10a R3
+        long_import = "import com.acme.repository." + ".".join(["sub"] * 120) + ".Thing;"
+        self.write(J + "web/LongController.java", "package com.acme.web;\n" + long_import + "\n")
+        self.commit("long violation")
+        RF.ratchet("init", self.repo)
+        self.commit("baseline")
+        git(self.repo, "checkout", "-qb", "feat/long")
+        os.remove(os.path.join(self.repo, J + "web/LongController.java"))
+        self.write(J + "other/Elsewhere.java", "package com.acme.other;\n" + long_import + "\nclass E {}\n" * 30)
+        self.commit("move + rewrite")
+        res = self.run_rung()
+        self.assertEqual((res["passed"], res["fixable"]), (False, False))
+        self.assertIn("moved out", res["summary"])
+
     def test_legacy_baseline_keys_still_match(self):
         RF.ratchet("init", self.repo)
         bl = json.load(open(os.path.join(self.repo, R.BASELINE_FILE)))
