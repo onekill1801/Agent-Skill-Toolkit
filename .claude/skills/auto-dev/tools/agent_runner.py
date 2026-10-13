@@ -215,6 +215,55 @@ def _run_cli(prompt, system, backend, model, cmd_template, prompt_via, timeout,
     return out
 
 
+def _post_with_deadline(url: str, body: bytes, headers: dict, seconds: float) -> tuple:
+    """POST with an OVERALL deadline that really stops the request: a watchdog closes the socket at
+    the deadline, which aborts a blocked connect / a slowly dripping response (urlopen's timeout is
+    per socket operation only — Codex F.11 R2/R3). Returns (status, headers, body)."""
+    import http.client
+    import socket
+    import ssl
+    import threading
+    u = urllib.parse.urlsplit(url)
+    if u.scheme == "https":
+        conn = http.client.HTTPSConnection(u.hostname, u.port, timeout=seconds, context=ssl.create_default_context())
+    else:
+        conn = http.client.HTTPConnection(u.hostname, u.port, timeout=seconds)
+    expired, held = threading.Event(), {}
+
+    def abort():
+        expired.set()
+        # the socket captured at connect time: http.client may drop conn.sock once the response
+        # starts (HTTP/1.0, Connection: close) while the response still reads from it
+        for sock in (held.get("sock"), conn.sock):
+            try:
+                if sock:
+                    sock.shutdown(socket.SHUT_RDWR)
+                    sock.close()
+            except OSError:
+                pass
+        conn.close()
+    dog = threading.Timer(seconds, abort)
+    dog.daemon = True
+    dog.start()
+    try:
+        path = (u.path or "/") + (f"?{u.query}" if u.query else "")
+        conn.connect()
+        held["sock"] = conn.sock
+        conn.request("POST", path, body=body, headers=headers)
+        resp = conn.getresponse()
+        data = resp.read()
+        if expired.is_set():                       # read returned (short) because we cut it
+            raise OSError("cancelled")
+        return resp.status, {k.lower(): v for k, v in resp.getheaders()}, data
+    except (OSError, http.client.HTTPException) as e:
+        if expired.is_set():
+            raise AgentRunError(f"API turn exceeded its {seconds:.0f}s deadline (cancelled)")
+        raise AgentRunError(f"network error calling Claude API: {e}")
+    finally:
+        dog.cancel()
+        conn.close()
+
+
 def _run_api(prompt, system, model, max_tokens, timeout) -> str:
     api_key = config.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -225,20 +274,17 @@ def _run_api(prompt, system, model, max_tokens, timeout) -> str:
                "messages": [{"role": "user", "content": prompt}]}
     if system:
         payload["system"] = system
-    req = urllib.request.Request(base_url.rstrip("/") + "/v1/messages",
-                                 data=json.dumps(payload).encode("utf-8"), method="POST")
-    req.add_header("content-type", "application/json")
-    req.add_header("x-api-key", api_key)
-    req.add_header("anthropic-version", ANTHROPIC_VERSION)
+    headers = {"content-type": "application/json", "x-api-key": api_key, "anthropic-version": ANTHROPIC_VERSION}
+    status, rheaders, raw = _post_with_deadline(base_url.rstrip("/") + "/v1/messages",
+                                                json.dumps(payload).encode("utf-8"), headers, float(timeout))
+    if status >= 400:
+        body = raw.decode("utf-8", "replace")[:400]
+        hint = f" retry-after: {rheaders.get('retry-after')}" if rheaders.get("retry-after") else ""
+        raise _cli_failure(f"Claude API HTTP {status}: {body}", f"HTTP {status} {body}{hint}")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", "replace")[:400]
-        hint = f" retry-after: {e.headers.get('retry-after')}" if e.headers.get("retry-after") else ""
-        raise _cli_failure(f"Claude API HTTP {e.code}: {body}", f"HTTP {e.code} {body}{hint}")
-    except urllib.error.URLError as e:
-        raise AgentRunError(f"network error calling Claude API: {e.reason}")
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        raise AgentRunError(f"Claude API returned non-JSON: {raw[:200]!r}")
     if data.get("stop_reason") == "refusal":
         raise AgentRunError(f"model refusal: {data.get('stop_details')}")
     parts = [b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"]
@@ -256,27 +302,6 @@ def _effective_model(backend: str, model: str, cmd_template: str) -> str:
     if cmd_template or backend not in CLI_PRESETS:
         return model or ""
     return model or CLI_PRESETS[backend]["default_model"] or ""
-
-
-def _with_deadline(fn, seconds: float):
-    """Run fn with an OVERALL deadline (connect + a slowly dripping response): urlopen's timeout is per
-    socket operation only (Codex F.11 R2). On expiry the call is abandoned (daemon thread)."""
-    import threading
-    box = {}
-
-    def go():
-        try:
-            box["ok"] = fn()
-        except BaseException as e:  # noqa: BLE001
-            box["err"] = e
-    t = threading.Thread(target=go, daemon=True)
-    t.start()
-    t.join(seconds)
-    if t.is_alive():
-        raise AgentRunError(f"API turn exceeded its {seconds:.0f}s deadline")
-    if "err" in box:
-        raise box["err"]
-    return box["ok"]
 
 
 def _charged_turn(backend, model, role, timeout, notes, fn):
@@ -331,7 +356,7 @@ def run_turn(prompt: str, *, system: str = None, backend: str = "claude",
     eff = _effective_model(backend, model, cmd_template)
     if backend == "api":
         return _charged_turn(backend, eff, role, timeout, notes,
-                             lambda m, t: _with_deadline(lambda: _run_api(prompt, system, m, max_tokens, t), t))
+                             lambda m, t: _run_api(prompt, system, m, max_tokens, t))
     return _charged_turn(backend, eff, role, timeout, notes,
                          lambda m, t: _run_cli(prompt, system, backend, m, cmd_template, prompt_via, t,
                                                cwd=cwd, env_extra=env_extra))

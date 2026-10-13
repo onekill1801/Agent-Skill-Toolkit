@@ -159,15 +159,50 @@ class TurnBudgetTest(Base):
                 self.ar.run_turn("p", backend="claude", model="sonnet", timeout=600)
         self.assertEqual(seen, [12.5])
 
-    def test_api_turn_has_an_overall_deadline(self):
-        def slow(*a, **k):
-            time.sleep(3)
-            return "late"
-        with mock.patch.object(self.ar, "_run_api", side_effect=slow):
-            t0 = time.time()
-            with self.assertRaises(self.ar.AgentRunError):
-                self.ar._with_deadline(lambda: self.ar._run_api(), 0.3)
-            self.assertLess(time.time() - t0, 2)
+    def test_api_turn_is_cancelled_at_its_deadline(self):                  # Codex F.11 R3
+        """A server that drips its answer slowly: the request is aborted (socket closed) at the deadline,
+        the call returns then, and the server sees the connection drop."""
+        import http.server
+        import threading
+        dropped = threading.Event()
+
+        class Drip(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["content-length"]))
+                self.send_response(200)
+                self.send_header("content-length", "100")
+                self.end_headers()
+                try:
+                    for _ in range(100):
+                        self.wfile.write(b" ")
+                        self.wfile.flush()
+                        time.sleep(0.1)          # each byte well within a socket timeout
+                except OSError:
+                    dropped.set()
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Drip)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            t0 = time.monotonic()
+            with self.assertRaises(self.ar.AgentRunError) as e:
+                self.ar._post_with_deadline(f"http://127.0.0.1:{srv.server_address[1]}/v1/messages", b"{}",
+                                            {"content-type": "application/json"}, 0.8)
+            took = time.monotonic() - t0
+            self.assertIn("deadline", str(e.exception))
+            self.assertLess(took, 2.5)
+            self.assertTrue(dropped.wait(5))
+        finally:
+            srv.shutdown()
+
+    def test_subprocess_cannot_outlive_its_timeout(self):                   # Codex F.11 R3
+        import subprocess
+        from agent_skill_toolkit.core import proc
+        t0 = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            proc.run([sys.executable, "-c", "import time; time.sleep(0.35); print('done')"], timeout=0.15, poll=0.5)
+        self.assertLess(time.monotonic() - t0, 0.35)
 
     def test_role_routing_keeps_the_quota_type(self):                       # Codex F.11 R2
         from agent_skill_toolkit.workflows.execution import quota

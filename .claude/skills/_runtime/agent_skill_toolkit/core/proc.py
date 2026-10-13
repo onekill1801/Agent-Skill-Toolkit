@@ -43,17 +43,23 @@ def run(argv, *, input=None, timeout=None, cwd=None, env=None, should_stop=None,
     p = subprocess.Popen(argv, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
                          errors="replace", cwd=cwd, env=env, **popen_group_kwargs())
-    deadline = time.time() + timeout if timeout else None
+    # monotonic deadline; every wait is bounded by what is LEFT, so a process can never run past its
+    # timeout by up to one poll interval (budgets are reserved per turn — Codex F.11 R3)
+    deadline = time.monotonic() + timeout if timeout else None
     pending = input
     while True:
+        wait = poll
+        if deadline is not None:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                kill_tree(p)
+                raise subprocess.TimeoutExpired(argv, timeout)
+            wait = min(poll, left)
         try:
-            out, err = p.communicate(input=pending, timeout=poll)
+            out, err = p.communicate(input=pending, timeout=wait)
             return subprocess.CompletedProcess(argv, p.returncode, out, err)
         except subprocess.TimeoutExpired:
             pending = None
             if should_stop and should_stop():
                 kill_tree(p)
                 raise InterruptedError(f"{argv[0]} stopped")
-            if deadline and time.time() > deadline:
-                kill_tree(p)
-                raise subprocess.TimeoutExpired(argv, timeout)
