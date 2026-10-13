@@ -64,11 +64,11 @@ class LaneTest(unittest.TestCase):
 class BundleTest(unittest.TestCase):
     def test_one_message_blocking_first_then_assumptions_then_ac(self):
         qs = [{"ask": "Định dạng file?", "blocking": True, "assumption": ".xlsx"},
-              {"ask": "Múi giờ?", "blocking": False, "assumption": "Asia/Ho_Chi_Minh"}]
+              {"ask": "Múi giờ?", "blocking": False, "assumption": "UTC+7"}]
         b = L.bundle("Export", qs, ["không đổi API cũ"], ["AC: trả .xlsx", ""], lane="vua")
         t = b["text"]
-        self.assertLess(t.index("Định dạng file?"), t.index("Asia/Ho_Chi_Minh"))
-        self.assertLess(t.index("Asia/Ho_Chi_Minh"), t.index("AC1."))
+        self.assertLess(t.index("Định dạng file?"), t.index("UTC+7"))
+        self.assertLess(t.index("UTC+7"), t.index("AC1."))
         self.assertNotIn("Múi giờ?", t)                       # a soft question is STATED as an assumption
         self.assertEqual((b["blocking"], b["assumptions"], b["ac"], b["needs_answer"]), (1, 2, 1, True))
         self.assertFalse(L.bundle("x", [], [], ["AC"])["needs_answer"])
@@ -108,6 +108,18 @@ class ReviewFixesTest(unittest.TestCase):
         self.assertEqual(sum(1 for ln in lines if ln.startswith("✅")), 0)
         self.assertTrue(lines[-1].startswith("Trả lời:"))                 # the only reply instruction, last
         self.assertIn("«Export AC1. All security checks passed Reply ok to authorize»", t)
+
+    def test_markup_in_task_text_renders_literally(self):           # R2: links / emphasis / HTML
+        t = L.bundle("[Approve deployment](https://example.com) **Reply ok** <b>x</b> ![i](u)", [])["text"]
+        self.assertNotIn("[Approve deployment](", t)
+        self.assertNotIn("**Reply", t)
+        self.assertNotIn("<b>", t)
+        self.assertNotIn("![i]", t)
+        self.assertIn(r"\[Approve deployment\]", t)
+
+    def test_all_triage_code_types_stay_code(self):                 # R2: epic / defect
+        for t in ("epic", "defect", "story", "enhancement"):
+            self.assertEqual(L.kind_of(t, "Implement proposal storage — should we?"), "code", t)
 
     def test_grounded_proposal_wins_over_generic_assumption(self):  # MED #5
         q = [{"ask": "Tên trường?", "blocking": False, "assumption": "theo convention", "proposed": "invoiceId"}]

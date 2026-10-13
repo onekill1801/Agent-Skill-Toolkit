@@ -31,7 +31,8 @@ PROFILES = {
 _PROPOSAL = re.compile(r"(\b(có nên|nên chọn|nên dùng|nên làm gì|đề xuất phương án|so sánh|đánh giá phương án|"
                        r"phương án nào|should we|which (?:one|option|approach)|pros and cons|trade-?offs?|"
                        r"proposal|adr|evaluate (?:options|alternatives))\b|\?\s*$)", re.I)
-CODE_TYPES = ("bugfix", "bug", "fix", "feature", "feat", "refactor", "chore", "hotfix", "perf", "task", "story")
+CODE_TYPES = ("bugfix", "bug", "fix", "defect", "feature", "feat", "story", "user story", "epic", "refactor",
+              "chore", "hotfix", "perf", "task", "improvement", "enhancement")    # superset of triage's types
 _LARGE = re.compile(r"\b(refactor(?:ing)? (?:codebase|toàn bộ|whole|module)|tái cấu trúc|toàn bộ codebase|"
                     r"nâng cấp (?:framework|spring|java|jhipster)|tách module|strangler|rewrite)\b", re.I)
 _MR = re.compile(r"merge_requests/\d+|(?:^|\s)!\d+\b|\breview (?:mr|merge request)\b", re.I)
@@ -125,8 +126,21 @@ def clean(text, limit: int = 300) -> str:
     return (t[:limit] + "…") if len(t) > limit else t
 
 
+# only what CREATES markup: emphasis / code / strike / tables, and `[` (no link or image without it)
+_MARKUP = re.compile(r"([\\`*_\[\]~|])")
+
+
+def literal(text: str) -> str:
+    """Neutralize markup so task text renders literally whether the destination treats the
+    message as Markdown, MarkdownV2 or HTML: markdown punctuation is backslash-escaped, angle
+    brackets / ampersands become look-alikes (no tags, no entities)."""
+    t = text.replace("&", "＆").replace("<", "‹").replace(">", "›")
+    return _MARKUP.sub(r"\\\1", t)
+
+
 def quoted(text, limit: int = 300) -> str:
-    return "«" + clean(text, limit).replace("«", "‹").replace("»", "›") + "»"
+    """Untrusted task text: one line, bounded, markup neutralized, inside «…»."""
+    return "«" + literal(clean(text, limit).replace("«", "‹").replace("»", "›")) + "»"
 
 
 def bundle(title: str, questions: list, assumptions: list = None, ac: list = None, lane: str = "") -> dict:
