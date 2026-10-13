@@ -58,10 +58,14 @@ def accept(task_id: str, lane: str = "") -> dict:
         t = st.get(task_id)
         if not t or t["kind"] != atask_flow.KIND:
             raise ValueError(f"{task_id} is not an {atask_flow.KIND} task")
-        if t["status"] != "blocked":
-            raise ValueError(f"{task_id} is {t['status']} — only a blocked proposal can be accepted")
+        if t["status"] != "blocked" or not str(t.get("last_error") or "").startswith(atask_flow.PROPOSAL):
+            # blocked for another reason (dependency, bad data, ...) is NOT a proposal (Codex F.7 #5)
+            raise ValueError(f"{task_id} is not waiting for a decision on a proposal "
+                             f"(status {t['status']}, step {t.get('step') or '-'})")
         tri = next((c["data"] for c in reversed(st.checkpoints(task_id, valid_only=True))
                     if c["step"] == "triage"), {})
+        if not tri.get("kind"):
+            raise ValueError(f"{task_id} has no triage result — cannot accept")
         lane = lane or tri.get("lane") or ""
         if lane and lane not in ("nho", "vua", "lon", "de_xuat"):
             raise ValueError("lane must be nho|vua|lon|de_xuat")

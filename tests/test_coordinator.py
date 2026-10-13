@@ -31,7 +31,7 @@ class Base(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="coord-")
         self.db = os.path.join(self.tmp, "t.db")
         mock.patch.dict(os.environ, {"TOOLKIT_STORE": self.db, "TOOLKIT_STATE_DIR": self.tmp,
-                                     "WORK_DIR": self.tmp}).start()
+                                     "WORK_DIR": self.tmp, "TOOLKIT_MAX_PARALLEL": "0"}).start()
 
     def tearDown(self):
         mock.patch.stopall()
@@ -224,3 +224,92 @@ class AtaskProposalTest(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CoordinatorRound1FixesTest(Base):
+    """Codex F.7 round 1."""
+
+    def test_gitlab_project_scope_is_per_thread(self):                       # #1
+        sys.path.insert(0, os.path.join(_ROOT, ".claude", "skills", "dev-automation", "tools"))
+        import gitlab_api
+        seen, gate = {}, threading.Barrier(2)
+        before = os.environ.get("GITLAB_PROJECT_ID")
+
+        def worker(pid):
+            with gitlab_api.project_scope(pid):
+                gate.wait()
+                time.sleep(0.05)
+                seen[pid] = gitlab_api._project_id()
+        ts = [threading.Thread(target=worker, args=(p,)) for p in ("11", "22")]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        self.assertEqual(seen, {"11": "11", "22": "22"})
+        self.assertEqual(os.environ.get("GITLAB_PROJECT_ID"), before)
+
+    def test_default_capacity_applies_to_every_caller(self):                 # #4
+        with mock.patch.dict(os.environ, {"TOOLKIT_MAX_PARALLEL": "2"}):
+            with S.Store() as st:
+                for r in "abc":
+                    st.add("k", r)
+                self.assertTrue(st.claim("w"))
+                self.assertTrue(st.claim("w"))
+                self.assertEqual(st.claim("w"), {})                          # no max_running passed
+                self.assertEqual(st.claim("w", max_running=5), {})           # a caller can't raise it
+
+    def test_failure_propagates_down_a_chain(self):                          # #6
+        with S.Store() as st:
+            a = st.add("k", "a", max_attempts=1)
+            b = st.add("k", "b", depends_on=[a["id"]])
+            c = st.add("k", "c", depends_on=[b["id"]])
+            st.fail(a["id"], st.claim("w")["lease_token"], "boom")
+            self.assertEqual(sorted(st.block_orphans()), sorted([b["id"], c["id"]]))
+            self.assertTrue(st.get(c["id"])["last_error"].startswith(S.DEP_BLOCK))
+
+    def test_accept_only_a_real_proposal(self):                              # #5
+        import coordinator as cf
+        with S.Store() as st:
+            a = st.add("k", "a", max_attempts=1)
+            t = st.add(atask_flow.KIND, "T9@open", depends_on=[a["id"]], data={"atask": {"name": "x"}})
+            st.fail(a["id"], st.claim("w", kinds=("k",))["lease_token"], "boom")
+            st.block_orphans()
+        with self.assertRaises(ValueError):
+            cf.accept(t["id"])
+        with S.Store() as st:
+            self.assertEqual(st.get(t["id"])["status"], "blocked")
+
+    def test_board_keeps_old_open_tasks_and_grandchildren(self):            # #7
+        with S.Store() as st:
+            st.add("k", "old-open", title="việc cũ còn mở", priority=9)
+            for i in range(30):                                  # 30 newer tasks finished after it
+                st.add("k", f"done{i}", priority=0)
+                got = st.claim("w", kinds=("k",))
+                self.assertEqual(got["ref"], f"done{i}")
+                st.complete(got["id"], got["lease_token"])
+            root = st.add("request", "R", title="chương trình")
+            mid = st.add("k", "M", title="đợt 1", parent=root["id"])
+            st.add("k", "L", title="lát cắt 1.1", parent=mid["id"])
+            b = C.board(st, limit=5)
+        self.assertIn("việc cũ còn mở", b["text"])
+        self.assertIn("    ⏳", b["text"])                                    # grandchild, depth 2
+        self.assertIn("lát cắt 1.1", b["text"])
+
+    def test_legacy_verify_task_without_resource(self):                     # #3
+        import verify
+        repo = tempfile.mkdtemp(prefix="repo-")
+        with S.Store() as st:
+            idle = st.add(verify.L.KIND, f"{repo}@a", data={"repo": repo})
+            running = st.add(verify.L.KIND, f"{repo}@b", data={"repo": repo})
+            st.claim("old-worker", kinds=(verify.L.KIND,))           # whichever comes first is now running
+            with self.assertRaises(ValueError):
+                verify._upgrade_legacy(st, repo)
+            with self.assertRaises(ValueError):
+                verify._steps(st.get(idle["id"]))
+        with S.Store() as st:
+            for t in (idle, running):
+                if st.get(t["id"])["status"] == "running":
+                    st.cancel(t["id"])
+            verify._upgrade_legacy(st, repo)
+            left = [st.get(t["id"]) for t in (idle, running) if st.get(t["id"])["status"] != "cancelled"]
+            self.assertEqual([x["resource"] for x in left], [verify.resource_of(repo)])

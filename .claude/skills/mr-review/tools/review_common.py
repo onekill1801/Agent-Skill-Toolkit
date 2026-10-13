@@ -168,16 +168,10 @@ def log_event(job: dict, event: str, **detail) -> None:
 
 @contextlib.contextmanager
 def gitlab_project(project_id):
-    """gitlab_api reads GITLAB_PROJECT_ID per call; scope it to one project."""
-    old = os.environ.get("GITLAB_PROJECT_ID")
-    os.environ["GITLAB_PROJECT_ID"] = str(project_id)
-    try:
+    """Scope gitlab_api calls of THIS thread to one project (thread-local, never os.environ:
+    parallel coordinator workers review different projects at once — Codex F.7 #1)."""
+    with gitlab_api.project_scope(project_id):
         yield gitlab_api
-    finally:
-        if old is None:
-            os.environ.pop("GITLAB_PROJECT_ID", None)
-        else:
-            os.environ["GITLAB_PROJECT_ID"] = old
 
 
 def gl_check(res, what: str):

@@ -31,6 +31,15 @@ OPEN = ("queued", "running", "paused_quota", "blocked")
 CLOSED = ("done", "failed", "cancelled")
 DEFAULT_LEASE_S = 900
 
+
+def max_running_default() -> int:
+    """ONE capacity policy for every worker entry point (coordinator, review_flow work, verify work):
+    TOOLKIT_MAX_PARALLEL live tasks at most, all kinds, all processes (0 = no cap). Default 2."""
+    try:
+        return max(0, int(os.environ.get("TOOLKIT_MAX_PARALLEL", "2")))
+    except ValueError:
+        return 2
+
 SCHEMA = """
 create table if not exists tasks (
   id text primary key, kind text not null, ref text not null, title text default '',
@@ -56,6 +65,9 @@ create table if not exists usage (
 # columns added after the first release of the schema (ALTER for existing databases)
 _MIGRATIONS = {"tasks": {"lease_token": "text", "resource": "text", "parent": "text"},
                "checkpoints": {"input_key": "text", "valid": "integer default 1"}}
+
+
+DEP_BLOCK = "dependency "     # last_error prefix of a task blocked because a dependency cannot finish
 
 
 class LeaseLost(Exception):
@@ -177,12 +189,15 @@ class Store:
         """Atomically take the next runnable task: queued, paused_quota whose time has come,
         or running with an expired lease (crashed holder). Highest priority (lowest number) first.
         Skipped: tasks with a dependency not DONE yet, and tasks whose `resource` is held by another
-        live task. max_running > 0 = global cap on live tasks (all kinds, all processes).
+        live task. Capacity: at most min(max_running, TOOLKIT_MAX_PARALLEL) live tasks in total
+        (all kinds, all processes) — a caller can only make it stricter.
         The returned task carries `lease_token` — pass it to every later call."""
         now = time.time()
         kind_sql = f" and t.kind in ({','.join('?' * len(kinds))})" if kinds else ""
+        caps = [c for c in (max_running, max_running_default()) if c]
+        cap = min(caps) if caps else 0
         with self._tx():
-            if max_running and self.running_count() >= max_running:
+            if cap and self.running_count() >= cap:
                 return {}
             r = self.db.execute(
                 "select * from tasks t where ("
@@ -222,9 +237,12 @@ class Store:
             return False
 
     def heartbeat(self, task_id: str, lease: str, lease_s: int = DEFAULT_LEASE_S):
-        """Extend the lease. Allowed just after expiry as long as nobody re-claimed (same token)."""
+        """Extend a LIVE lease. An expired lease is never revived, even if nobody re-claimed yet:
+        meanwhile another task may have taken its resource / capacity slot (Codex F.7 #2) — the
+        holder gets LeaseLost, stops (ctx.run kills its subprocess) and the task is claimed again
+        through the normal checks."""
         with self._tx():
-            self._held(task_id, lease, allow_expired=True)
+            self._held(task_id, lease)
             self.db.execute("update tasks set lease_until=?, updated=? where id=?",
                             (time.time() + lease_s, time.time(), task_id))
 
@@ -335,6 +353,15 @@ class Store:
                 self._event(task_id, "resolved", status=status, by=by, note=note or None)
         return bool(n)
 
+    def set_resource(self, task_id: str, resource: str) -> bool:
+        """Give a not-running task its exclusive key (upgrade of a task created before `resource`)."""
+        with self._tx():
+            n = self.db.execute("update tasks set resource=?, updated=? where id=? and status!='running' "
+                                "and coalesce(resource,'')=''", (resource, time.time(), task_id)).rowcount
+            if n:
+                self._event(task_id, "resource_set", resource=resource)
+        return bool(n)
+
     def deps_of(self, task_id: str) -> list:
         return [r["depends_on"] for r in self.db.execute("select depends_on from deps where task_id=?", (task_id,))]
 
@@ -346,19 +373,23 @@ class Store:
         blocked (a human re-plans) instead of waiting forever. Returns the ids blocked."""
         out = []
         with self._tx():
-            rows = self.db.execute(
-                "select t.id, x.id dep, x.status dst from tasks t join deps d on d.task_id=t.id "
-                "join tasks x on x.id=d.depends_on where t.status in ('queued','paused_quota') "
-                "and x.status in ('failed','cancelled')").fetchall()
-            for r in rows:
-                if r["id"] in out:
-                    continue
-                why = f"dependency {r['dep']} is {r['dst']}"
-                self.db.execute("update tasks set status='blocked', last_error=?, updated=? where id=? "
-                                "and status in ('queued','paused_quota')", (why, time.time(), r["id"]))
-                self._event(r["id"], "blocked", error=why)
-                out.append(r["id"])
-        return out
+            while True:                  # to a fixpoint: A fails -> B blocked -> C blocked -> ...
+                rows = self.db.execute(
+                    "select t.id, x.id dep, x.status dst from tasks t join deps d on d.task_id=t.id "
+                    "join tasks x on x.id=d.depends_on where t.status in ('queued','paused_quota') "
+                    "and (x.status in ('failed','cancelled') or (x.status='blocked' and x.last_error like ?))",
+                    (DEP_BLOCK + "%",)).fetchall()
+                fresh = [r for r in rows if r["id"] not in out]
+                if not fresh:
+                    return out
+                for r in fresh:
+                    if r["id"] in out:
+                        continue
+                    why = f"{DEP_BLOCK}{r['dep']} is {r['dst']}"
+                    self.db.execute("update tasks set status='blocked', last_error=?, updated=? where id=? "
+                                    "and status in ('queued','paused_quota')", (why, time.time(), r["id"]))
+                    self._event(r["id"], "blocked", error=why)
+                    out.append(r["id"])
 
     def cancel(self, task_id: str, by: str = ""):
         with self._tx():

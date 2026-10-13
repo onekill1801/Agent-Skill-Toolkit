@@ -31,7 +31,33 @@ from agent_skill_toolkit.workflows.verify import ladder as L  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "dev-automation", "tools"))
 import probe_common as pc  # noqa: E402,F401  (UTF-8 stdout on Windows)
 
-REGISTRY = {L.KIND: lambda task: L.steps_for(task["data"])}
+def resource_of(repo: str) -> str:
+    # one working tree: two branches of the same checkout must never verify at once
+    return "repo:" + os.path.normcase(os.path.realpath(repo))
+
+
+def _steps(task):
+    if not task.get("resource"):
+        # created before `resource` existed: it could run next to another task on the same checkout
+        raise ValueError("verify task without a resource (created by an older version) — run "
+                         "`verify.py start` again for this repo to upgrade it")
+    return L.steps_for(task["data"])
+
+
+REGISTRY = {L.KIND: _steps}
+
+
+def _upgrade_legacy(st, repo: str) -> None:
+    """Open verify tasks of this checkout created before `resource` (Codex F.7 #3): give the idle ones
+    the key; refuse to add work while one of them is RUNNING without it."""
+    key = resource_of(repo)
+    for t in st.list(store_mod.OPEN, L.KIND, 500):
+        if t.get("resource") or resource_of(t["data"].get("repo") or "") != key:
+            continue
+        if t["status"] == "running":
+            raise ValueError(f"verify task {t['id']} (older version, no resource lock) is running on this "
+                             "checkout — wait for it or cancel it first")
+        st.set_resource(t["id"], key)
 
 
 def parse_acs(items: list) -> list:
@@ -72,13 +98,12 @@ def start(repo: str, base: str, spec: str, fixer_role: str, allow_default: bool,
     except E.NeedsHuman as e:
         raise PermissionError(str(e))
     with store_mod.Store() as st:
+        _upgrade_legacy(st, repo)
         t = st.add(L.KIND, f"{repo}@{br}", title=f"verify {os.path.basename(repo)}@{br}",
                    data={"repo": repo, "branch": br, "base": resolved, "allow_default": bool(allow_default),
                          "acs": acs or [],
                          "spec_file": os.path.abspath(spec) if spec else "", "fixer_role": fixer_role},
-                   max_attempts=3,
-                   # one working tree: two branches of the same checkout must never verify at once
-                   resource="repo:" + os.path.normcase(os.path.realpath(repo)))
+                   max_attempts=3, resource=resource_of(repo))
         if t["duplicate"] and (t["data"].get("acs") or []) != (acs or []):
             # an open task for this branch has DIFFERENT ACs: never drop the new ones silently (F.3 #4)
             if not update_acs:

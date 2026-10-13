@@ -44,7 +44,8 @@ class _Tmp(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="store-test-")
         self.env = mock.patch.dict(os.environ, {"TOOLKIT_STATE_DIR": self.dir,
-                                                "TOOLKIT_STORE": os.path.join(self.dir, "t.db")})
+                                                "TOOLKIT_STORE": os.path.join(self.dir, "t.db"),
+                                                "TOOLKIT_MAX_PARALLEL": "0"})
         self.env.start()
         self.st = S.Store()
 
@@ -92,8 +93,10 @@ class StoreTest(_Tmp):
         with mock.patch("time.time", return_value=time.time() + 5):
             with self.assertRaises(S.LeaseLost):
                 self.st.checkpoint(t["id"], tok, "x")
-            self.st.heartbeat(t["id"], tok)                       # nobody re-claimed: may renew
-            self.st.checkpoint(t["id"], tok, "x")
+            # never revived (Codex F.7 #2): its slot / resource may already be someone else's
+            with self.assertRaises(S.LeaseLost):
+                self.st.heartbeat(t["id"], tok)
+            self.assertEqual(self.st.claim("w2")["id"], t["id"])   # re-claimed through the normal checks
 
     def test_quota_pause_keeps_attempts_and_waits(self):
         t = self.st.add("k", "r")

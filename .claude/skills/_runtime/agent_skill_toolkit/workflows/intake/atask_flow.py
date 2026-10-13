@@ -14,6 +14,7 @@ from agent_skill_toolkit.workflows import engine as E
 from agent_skill_toolkit.workflows.intake import lanes
 
 KIND = "atask_intake"
+PROPOSAL = "proposal: "      # last_error prefix of a task waiting for your decision
 
 
 def step_triage(ctx) -> dict:
@@ -27,7 +28,7 @@ def step_triage(ctx) -> dict:
 
 def step_propose(ctx) -> dict:
     t = ctx.outputs.get("triage") or {}
-    raise E.NeedsHuman(f"proposal: {t.get('kind')} / lane {t.get('lane') or '-'} ({t.get('reason')}) for "
+    raise E.NeedsHuman(f"{PROPOSAL}{t.get('kind')} / lane {t.get('lane') or '-'} ({t.get('reason')}) for "
                        f"{lanes.quoted(t.get('title') or '', 120)} — accept: coordinator.py accept "
                        f"{ctx.task['id']} [--lane nho|vua|lon|de_xuat], or cancel it")
 

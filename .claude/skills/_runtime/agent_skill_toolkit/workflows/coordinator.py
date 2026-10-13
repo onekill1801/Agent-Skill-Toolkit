@@ -115,20 +115,37 @@ def _row(st, t: dict) -> dict:
 def board(st, include_closed_hours: float = 24, limit: int = 200) -> dict:
     """Open tasks + those closed in the last N hours, grouped under their parent."""
     since = time.time() - include_closed_hours * 3600
-    rows = [_row(st, t) for t in st.list(limit=limit)
-            if t["status"] in store_mod.OPEN or (t.get("updated") or 0) >= since]
+    # every OPEN task is shown (never pushed out by many recent closed ones — Codex F.7 #7); closed
+    # ones only from the last N hours, newest first, up to `limit`
+    open_rows = st.db.execute(f"select id from tasks where status in ({','.join('?' * len(store_mod.OPEN))})",
+                              store_mod.OPEN).fetchall()
+    closed_rows = st.db.execute(
+        f"select id from tasks where status in ({','.join('?' * len(store_mod.CLOSED))}) and updated>=? "
+        "order by updated desc limit ?", (*store_mod.CLOSED, since, limit)).fetchall()
+    tasks = {r["id"]: st.get(r["id"]) for r in [*open_rows, *closed_rows]}
+    rows = [_row(st, t) for t in tasks.values()]
     by_id = {r["id"]: r for r in rows}
     roots = [r for r in rows if not r["parent"] or r["parent"] not in by_id]
     kids = {}
     for r in rows:
         if r["parent"] and r["parent"] in by_id:
             kids.setdefault(r["parent"], []).append(r)
-    lines = []
+    lines, seen = [], set()
+
+    def emit(r, depth):
+        if r["id"] in seen:                              # defensive: a parent cycle never loops
+            return
+        seen.add(r["id"])
+        everyone = st.children(r["id"])                  # progress from ALL children, shown or not
+        pct = (f"  {round(100 * sum(c['status'] == 'done' for c in everyone) / len(everyone))}%"
+               if everyone else "")
+        lines.append("  " * depth + _line(r) + pct)
+        order = [c["id"] for c in everyone]              # creation order = plan order
+        for c in sorted(kids.get(r["id"], []), key=lambda x: order.index(x["id"]) if x["id"] in order else 0):
+            emit(c, depth + 1)
+
     for r in sorted(roots, key=lambda x: (x["status"] in store_mod.CLOSED, x["id"])):
-        ch = kids.get(r["id"], [])
-        pct = f"  {round(100 * sum(c['status'] == 'done' for c in ch) / len(ch))}%" if ch else ""
-        lines.append(_line(r) + pct)
-        lines += ["  " + _line(c) for c in ch]
+        emit(r, 0)
     summary = st.summary()
     head = " · ".join(f"{ICON.get(k, k)} {k} {v}" for k, v in sorted(summary["counts"].items()))
     return {"summary": summary, "rows": rows, "text": "\n".join([head or "(trống)", ""] + lines)}
