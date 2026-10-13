@@ -89,10 +89,12 @@ class StoreSchedulingTest(Base):
         with S.Store() as st:
             for r in "abc":
                 st.add("k", r)
-            self.assertTrue(st.claim("w", max_running=2))
-            self.assertTrue(st.claim("w", max_running=2))
-            self.assertEqual(st.claim("w", max_running=2), {})
-            self.assertTrue(st.claim("w"))                            # no cap
+            st.set_capacity(2)
+            self.assertTrue(st.claim("w"))
+            self.assertTrue(st.claim("w"))
+            self.assertEqual(st.claim("w"), {})
+            st.set_capacity(0)                                        # no cap
+            self.assertTrue(st.claim("w"))
 
     def test_migration_adds_columns_to_an_old_database(self):
         import sqlite3
@@ -154,6 +156,7 @@ class CoordinatorRunTest(Base):
         order = []
         with S.Store() as st:
             st.add("other", "busy")
+            st.set_capacity(1)
             st.claim("someone-else")                 # running elsewhere, counts against the cap
             st.add("k", "a")
         out = C.Coordinator(self.registry(order), parallel=1).run(once=True)
@@ -249,14 +252,43 @@ class CoordinatorRound1FixesTest(Base):
         self.assertEqual(os.environ.get("GITLAB_PROJECT_ID"), before)
 
     def test_default_capacity_applies_to_every_caller(self):                 # #4
-        with mock.patch.dict(os.environ, {"TOOLKIT_MAX_PARALLEL": "2"}):
-            with S.Store() as st:
-                for r in "abc":
-                    st.add("k", r)
-                self.assertTrue(st.claim("w"))
-                self.assertTrue(st.claim("w"))
-                self.assertEqual(st.claim("w"), {})                          # no max_running passed
-                self.assertEqual(st.claim("w", max_running=5), {})           # a caller can't raise it
+        """Codex F.7 R2 #4: the cap lives in the database, not in each process's environment."""
+        with S.Store() as st:
+            st.set_capacity(2)
+            for r in "abc":
+                st.add("k", r)
+            self.assertTrue(st.claim("w"))
+        with mock.patch.dict(os.environ, {"TOOLKIT_MAX_PARALLEL": "50"}):   # another process, other env
+            with S.Store() as st2:
+                self.assertEqual(st2.capacity(), 2)
+                self.assertTrue(st2.claim("w2"))
+                self.assertEqual(st2.claim("w2"), {})
+        fresh = os.path.join(self.tmp, "fresh.db")
+        with mock.patch.dict(os.environ, {"TOOLKIT_MAX_PARALLEL": "3"}):
+            with S.Store(fresh) as st3:
+                self.assertEqual(st3.capacity(), 3)                         # initial value only
+
+    def test_accept_resolves_only_the_inspected_revision(self):             # R2 #5
+        with S.Store() as st:
+            t = st.add("k", "a")
+            st.block(t["id"], st.claim("w")["lease_token"], "proposal: x")
+            seen = st.get(t["id"])
+            time.sleep(0.01)
+            st.unblock(t["id"])
+            st.block(t["id"], st.claim("w")["lease_token"], "proposal: y")     # re-run, blocked again
+            self.assertFalse(st.resolve_blocked(t["id"], "done", if_updated=seen["updated"]))
+            self.assertFalse(st.resolve_blocked(t["id"], "done", if_error_prefix="dependency "))
+            self.assertTrue(st.resolve_blocked(t["id"], "done", if_updated=st.get(t["id"])["updated"],
+                                               if_error_prefix="proposal: "))
+
+    def test_running_legacy_task_keeps_keyed_tasks_of_its_kind_off(self):    # R2 #3
+        with S.Store() as st:
+            st.add("verify", "legacy")
+            st.claim("old", kinds=("verify",))                                # running, no resource
+            st.add("verify", "new", resource="repo:/x")
+            st.add("review_mr", "other", resource="mr:1")
+            self.assertEqual(st.claim("w", kinds=("verify",)), {})
+            self.assertEqual(st.claim("w")["ref"], "other")                   # other kinds unaffected
 
     def test_failure_propagates_down_a_chain(self):                          # #6
         with S.Store() as st:
@@ -304,6 +336,9 @@ class CoordinatorRound1FixesTest(Base):
             st.claim("old-worker", kinds=(verify.L.KIND,))           # whichever comes first is now running
             with self.assertRaises(ValueError):
                 verify._upgrade_legacy(st, repo)
+            out = verify._upgrade_legacy(st)                       # no repo: backfill only, never raises
+            self.assertEqual(len(out["running_without"]), 1)       # the idle one was keyed by the call above
+            self.assertEqual(sum(1 for t in (idle, running) if st.get(t["id"])["resource"]), 1)
             with self.assertRaises(ValueError):
                 verify._steps(st.get(idle["id"]))
         with S.Store() as st:

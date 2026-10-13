@@ -47,17 +47,15 @@ def _steps(task):
 REGISTRY = {L.KIND: _steps}
 
 
-def _upgrade_legacy(st, repo: str) -> None:
-    """Open verify tasks of this checkout created before `resource` (Codex F.7 #3): give the idle ones
-    the key; refuse to add work while one of them is RUNNING without it."""
-    key = resource_of(repo)
-    for t in st.list(store_mod.OPEN, L.KIND, 500):
-        if t.get("resource") or resource_of(t["data"].get("repo") or "") != key:
-            continue
-        if t["status"] == "running":
-            raise ValueError(f"verify task {t['id']} (older version, no resource lock) is running on this "
-                             "checkout — wait for it or cancel it first")
-        st.set_resource(t["id"], key)
+def _upgrade_legacy(st, repo: str = "") -> dict:
+    """Open verify tasks created before `resource` existed (Codex F.7 #3 / R2): ALL idle ones get
+    their checkout key in one transaction; a RUNNING one keeps keyed verify tasks off the floor
+    (store claim barrier) until it ends. With `repo`, refuse new work on that checkout meanwhile."""
+    out = st.backfill_resource(L.KIND, lambda d: resource_of(d["repo"]) if d.get("repo") else "")
+    if repo and out["running_without"]:
+        raise ValueError(f"verify task(s) {out['running_without']} from an older version (no resource lock) "
+                         "are running — wait for them or cancel them first")
+    return out
 
 
 def parse_acs(items: list) -> list:
@@ -125,6 +123,7 @@ def start(repo: str, base: str, spec: str, fixer_role: str, allow_default: bool,
 def work(owner: str, once: bool, interval: int) -> dict:
     ran = []
     with store_mod.Store() as st:
+        _upgrade_legacy(st)
         while True:
             res = E.work_once(st, owner, REGISTRY, lease_s=900)
             if res.get("status") != "idle":

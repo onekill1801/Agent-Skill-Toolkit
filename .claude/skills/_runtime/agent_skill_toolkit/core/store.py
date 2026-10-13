@@ -33,8 +33,8 @@ DEFAULT_LEASE_S = 900
 
 
 def max_running_default() -> int:
-    """ONE capacity policy for every worker entry point (coordinator, review_flow work, verify work):
-    TOOLKIT_MAX_PARALLEL live tasks at most, all kinds, all processes (0 = no cap). Default 2."""
+    """Initial value of the SHARED capacity (stored in the database on first open, then that stored
+    value is the only policy — see Store.capacity / set_capacity). 0 = no cap. Default 2."""
     try:
         return max(0, int(os.environ.get("TOOLKIT_MAX_PARALLEL", "2")))
     except ValueError:
@@ -58,6 +58,7 @@ create index if not exists ev_task on events(task_id, id);
 create table if not exists deps (
   task_id text not null, depends_on text not null, primary key (task_id, depends_on));
 create index if not exists deps_on on deps(depends_on);
+create table if not exists settings (key text primary key, value text);
 create table if not exists usage (
   id integer primary key autoincrement, task_id text, step text, backend text, model text,
   tokens_in integer, tokens_out integer, seconds real, ts real not null);
@@ -111,6 +112,9 @@ class Store:
                 for col, decl in cols.items():
                     if col not in have:
                         self.db.execute(f"alter table {table} add column {col} {decl}")
+            # ONE capacity policy per database, whatever the environment of the process (Codex F.7 R2 #4)
+            self.db.execute("insert or ignore into settings(key, value) values ('max_running', ?)",
+                            (str(max_running_default()),))
 
     def close(self):
         self.db.close()
@@ -181,22 +185,56 @@ class Store:
         q += " order by updated desc limit ?"
         return [_row(r) for r in self.db.execute(q, (*args, limit))]
 
+    def capacity(self) -> int:
+        r = self.db.execute("select value from settings where key='max_running'").fetchone()
+        try:
+            return max(0, int(r["value"])) if r else 0
+        except ValueError:
+            return 1                                       # unreadable policy: the safest cap
+
+    def set_capacity(self, n: int, by: str = "") -> int:
+        n = max(0, int(n))
+        with self._tx():
+            self.db.execute("insert into settings(key, value) values ('max_running', ?) "
+                            "on conflict(key) do update set value=excluded.value", (str(n),))
+            self._event(None, "capacity", max_running=n, by=by or None)
+        return n
+
+    def backfill_resource(self, kind: str, resource_of) -> dict:
+        """Give every OPEN, not-running task of `kind` without a resource its key, in ONE transaction
+        (tasks created before `resource` existed — Codex F.7 R2 #3). Running ones are left alone: the
+        claim barrier keeps keyed tasks of that kind off the floor until they end."""
+        out = {"set": [], "running_without": []}
+        with self._tx():
+            rows = self.db.execute(
+                f"select id, status, data from tasks where kind=? and coalesce(resource,'')='' "
+                f"and status in ({','.join('?' * len(OPEN))})", (kind, *OPEN)).fetchall()
+            for r in rows:
+                if r["status"] == "running":
+                    out["running_without"].append(r["id"])
+                    continue
+                key = resource_of(json.loads(r["data"] or "{}"))
+                if key:
+                    self.db.execute("update tasks set resource=?, updated=? where id=?", (key, time.time(), r["id"]))
+                    self._event(r["id"], "resource_set", resource=key)
+                    out["set"].append(r["id"])
+        return out
+
     def running_count(self) -> int:
         return self.db.execute("select count(*) n from tasks where status='running' and lease_until>=?",
                                (time.time(),)).fetchone()["n"]
 
-    def claim(self, owner: str, kinds: tuple = (), lease_s: int = DEFAULT_LEASE_S, max_running: int = 0) -> dict:
+    def claim(self, owner: str, kinds: tuple = (), lease_s: int = DEFAULT_LEASE_S) -> dict:
         """Atomically take the next runnable task: queued, paused_quota whose time has come,
         or running with an expired lease (crashed holder). Highest priority (lowest number) first.
         Skipped: tasks with a dependency not DONE yet, and tasks whose `resource` is held by another
-        live task. Capacity: at most min(max_running, TOOLKIT_MAX_PARALLEL) live tasks in total
-        (all kinds, all processes) — a caller can only make it stricter.
+        live task, or of a kind that has a LIVE task without any resource (a legacy holder whose
+        checkout is unknown). Capacity: the database's shared `capacity()` (all kinds, processes).
         The returned task carries `lease_token` — pass it to every later call."""
         now = time.time()
         kind_sql = f" and t.kind in ({','.join('?' * len(kinds))})" if kinds else ""
-        caps = [c for c in (max_running, max_running_default()) if c]
-        cap = min(caps) if caps else 0
         with self._tx():
+            cap = self.capacity()
             if cap and self.running_count() >= cap:
                 return {}
             r = self.db.execute(
@@ -208,7 +246,9 @@ class Store:
                 "                 where d.task_id=t.id and x.status!='done')"
                 " and (coalesce(t.resource,'')='' or not exists (select 1 from tasks y where y.resource=t.resource"
                 "      and y.id!=t.id and y.status='running' and coalesce(y.lease_until,0)>=?))"
-                " order by t.priority, t.created limit 1", (now, now, *kinds, now)).fetchone()
+                " and (coalesce(t.resource,'')='' or not exists (select 1 from tasks z where z.kind=t.kind"
+                "      and coalesce(z.resource,'')='' and z.status='running' and coalesce(z.lease_until,0)>=?))"
+                " order by t.priority, t.created limit 1", (now, now, *kinds, now, now)).fetchone()
             if not r:
                 return {}
             prev = r["status"]
@@ -341,14 +381,23 @@ class Store:
                 self._event(task_id, "unblocked", by=by)
         return bool(n)
 
-    def resolve_blocked(self, task_id: str, status: str = "done", by: str = "", note: str = "") -> bool:
+    def resolve_blocked(self, task_id: str, status: str = "done", by: str = "", note: str = "",
+                        if_updated: float = None, if_error_prefix: str = None) -> bool:
         """Close a BLOCKED task whose outcome happened elsewhere (e.g. a human approved and the
-        sweeper posted). Only from blocked, only to done/cancelled — never steals a lease."""
+        sweeper posted). Only from blocked, only to done/cancelled — never steals a lease.
+        if_updated / if_error_prefix: resolve only the exact revision the caller inspected (a task
+        re-run and blocked for another reason meanwhile is left alone — Codex F.7 R2 #5)."""
         if status not in ("done", "cancelled"):
             raise ValueError("status must be done or cancelled")
+        q, args = "update tasks set status=?, updated=? where id=? and status='blocked'", [status, time.time(), task_id]
+        if if_updated is not None:
+            q += " and updated=?"
+            args.append(if_updated)
+        if if_error_prefix is not None:
+            q += " and substr(coalesce(last_error,''), 1, ?)=?"
+            args += [len(if_error_prefix), if_error_prefix]
         with self._tx():
-            n = self.db.execute("update tasks set status=?, updated=? where id=? and status='blocked'",
-                                (status, time.time(), task_id)).rowcount
+            n = self.db.execute(q, args).rowcount
             if n:
                 self._event(task_id, "resolved", status=status, by=by, note=note or None)
         return bool(n)

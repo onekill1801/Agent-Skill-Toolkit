@@ -5,9 +5,11 @@ show the progress board (agent_skill_toolkit.workflows.coordinator).
     python coordinator.py work  [--parallel 2] [--once] [--interval 30] [--kinds review_mr,verify]
     python coordinator.py board [--json] [--hours 24]        # progress board (open + closed in last N h)
     python coordinator.py accept <task_id> [--lane vua]      # accept an aTask proposal (atask_intake)
+    python coordinator.py capacity [N]                       # show / set the SHARED cap on live tasks
 
 Kinds run: review_mr (mr-review/review_flow) · verify (verify.py) · atask_intake (proposal).
-`--parallel` is a GLOBAL cap: tasks already running in other `work` loops count against it.
+`--parallel` = worker threads of this process; the cap on live tasks is ONE value stored in the
+database (`capacity`, initial TOOLKIT_MAX_PARALLEL or 2) for every worker loop on this machine.
 Two tasks with the same `resource` (repo@branch) never run at once; a task waits for its
 dependencies (store `depends_on`), and is blocked if one of them failed / was cancelled.
 """
@@ -69,8 +71,13 @@ def accept(task_id: str, lane: str = "") -> dict:
         lane = lane or tri.get("lane") or ""
         if lane and lane not in ("nho", "vua", "lon", "de_xuat"):
             raise ValueError("lane must be nho|vua|lon|de_xuat")
+        # resolve EXACTLY the revision inspected above (same update time + proposal marker): if the
+        # task was re-run / blocked for another reason meanwhile, nothing changes (Codex F.7 R2 #5)
         ok = st.resolve_blocked(task_id, "done", by="human", note=json.dumps(
-            {"accepted": True, "kind": tri.get("kind"), "lane": lane}, ensure_ascii=False))
+            {"accepted": True, "kind": tri.get("kind"), "lane": lane}, ensure_ascii=False),
+            if_updated=t["updated"], if_error_prefix=atask_flow.PROPOSAL)
+        if not ok:
+            raise ValueError(f"{task_id} changed while accepting — look at it again (coordinator.py board)")
     return {"task_id": task_id, "accepted": ok, "kind": tri.get("kind"), "lane": lane}
 
 
@@ -86,6 +93,8 @@ def main(argv=None) -> int:
     p = sub.add_parser("board")
     p.add_argument("--json", action="store_true")
     p.add_argument("--hours", type=float, default=24)
+    p = sub.add_parser("capacity")
+    p.add_argument("n", nargs="?", type=int, help="set the shared cap (0 = none); omit to show it")
     p = sub.add_parser("accept")
     p.add_argument("task_id")
     p.add_argument("--lane", default="")
@@ -108,6 +117,11 @@ def main(argv=None) -> int:
                 print(b["text"])
                 return 0
             out = b
+        elif a.cmd == "capacity":
+            with store_mod.Store() as st:
+                if a.n is not None:
+                    st.set_capacity(a.n, by="cli")
+                out = {"max_running": st.capacity(), "running": st.running_count()}
         else:
             out = accept(a.task_id, a.lane)
     except (ValueError, PermissionError, RuntimeError) as e:

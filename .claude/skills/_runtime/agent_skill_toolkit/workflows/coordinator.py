@@ -9,7 +9,8 @@ What the store guarantees (core/store.py) and this loop relies on:
   * a task's dependencies must be DONE before it is claimed; failed / cancelled dependency ->
     the dependent is BLOCKED (block_orphans), never left waiting forever
   * `resource` = exclusive key: two tasks on the same repo/branch never run at once
-  * `max_running` = global cap across all kinds and processes (other `work` loops included)
+  * capacity = ONE cap stored in the database (Store.capacity / set_capacity) for every claim, all
+    kinds and processes; `parallel` = this process's worker threads
   * quota pause / resume, leases, checkpoints: unchanged (engine.run)
 """
 
@@ -44,8 +45,7 @@ class Coordinator:
     def _worker(self, i: int, stop: threading.Event, once: bool, interval: float):
         with store_mod.Store(self.store_path) as st:
             while not stop.is_set():
-                res = E.work_once(st, f"{self.owner}#{i}", self.registry, lease_s=self.lease_s,
-                                  max_running=self.parallel)
+                res = E.work_once(st, f"{self.owner}#{i}", self.registry, lease_s=self.lease_s)
                 if res.get("status") != "idle":
                     with self._lock:
                         self.results.append(res)
