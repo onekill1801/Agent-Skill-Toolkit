@@ -151,11 +151,22 @@ def cmd_classify(args) -> dict:
     lane = lanes.lane_for(tier, kind, text)
     if getattr(args, "force_lane", None):
         lane = {"lane": args.force_lane, "reason": "forced by operator"}
+    # The lane is authoritative for the legacy policy keys callers already read (tier / mode /
+    # skip_debate): a task routed to a larger lane must not keep the small-task autonomy (Codex F.1 #1).
+    lane_adjusted = None
+    order = ("trivial", "standard", "complex")
+    floor = {"vua": "standard", "lon": "complex", "de_xuat": "standard"}.get(lane["lane"])
+    if floor and order.index(tier) < order.index(floor):
+        lane_adjusted = f"tier {tier} -> {floor} for lane {lane['lane']}"
+        tier = floor
+    if lane["lane"] not in (None, "nho") and mode == "auto":
+        mode = "checkpoint"
+        lane_adjusted = (lane_adjusted + "; " if lane_adjusted else "") + f"mode auto -> checkpoint for lane {lane['lane']}"
     out = {
         "tier": tier,
         "mode": mode,
         "reason": reason,
-        "skip_debate": tier == "trivial",
+        "skip_debate": tier == "trivial" and lane["lane"] in (None, "nho"),
         "source": source,
         "signals": signals,
         "kind": kind,                       # design §4.2
@@ -165,6 +176,8 @@ def cmd_classify(args) -> dict:
     }
     if clarity_downgrade:
         out["clarity_downgrade"] = clarity_downgrade
+    if lane_adjusted:
+        out["lane_adjusted"] = lane_adjusted
     if fallback_note:
         out["note"] = fallback_note
     return out

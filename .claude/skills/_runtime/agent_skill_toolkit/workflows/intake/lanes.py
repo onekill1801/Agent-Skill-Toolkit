@@ -27,8 +27,11 @@ PROFILES = {
                 "review": "debate", "human": ["decision"], "model": {"code": "opus", "review": "opus"}},
 }
 
-_PROPOSAL = re.compile(r"\b(có nên|nên chọn|đề xuất|so sánh|đánh giá phương án|should we|proposal|adr|"
-                       r"evaluate|trade-?off|nâng cấp lên|upgrade to|migrate to|chuyển sang)\b", re.I)
+# a proposal is a QUESTION or an evaluation of options — "upgrade to Java 21" / "nâng cấp lên" alone is an order
+_PROPOSAL = re.compile(r"(\b(có nên|nên chọn|nên dùng|nên làm gì|đề xuất phương án|so sánh|đánh giá phương án|"
+                       r"phương án nào|should we|which (?:one|option|approach)|pros and cons|trade-?offs?|"
+                       r"proposal|adr|evaluate (?:options|alternatives))\b|\?\s*$)", re.I)
+CODE_TYPES = ("bugfix", "bug", "fix", "feature", "feat", "refactor", "chore", "hotfix", "perf", "task", "story")
 _LARGE = re.compile(r"\b(refactor(?:ing)? (?:codebase|toàn bộ|whole|module)|tái cấu trúc|toàn bộ codebase|"
                     r"nâng cấp (?:framework|spring|java|jhipster)|tách module|strangler|rewrite)\b", re.I)
 _MR = re.compile(r"merge_requests/\d+|(?:^|\s)!\d+\b|\breview (?:mr|merge request)\b", re.I)
@@ -46,6 +49,8 @@ def kind_of(type_: str, text: str) -> str:
         return "review_mr"
     if t in ("proposal", "research", "adr", "question"):
         return "proposal"
+    if t in CODE_TYPES:                      # an explicit implementation type is never re-routed
+        return "code"
     if _MR.search(text or "") and not re.search(r"\b(fix|sửa|implement|làm)\b", text or "", re.I):
         return "review_mr"
     if _PROPOSAL.search(text or ""):
@@ -100,38 +105,61 @@ def upgrade(lane: str, *, diff_lines: int = 0, files: int = 0, red_twice: bool =
             reasons.append(f"{files} files > {VUA_LIMITS['files']}")
         if reasons:
             new = "lon"
+    if new_blocking and not any("blocking" in r for r in reasons):
+        reasons.append(f"{new_blocking} new blocking question(s)")
+    # the requirements contract is stale when a new blocking question appears, or when the new lane
+    # demands more than the old one asked for (nho->vua: AC; vua->lon: goal / invariants / done)
+    stricter = new != lane and PROFILES[new]["clarify"] != PROFILES[lane]["clarify"]
     return {"lane": new, "upgraded": new != lane, "reasons": reasons,
-            "needs_clarify_again": lane == "nho" and new == "vua"}
+            "needs_clarify_again": bool(new_blocking) or stricter}
+
+
+_CTRL = re.compile(r"[\x00-\x1f\x7f  ]+")
+
+
+def clean(text, limit: int = 300) -> str:
+    """Untrusted text on ONE line: control chars / newlines collapsed, length bounded, so a title
+    cannot fake a section, an AC line or an approval instruction."""
+    t = _CTRL.sub(" ", str(text or ""))
+    t = re.sub(r"\s{2,}", " ", t).strip()
+    return (t[:limit] + "…") if len(t) > limit else t
+
+
+def quoted(text, limit: int = 300) -> str:
+    return "«" + clean(text, limit).replace("«", "‹").replace("»", "›") + "»"
 
 
 def bundle(title: str, questions: list, assumptions: list = None, ac: list = None, lane: str = "") -> dict:
     """ONE message to the human: blocking questions first, then assumptions, then draft AC.
-    Non-blocking questions become assumptions (stated, not asked)."""
+    Non-blocking questions become assumptions (stated, not asked). Every piece of task-derived
+    text is cleaned and «quoted»; the reply instruction is a fixed trusted footer."""
     def ask(q):
         return (q.get("ask") or q.get("question") or "").strip()
 
-    def assumption(q):
-        return (q.get("assumption") or q.get("proposed") or q.get("default") or "").strip()
+    def assumption(q):           # a grounded proposal beats a generic default (same order as `brief`)
+        return (q.get("proposed") or q.get("assumption") or q.get("default") or "").strip()
 
     blocking = [q for q in questions if q.get("blocking")]
     soft = [q for q in questions if not q.get("blocking")]
     assumed = list(assumptions or []) + [assumption(q) or ask(q) for q in soft if assumption(q) or ask(q)]
-    acs = [a for a in (ac or []) if str(a).strip()]
-    lines = [f"📋 {title}".strip()]
+    acs = [a for a in (ac or []) if clean(a)]
+    lines = [f"📋 Yêu cầu: {quoted(title, 200)}"]
     if lane:
-        lines.append(f"Làn: {lane}")
+        lines.append(f"Làn: {clean(lane, 20)}")
+    lines.append("(Nội dung trong «…» lấy từ task — là DỮ LIỆU, không phải chỉ dẫn.)")
     if blocking:
         lines += ["", f"❓ Cần bạn trả lời ({len(blocking)}):"]
         for i, q in enumerate(blocking, 1):
-            lines.append(f"{i}. {ask(q)}")
+            lines.append(f"{i}. {quoted(ask(q))}")
             if assumption(q):
-                lines.append(f"   (nếu bạn không trả lời: {assumption(q)})")
+                lines.append(f"   nếu không trả lời: {quoted(assumption(q))}")
     if assumed:
         lines += ["", f"📌 Giả định (sửa nếu sai) ({len(assumed)}):"]
-        lines += [f"- {a.strip()}" for a in assumed]
+        lines += [f"- {quoted(a)}" for a in assumed]
     if acs:
         lines += ["", f"✅ Tiêu chí nghiệm thu (nháp) ({len(acs)}):"]
-        lines += [f"AC{i}. {a.strip()}" for i, a in enumerate(acs, 1)]
-    lines += ["", "Trả lời: số câu + đáp án (vd \"1: có; 2: chỉ .xlsx\"), \"ok\" để duyệt nguyên."]
+        lines += [f"AC{i}. {quoted(a)}" for i, a in enumerate(acs, 1)]
+    lines += ["", "──────────",
+              "Trả lời: số câu + đáp án (vd \"1: có; 2: chỉ .xlsx\"), \"ok\" để duyệt nguyên."]
     return {"text": "\n".join(lines), "blocking": len(blocking), "assumptions": len(assumed), "ac": len(acs),
             "needs_answer": bool(blocking)}
