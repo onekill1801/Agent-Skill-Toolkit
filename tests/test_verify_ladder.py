@@ -53,9 +53,21 @@ FAKE_AGENT = textwrap.dedent('''
         open(t, "w").write(open(t).read().replace("self.assertEqual(calc.add(2, 3), 5)", "pass"))
     elif mode == "rename_test":
         os.replace(os.path.join(repo, "tests", "test_calc.py"), os.path.join(repo, "tests", "skip_calc.txt"))
-    elif mode == "switch_branch":
+    elif mode == "switch_branch":             # sneaky: commit on main, come back, commit the fix here too
         subprocess.run(["git", "-C", repo, "checkout", "-q", "main"])
+        open(os.path.join(repo, "src", "extra.py"), "w").write("X = 1\\n")
+        subprocess.run(["git", "-C", repo, "add", "-A"])
+        subprocess.run(["git", "-C", repo, "commit", "-qm", "sneaky on main"], capture_output=True)
+        subprocess.run(["git", "-C", repo, "checkout", "-q", "feat/x"])
         open(calc, "w").write("def add(a, b):\\n    return a + b\\n")
+    elif mode == "weaken_then_quota":         # commits a weakened test, then dies on a provider limit
+        t = os.path.join(repo, "tests", "test_calc.py")
+        open(t, "w").write(open(t).read().replace("self.assertEqual(calc.add(2, 3), 5)", "pass"))
+        subprocess.run(["git", "-C", repo, "commit", "-qam", "wip"], capture_output=True)
+        print(json.dumps({"error": True, "kind": "quota", "resume_at": %(future)s, "message": "usage limit reached"}))
+        sys.exit(1)
+    elif mode == "die_before_change":
+        sys.exit(1)
     if mode != "nocommit":
         subprocess.run(["git", "-C", repo, "add", "-A"])
         subprocess.run(["git", "-C", repo, "commit", "-qm", "wip(verify): fix"], capture_output=True)
@@ -197,11 +209,60 @@ class LadderTest(unittest.TestCase):
         self.assertIn("started for `feat/x`", self.task()["last_error"])
         self.assertEqual(git(self.repo, "log", "-1", "--format=%s", "main"), "base")   # main untouched
 
-    def test_fixer_switching_branch_is_caught(self):
+    def test_fixer_committing_on_another_branch_is_caught(self):
+        """Codex F.2 R2: the fixer committed on `main` and came back — detected, restore command given."""
         self.break_code()
+        main_before = git(self.repo, "rev-parse", "main")
         os.environ["FAKE_MODE"] = "switch_branch"
         self.assertEqual(self.start_and_work()[-1]["status"], "blocked")
-        self.assertEqual(git(self.repo, "log", "-1", "--format=%s", "main"), "base")
+        err = self.task()["last_error"]
+        self.assertIn("refs/heads/main", err)
+        self.assertIn(main_before, err)                                   # how to restore it
+
+    def test_weakened_test_committed_before_a_quota_stop_is_still_caught(self):
+        """Codex F.2 R2 NEW HIGH: the pending fix is validated on resume."""
+        self.break_code()
+        os.environ["FAKE_MODE"] = "weaken_then_quota"
+        self.assertEqual(self.start_and_work()[-1]["status"], "paused_quota")
+        self.assertTrue(self.task()["data"]["pending_fix"])
+        with mock.patch("time.time", return_value=time.time() + 3 * 3600):
+            ran = V.work("w", once=True, interval=0)["ran"]
+        self.assertEqual(ran[-1]["status"], "blocked")
+        self.assertIn("changes tests", self.task()["last_error"])
+
+    def test_fixer_dying_before_any_change_just_retries(self):
+        self.break_code()
+        os.environ["FAKE_MODE"] = "die_before_change"
+        ran = self.start_and_work()
+        self.assertNotIn("made no change", self.task().get("last_error") or "")
+        self.assertIn(ran[-1]["status"], ("queued", "failed"))           # counted as agent failures, not stuck
+
+    def test_protection_covers_configs_launchers_and_odd_names(self):
+        """Codex F.2 R2 #3."""
+        for path in ("vitest.config.ts", "jest.config.cjs", "Makefile", "mvnw.cmd", "tests/test_é.py",
+                     "gradle/wrapper/gradle-wrapper.properties", "checks/run.cmd"):
+            with self.subTest(path=path):
+                before = git(self.repo, "rev-parse", "HEAD")
+                full = os.path.join(self.repo, path)
+                os.makedirs(os.path.dirname(full) or self.repo, exist_ok=True)
+                open(full, "w", encoding="utf-8").write("x\n")
+                git(self.repo, "add", "-A")
+                git(self.repo, "commit", "-qm", f"touch {path}")
+                extra = L.spec_launchers({"rungs": [{"run": ["checks/run.cmd"]}]})
+                self.assertTrue(L.protected_changes(self.repo, before, "HEAD", extra), path)
+        before = git(self.repo, "rev-parse", "HEAD")
+        open(os.path.join(self.repo, "src", "calc.py"), "a").write("# prod change\n")
+        git(self.repo, "commit", "-qam", "prod")
+        self.assertEqual(L.protected_changes(self.repo, before, "HEAD"), [])   # production code is fine
+
+    def test_finding_schema_and_covered_by_must_be_a_cmd_rung(self):
+        self.assertEqual(L.parse_verdict('{"verdict":"GO","findings":["HIGH: broken authentication"]}'), {})
+        self.assertEqual(L.parse_verdict('{"verdict":"GO","findings":[{"severity":"BAD"}]}'), {})
+        bad = os.path.join(self.tmp, "cov.yml")
+        open(bad, "w").write("verify:\n  ladder:\n    t:\n      kind: affected_tests\n      covered_by: review\n"
+                             "      run: x\n    review:\n      kind: cross_review\n")
+        with self.assertRaises(ValueError):
+            L.load_spec(self.repo, "main", bad)
 
     def test_custom_and_release_default_branches_refused(self):
         git(self.repo, "config", "init.defaultBranch", "feat/x")
