@@ -131,10 +131,10 @@ def status() -> dict:
 
 # ------------------------------------------------------------------ accounts
 
-def account_list() -> dict:
+def account_list(timeout: int = DEFAULT_TIMEOUT) -> dict:
     """`orca account list`: managed Claude/Codex accounts (email, org — no tokens) + rateLimits
     (the active account's live usage, `inactiveClaudeAccounts` = Orca's last cached reading)."""
-    return call("account", "list")
+    return call("account", "list", timeout=timeout)
 
 
 # ------------------------------------------------------------------ automations

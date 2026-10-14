@@ -155,10 +155,12 @@ def sect_queue():
     return {"items": items, "locks": locks}
 
 
-def sect_approvals():
-    """Pending Telegram approval requests (temp/tg_approvals/<id>.json)."""
+def sect_approvals(directory: str = ""):
+    """Pending Telegram approval requests (<state>/tg_approvals/<id>.json — the directory
+    rc_config.temp_dir writes: TOOLKIT_STATE_DIR when set, else temp/)."""
     out = []
-    for _, r in _iter_json_dir(_temp("tg_approvals")):
+    base = os.environ.get("TOOLKIT_STATE_DIR") or os.path.join(_repo_root(), "temp")
+    for _, r in _iter_json_dir(directory or os.path.join(base, "tg_approvals")):
         # Only well-formed pending requests (id + tool); skip legacy/other-shaped files.
         if r.get("status") == "pending" and r.get("id") and r.get("tool"):
             out.append({

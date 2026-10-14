@@ -79,9 +79,9 @@ def read_turns(path: str = None) -> list:
         db.close()
 
 
-def gather() -> dict:
+def gather(orca_timeout: int = orca_adapter.DEFAULT_TIMEOUT) -> dict:
     try:
-        orca, err = orca_adapter.account_list(), None
+        orca, err = orca_adapter.account_list(timeout=orca_timeout), None
     except (orca_adapter.OrcaError, OSError) as e:
         orca, err = None, getattr(e, "message", str(e))
     out = A.report(agent_runner._agents_config(), orca, read_slots(agent_runner.slots_dir()), read_turns(),

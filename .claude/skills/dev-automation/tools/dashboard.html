@@ -200,10 +200,11 @@ function renderKpis() {
   const tier = { normal: "bình thường", save: "tiết kiệm", critical: "khẩn", exhausted: "hết" }[usage.tier] || usage.tier || "?";
   const k = [
     ["Đang chạy", counts.running || 0, ""],
-    ["Chờ bạn", (counts.blocked || 0) + appr, (counts.blocked || 0) + appr ? "bad" : "ok"],
+    ["Chờ bạn", ["store", "approvals"].every((s) => section(s).data !== undefined) ? (counts.blocked || 0) + appr : "?",
+      (counts.blocked || 0) + appr ? "bad" : section("store").err || section("approvals").err ? "warn" : "ok"],
     ["Hết quota (tạm dừng)", counts.paused_quota || 0, counts.paused_quota ? "warn" : ""],
     ["Đang chờ chạy", counts.queued || 0, ""],
-    ["Xong (24h)", counts.done || 0, "ok"],
+    ["Xong (24h)", st.done_24h || 0, "ok"],
     ["Lỗi", counts.failed || 0, counts.failed ? "bad" : ""],
     ["Mức dùng", tier + (usage.pct != null ? ` ${Math.round(usage.pct)}%` : ""), usage.tier && usage.tier !== "normal" ? "warn" : ""],
     ["Song song tối đa", set.capacity ?? "?", ""],
@@ -235,12 +236,18 @@ function renderAttention() {
         code(`python ${T}/mr-review/tools/review_post.py render ${j.id}`) + "<br>" + code(`python ${T}/mr-review/tools/review_post.py approve ${j.id}`)]);
     }
   }
-  $("attn-count").textContent = `(${rows.length})`;
+  // a section that could not be read must never look like "nothing to do" (Codex dashboard #5)
+  const LABEL = { store: "hàng đợi việc", approvals: "yêu cầu duyệt", reviews: "review MR" };
+  const failed = Object.keys(LABEL).filter((k) => !(state.sections[k] && state.sections[k].ok));
+  const warn = failed.length
+    ? `<div class="err">⚠ Không đọc được: ${failed.map((k) => esc(LABEL[k]) + (state.sections[k] ? " — " + esc(state.sections[k].error) : "")).join("; ")}. Danh sách dưới có thể THIẾU.</div>`
+    : "";
+  $("attn-count").textContent = `(${rows.length}${failed.length ? "+?" : ""})`;
   const MAX = showAllAttn ? rows.length : 15;
-  $("attn-body").innerHTML = rows.length
+  $("attn-body").innerHTML = warn + (rows.length
     ? table(["", "Việc", "Lệnh"], rows.slice(0, MAX)) +
       (rows.length > MAX ? `<div class="empty"><span class="chip" data-more="1">Xem thêm ${rows.length - MAX} mục</span></div>` : "")
-    : `<div class="empty">Không có việc nào chờ bạn. 👍</div>`;
+    : failed.length ? "" : `<div class="empty">Không có việc nào chờ bạn. 👍</div>`);
 }
 
 function renderTasks() {
@@ -326,6 +333,7 @@ function renderSystem() {
 }
 
 function render() {
+  if (state.pending) { $("meta").textContent = "đang tạo dữ liệu lần đầu…"; return; }
   const slow = Object.entries(state.sections).filter(([, s]) => s.ms > 1500).map(([k, s]) => `${k} ${s.ms}ms`);
   $("meta").textContent = `${state.host} · cập nhật ${new Date(state.generated_at * 1000).toLocaleTimeString("vi-VN")}` +
     (slow.length ? ` · chậm: ${slow.join(", ")}` : "");
