@@ -93,12 +93,30 @@ class CollectTest(Base):
         self.assertNotIn(tok, json.dumps(out))
         self.assertEqual((out["id"], out["status"]), ("t-1", "blocked"))
 
-    def test_done_24h_is_not_capped_by_the_board_limit(self):
+    def test_done_24h_and_failures_are_not_capped_by_the_board_limit(self):
+        import time as _t
         with S.Store() as st:
-            for i in range(205):
+            bad = st.add("verify", "r@bad", title="hỏng")
+            st.db.execute("update tasks set status='failed', last_error='exit 1', updated=? where id=?",
+                          (_t.time() - 3600, bad["id"]))
+            old = st.add("verify", "r@old", title="cũ")
+            st.db.execute("update tasks set status='failed', updated=? where id=?", (_t.time() - 30 * 86400, old["id"]))
+            for i in range(205):                                       # pushes the failure off the board
                 t = st.add("verify", f"r@{i}", title=str(i))
                 st.db.execute("update tasks set status='done' where id=?", (t["id"],))
-        self.assertEqual(D.read_store()["done_24h"], 205)
+        out = D.read_store()
+        self.assertEqual(out["done_24h"], 205)
+        self.assertNotIn(bad["id"], [r["id"] for r in out["rows"]])
+        self.assertEqual([f["id"] for f in out["failed_recent"]], [bad["id"]])   # still "needs you"
+        self.assertEqual(out["failed_window_count"], 1)
+
+    def test_secret_in_a_review_status_is_redacted(self):
+        tok = "glpat-" + "C" * 24
+        d = os.path.join(self.tmp, "rq", "jobs")
+        os.makedirs(d)
+        with open(os.path.join(d, "x.json"), "w", encoding="utf-8") as f:
+            json.dump({"id": tok, "status": tok, "iid": 1}, f)
+        self.assertNotIn(tok, json.dumps(D._section(D.read_reviews)))
 
     def test_approvals_follow_toolkit_state_dir(self):
         d = os.path.join(self.tmp, "tg_approvals")

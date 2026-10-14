@@ -219,7 +219,7 @@ function renderKpis() {
     ["Hết quota (tạm dừng)", counts.paused_quota || 0, counts.paused_quota ? "warn" : ""],
     ["Đang chờ chạy", counts.queued || 0, ""],
     ["Xong (24h)", st.done_24h || 0, "ok"],
-    ["Lỗi", counts.failed || 0, counts.failed ? "bad" : ""],
+    [`Lỗi (${st.failed_window_days || 7} ngày)`, st.failed_window_count || 0, st.failed_window_count ? "bad" : ""],
     ["Mức dùng", tier + (usage.pct != null ? ` ${Math.round(usage.pct)}%` : ""), usage.tier && usage.tier !== "normal" ? "warn" : ""],
     ["Song song tối đa", set.capacity ?? "?", ""],
     ["Lượt agent hôm nay", (set.agent_runs_today ?? 0) + (set.daily_agent_runs ? ` / ${set.daily_agent_runs}` : ""), ""],
@@ -231,13 +231,14 @@ function renderKpis() {
 function renderAttention() {
   const rows = [];
   const st = section("store").data || {};
-  for (const r of st.rows || []) {
-    if (r.status === "blocked" || r.status === "failed") {
-      rows.push([statusBadge(r.status), `<b>${esc(KIND[r.kind] || r.kind)}</b> · ${esc(r.title)}<div class="note">${esc(r.note)}</div>`,
-        code(`python ${T}/dev-automation/tools/taskstore.py show ${r.id}`) +
-        (r.status === "blocked" ? "<br>" + code(`python ${T}/dev-automation/tools/taskstore.py unblock ${r.id}`) : "")]);
-    }
+  // blocked = open (always on the board); failed come from their own uncapped query (Codex R3 #2)
+  for (const r of [...(st.rows || []).filter((x) => x.status === "blocked"), ...(st.failed_recent || [])]) {
+    rows.push([statusBadge(r.status), `<b>${esc(KIND[r.kind] || r.kind)}</b> · ${esc(r.title)}<div class="note">${esc(r.note)}` +
+      (r.status === "failed" && r.updated ? ` · ${ago(r.updated)}` : "") + `</div>`,
+      code(`python ${T}/dev-automation/tools/taskstore.py show ${r.id}`) +
+      (r.status === "blocked" ? "<br>" + code(`python ${T}/dev-automation/tools/taskstore.py unblock ${r.id}`) : "")]);
   }
+  const moreFailed = (st.failed_window_count || 0) - (st.failed_recent || []).length;
   for (const a of ((section("approvals").data || {}).items) || []) {
     const job = (/^post review (\S+)/.exec(a.summary || "") || [])[1];
     rows.push([`<span class="badge s-blocked">🔐 duyệt</span>`, `<b>${esc(a.tool)}</b> · ${esc(a.summary)}<div class="note">${ago(a.created)} · risk ${esc(a.risk)} · id ${esc(a.id)}</div>`,
@@ -251,6 +252,7 @@ function renderAttention() {
     }
   }
   const failed = attentionGaps();
+  if (moreFailed > 0) failed.push(`${moreFailed} việc lỗi cũ hơn không liệt kê — taskstore.py list --status failed`);
   const warn = failed.length
     ? `<div class="err">⚠ Không đọc được: ${failed.map(esc).join("; ")}. Danh sách dưới có thể THIẾU.</div>`
     : "";
