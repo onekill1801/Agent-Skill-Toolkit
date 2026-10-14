@@ -29,6 +29,7 @@ class EnvTest(unittest.TestCase):
     def test_parse_matches_the_skill_loader(self):
         sys.path.insert(0, os.path.join(_ROOT, ".claude", "skills", "dev-automation", "tools"))
         import config as skill_config
+        self.assertEqual(env.parse("A=first\nA=second\n"), {"A": "first"})   # Codex R.M3 #3
         got = env.parse(open(self.file, encoding="utf-8").read())
         self.assertEqual(got, {"A": "1", "C": "two", "D": "quoted # kept", "E": "x", "_F": "ok"})
         for raw in ("two # trailing", '"quoted # kept"', "'x'", "  spaced  "):
@@ -52,13 +53,29 @@ class LockTest(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 with locks.file_lock(path, timeout=0.3):
                     pass
-        self.assertFalse(os.path.exists(path))
-        with open(path, "w") as f:                        # left behind by a crashed holder
+        self.assertTrue(os.path.exists(path))             # the lock file stays; the OS lock is what matters
+        with open(path, "w") as f:                        # a file left behind is just a file: no lock held
             f.write("999 0")
-        old = time.time() - 3600
-        os.utime(path, (old, old))
         with locks.file_lock(path, timeout=1, stale_after=60):
             pass
+
+    def test_a_crashed_holder_releases_the_lock(self):        # Codex R.M3 #1: the OS releases it
+        import subprocess
+        path = os.path.join(tempfile.mkdtemp(prefix="lock-"), "c.lock")
+        code = ("import runpy,sys,time;runpy.run_path(sys.argv[1])['activate']();"
+                "from agent_skill_toolkit.core import locks\n"
+                "with locks.file_lock(sys.argv[2]):\n    print('held', flush=True); time.sleep(30)")
+        p = subprocess.Popen([sys.executable, "-c", code, os.path.join(_ROOT, ".claude", "skills", "_runtime", "bootstrap.py"),
+                              path], stdout=subprocess.PIPE, text=True)
+        self.assertEqual(p.stdout.readline().strip(), "held")
+        with self.assertRaises(TimeoutError):
+            with locks.file_lock(path, timeout=0.3):
+                pass
+        p.kill()
+        p.wait()
+        with locks.file_lock(path, timeout=5):           # released by the OS, no stale guessing
+            pass
+        self.assertTrue(os.path.exists(path))            # never unlinked
 
     def test_serialises_threads(self):
         path = os.path.join(tempfile.mkdtemp(prefix="lock-"), "b.lock")
@@ -86,6 +103,19 @@ class LockTest(unittest.TestCase):
                     pass
             self.assertTrue(spy.called)
             self.assertTrue(spy.call_args[0][0].endswith(os.path.join("locks", "queue.lock")))
+
+    def test_env_search_matches_the_original_places(self):     # Codex R.M3 #2
+        root = env.paths.toolkit_root()
+        seen = []
+        real = os.path.isfile
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TOOLKIT_ENV_FILE", None)
+            with mock.patch.object(env.os, "getcwd", return_value=tempfile.mkdtemp(prefix="cwd-")),                     mock.patch.object(env.os.path, "isfile", side_effect=lambda p: seen.append(p) or False):
+                self.assertEqual(env.find_env_file(), "")
+        want = [os.path.join(root, *parts, ".env") for parts in
+                (("x",), (".claude", "skills", "dev-automation", "tools"), (".claude", "skills", "dev-automation"),
+                 (".claude", "skills"), (".claude",), ())]
+        self.assertEqual([os.path.normcase(p) for p in seen[1:]], [os.path.normcase(p) for p in want[1:]])
 
 
 class ConsoleTextTest(unittest.TestCase):

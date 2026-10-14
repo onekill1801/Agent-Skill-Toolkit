@@ -2,8 +2,10 @@
 runtime module never has to import a skill's config facade:
 
   * the process environment always wins (values from .env are only `setdefault`)
-  * file: $TOOLKIT_ENV_FILE if set, else ./.env (cwd), else the first .env found walking up from the
-    toolkit root (5 levels)
+  * file: $TOOLKIT_ENV_FILE if set, else ./.env (cwd), else the SAME five places the dev-automation
+    loader looks at: dev-automation/tools, dev-automation, skills, .claude, the toolkit root — never a
+    parent of the toolkit (Codex R.M3 #2)
+  * a key repeated in the file: the FIRST occurrence wins (like the original's per-line setdefault)
   * `KEY=value`, `#` comments, inline `# comment` outside quotes, surrounding quotes stripped
 
     from agent_skill_toolkit.core import env
@@ -36,15 +38,13 @@ def find_env_file() -> str:
     cwd = os.path.join(os.getcwd(), ".env")
     if os.path.isfile(cwd):
         return cwd
-    search = paths.toolkit_root()
+    root = paths.toolkit_root()
+    search = os.path.join(root, ".claude", "skills", "dev-automation", "tools")
     for _ in range(5):
         candidate = os.path.join(search, ".env")
         if os.path.isfile(candidate):
             return candidate
-        parent = os.path.dirname(search)
-        if parent == search:
-            break
-        search = parent
+        search = os.path.dirname(search)
     return ""
 
 
@@ -56,7 +56,7 @@ def parse(text: str) -> dict:
             continue
         m = _LINE.match(line)
         if m:
-            out[m.group(1)] = _strip_inline_comment(m.group(2))
+            out.setdefault(m.group(1), _strip_inline_comment(m.group(2)))     # first occurrence wins (#3)
     return out
 
 
