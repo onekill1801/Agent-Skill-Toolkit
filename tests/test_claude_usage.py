@@ -191,7 +191,9 @@ class MergeTest(unittest.TestCase):
 class FacadeTest(unittest.TestCase):
     def setUp(self):
         ACC._api_cache.clear()
+        ACC._inflight.clear()
         self.addCleanup(ACC._api_cache.clear)
+        self.addCleanup(ACC._inflight.clear)
 
     def test_parallel_fetch_is_cached_per_account(self):
         cfg = {"accounts": {"claude": {"a": {"env": {"CLAUDE_CONFIG_DIR": "/a"}}, "b": {}}, "codex": {"m": {}}}}
@@ -210,10 +212,100 @@ class FacadeTest(unittest.TestCase):
         self.assertEqual(set(out), {"claude@a", "claude@b"})               # codex is not asked
         self.assertEqual(sorted(calls, key=str), sorted(["/a", None, "/a", None], key=str))
 
+    def test_concurrent_callers_share_one_request(self):
+        import threading
+        cfg = {"accounts": {"claude": {"a": {"env": {"CLAUDE_CONFIG_DIR": "/a"}}}}}
+        calls = []
+
+        def usage_for(envd, timeout):
+            calls.append(1)
+            time.sleep(0.3)
+            return {"error": "http_429"}
+        results = []
+        with mock.patch.object(ACC.CU, "usage_for", side_effect=usage_for):
+            ts = [threading.Thread(target=lambda: results.append(ACC.read_api_usage(cfg, now=NOW))) for _ in range(4)]
+            [t.start() for t in ts]
+            [t.join(5) for t in ts]
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(all(r["claude@a"] == {"error": "http_429"} for r in results))
+
+    def test_repointed_account_is_a_new_identity(self):
+        calls = []
+        with mock.patch.object(ACC.CU, "usage_for", side_effect=lambda e, t: calls.append(e["CLAUDE_CONFIG_DIR"])
+                               or {"usage": {"session": None, "weekly": None}, "at": NOW}):
+            ACC.read_api_usage({"accounts": {"claude": {"a": {"env": {"CLAUDE_CONFIG_DIR": "/A"}}}}}, now=NOW)
+            ACC.read_api_usage({"accounts": {"claude": {"a": {"env": {"CLAUDE_CONFIG_DIR": "/B"}}}}}, now=NOW + 1)
+        self.assertEqual(calls, ["/A", "/B"])                             # not A's cached numbers for B
+
+    def test_a_stuck_request_does_not_block_the_caller(self):
+        import threading
+        gate = threading.Event()
+        cfg = {"accounts": {"claude": {"a": {"env": {"CLAUDE_CONFIG_DIR": "/a"}}}}}
+
+        def usage_for(envd, timeout):
+            gate.wait(5)
+            return {"error": "expired"}
+        with mock.patch.object(ACC.CU, "usage_for", side_effect=usage_for):
+            t0 = time.time()
+            self.assertEqual(ACC.read_api_usage(cfg, now=NOW, wait_s=0.2)["claude@a"], {"error": "network"})
+            self.assertLess(time.time() - t0, 1.0)
+            gate.set()
+            for _ in range(50):
+                if not ACC._inflight:
+                    break
+                time.sleep(0.05)
+            self.assertEqual(ACC.read_api_usage(cfg, now=NOW + 1)["claude@a"], {"error": "expired"})   # landed
+
     def test_orca_only_skips_the_api(self):
-        with mock.patch.object(ACC.orca_adapter, "account_list", return_value={}), \
-                mock.patch.object(ACC, "read_api_usage", side_effect=AssertionError("no api")):
+        with mock.patch.object(ACC.orca_adapter, "account_list", return_value={}),                 mock.patch.object(ACC, "read_api_usage", side_effect=AssertionError("no api")):
             ACC.gather(api=False)
+
+
+class ShapeAndDeadlineTest(unittest.TestCase):
+    def test_bad_shapes_never_raise(self):
+        d = tempfile.mkdtemp()
+        for doc in ([], {"claudeAiOauth": []}, {"claudeAiOauth": "x"}, "str"):
+            with open(os.path.join(d, ".credentials.json"), "w", encoding="utf-8") as f:
+                json.dump(doc, f)
+            self.assertEqual(CU.read_access(d, NOW), {"error": "unreadable"})
+        creds(d)
+        for body in ([1, 2], "x", None):
+            with mock.patch.object(CU, "fetch", return_value=body):
+                self.assertEqual(CU.usage_for({"CLAUDE_CONFIG_DIR": d}, now=NOW), {"error": "bad_response"})
+
+    def _fetch_with(self, chunks, timeout=3):
+        class Resp:
+            def __init__(self):
+                self.it = iter(chunks)
+
+            def read(self, n):
+                b = next(self.it, b"")
+                if callable(b):
+                    return b()
+                return b
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        op = mock.Mock()
+        op.open.return_value = Resp()
+        with mock.patch.object(CU.tls, "context", return_value=mock.Mock()),                 mock.patch.object(CU.urllib.request, "build_opener", return_value=op),                 mock.patch.object(CU.urllib.request, "HTTPSHandler"):
+            return CU.fetch(TOKEN, timeout=timeout)
+
+    def test_body_is_bounded(self):
+        with self.assertRaises(ValueError):
+            self._fetch_with([b"x" * 8192] * 40)
+
+    def test_trickling_server_hits_the_overall_deadline(self):
+        def slow():
+            time.sleep(0.15)
+            return b" "
+        t0 = time.time()
+        with self.assertRaises(TimeoutError):
+            self._fetch_with([slow] * 100, timeout=0.4)
+        self.assertLess(time.time() - t0, 1.5)
 
 
 if __name__ == "__main__":

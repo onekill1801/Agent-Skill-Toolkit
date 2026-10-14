@@ -83,35 +83,64 @@ def read_turns(path: str = None) -> list:
 
 
 API_CACHE_S = 300          # one direct usage call per account per 5 min (dashboard polls more often)
-_api_cache = {}            # "claude@name" -> (fetched_at, result)   (this process only — never written)
+API_WAIT_S = CU.TIMEOUT_S + 5
+# this process only, never written. key = (name, credentials dir, endpoint): a renamed / re-pointed
+# account is a NEW entry, never the old account's numbers (Codex usage R1 #2)
+_api_cache = {}            # key -> (fetched_at, result)
+_inflight = {}             # key -> Future: concurrent callers share ONE request (R1 #1)
 _api_lock = threading.Lock()
 
 
-def read_api_usage(cfg: dict, timeout: float = CU.TIMEOUT_S, now: float = None) -> dict:
-    """Direct usage of every claude account (integrations.claude_usage), cached per account; the
-    accounts are asked in parallel so one slow call never multiplies the wait."""
+def _key(name: str, envd: dict) -> tuple:
+    try:
+        url = CU.usage_url()
+    except ValueError:
+        url = "?"
+    return (name, os.path.normcase(os.path.abspath(CU.config_dir(envd))), url)
+
+
+def _start(key, envd, timeout, asked_at) -> concurrent.futures.Future:
+    """One daemon thread per fetch: nothing ever joins it, so a stuck request can not block the
+    caller (the dashboard's single worker) past API_WAIT_S (R1 #3); its result still lands in the cache."""
+    fut = concurrent.futures.Future()
+
+    def run():
+        try:
+            res = CU.usage_for(envd, timeout)
+        except Exception:  # noqa: BLE001 — usage_for never raises; belt and braces
+            res = {"error": "network"}
+        with _api_lock:
+            _api_cache[key] = (asked_at, res)
+            _inflight.pop(key, None)
+        fut.set_result(res)
+    threading.Thread(target=run, name=f"usage-{key[0]}", daemon=True).start()
+    return fut
+
+
+def read_api_usage(cfg: dict, timeout: float = CU.TIMEOUT_S, now: float = None, wait_s: float = API_WAIT_S) -> dict:
+    """Direct usage of every claude account (integrations.claude_usage): cached per account identity,
+    asked in parallel, at most ONE request per account in flight across threads."""
     now = now or time.time()
     accts = ((cfg or {}).get("accounts") or {}).get("claude") or {}
-    todo, out = {}, {}
+    out, waiting = {}, {}
     with _api_lock:
         for name, a in accts.items():
-            key = f"claude@{name}"
+            envd = (a or {}).get("env") or {}
+            key = _key(name, envd)
             hit = _api_cache.get(key)
             if hit and now - hit[0] < API_CACHE_S:
-                out[key] = hit[1]
-            else:
-                todo[key] = (a or {}).get("env") or {}
-    if todo:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(todo))) as ex:
-            futs = {k: ex.submit(CU.usage_for, e, timeout) for k, e in todo.items()}
-            for k, f in futs.items():
-                try:
-                    res = f.result(timeout=timeout + 15)
-                except Exception:  # noqa: BLE001 — one account never breaks the view
-                    res = {"error": "network"}
-                out[k] = res
-                with _api_lock:
-                    _api_cache[k] = (now, res)
+                out[f"claude@{name}"] = hit[1]
+                continue
+            fut = _inflight.get(key)
+            if fut is None:
+                fut = _inflight[key] = _start(key, envd, timeout, now)
+            waiting[f"claude@{name}"] = fut
+    deadline = time.monotonic() + wait_s
+    for label, fut in waiting.items():
+        try:
+            out[label] = fut.result(timeout=max(0.0, deadline - time.monotonic()))
+        except concurrent.futures.TimeoutError:
+            out[label] = {"error": "network"}              # still running: the next call picks it up
     return out
 
 

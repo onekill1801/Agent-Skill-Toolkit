@@ -26,7 +26,8 @@ import urllib.request
 from agent_skill_toolkit.core import env, tls
 
 DEFAULT_URL = "https://api.anthropic.com/api/oauth/usage"
-TIMEOUT_S = 10
+TIMEOUT_S = 10              # WHOLE request (connect + headers + body), not per socket read
+MAX_BYTES = 256 * 1024      # the real answer is ~2 KB
 USER_AGENT = "agent-skill-toolkit"
 
 
@@ -56,8 +57,11 @@ def read_access(directory: str, now: float = None) -> dict:
         return {"error": "unreadable"}
     try:
         with open(path, encoding="utf-8") as f:
-            oauth = (json.load(f) or {}).get("claudeAiOauth") or {}
-    except (OSError, ValueError, AttributeError):
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return {"error": "unreadable"}
+    oauth = doc.get("claudeAiOauth") if isinstance(doc, dict) else None
+    if not isinstance(oauth, dict):                          # shape checked, never an AttributeError (R1 #4)
         return {"error": "unreadable"}
     token, exp = oauth.get("accessToken"), oauth.get("expiresAt")
     if not isinstance(token, str) or not token:
@@ -91,8 +95,10 @@ def _bucket(b, now):
 def parse(data: dict, now: float = None) -> dict:
     """Endpoint JSON -> the same shape as workflows.execution.accounts uses for Orca readings."""
     now = now or time.time()
-    out = {"session": _bucket((data or {}).get("five_hour"), now),
-           "weekly": _bucket((data or {}).get("seven_day"), now), "age_min": 0}
+    if not isinstance(data, dict):
+        raise ValueError("usage response is not an object")
+    out = {"session": _bucket(data.get("five_hour"), now),
+           "weekly": _bucket(data.get("seven_day"), now), "age_min": 0}
     if out["session"] is None and out["weekly"] is None:
         raise ValueError("no usage buckets in the response")
     return out
@@ -103,8 +109,21 @@ def fetch(token: str, timeout: float = TIMEOUT_S) -> dict:
         "Authorization": "Bearer " + token, "anthropic-beta": "oauth-2025-04-20",
         "Accept": "application/json", "User-Agent": USER_AGENT})
     opener = urllib.request.build_opener(_NoRedirect(), urllib.request.HTTPSHandler(context=tls.context()))
+    deadline = time.monotonic() + timeout
     with opener.open(req, timeout=timeout) as r:
-        return json.load(r)
+        # bounded body + overall deadline: a server trickling bytes can not hold the caller (R1 #3)
+        chunks, size = [], 0
+        while True:
+            if time.monotonic() > deadline:
+                raise TimeoutError("usage request took longer than its deadline")
+            b = r.read(8192)
+            if not b:
+                break
+            size += len(b)
+            if size > MAX_BYTES:
+                raise ValueError("usage response too large")
+            chunks.append(b)
+    return json.loads(b"".join(chunks).decode("utf-8"))
 
 
 def usage_for(account_env: dict, timeout: float = TIMEOUT_S, now: float = None) -> dict:
