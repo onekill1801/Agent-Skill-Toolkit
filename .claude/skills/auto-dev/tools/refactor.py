@@ -8,6 +8,8 @@
     python refactor.py program new --repo DIR --goal "..." --invariants "..." --slices FILE.json [--base develop]
     python refactor.py program approve <program_id>                     # YOU approve the plan -> slices start
     python refactor.py program status <program_id>
+    python refactor.py snapshot record --repo DIR --rung NAME [--spec FILE]   # (re)write the rung's snapshot
+    python refactor.py metrics  record --repo DIR --rung NAME [--spec FILE]   # (re)write the rung's baseline
 
 slices.json: [{"id": "s1", "title": "...", "desc": "...", "acs": ["..."], "depends_on": []}, ...]
 Each slice: own worktree + branch refactor/<goal>-<id>, the implement agent codes it, the verify ladder
@@ -121,6 +123,45 @@ def program(action: str, a) -> dict:
                 "tasks": [{k2: k.get(k2) for k2 in ("id", "kind", "title", "status", "last_error")} for k in kids]}
 
 
+def record(kind: str, repo: str, rung_name: str, spec_file: str = "") -> dict:
+    """Run a snapshot / metrics rung's command NOW (working tree) and write its file for you to review and
+    commit. The rung definition comes from the trusted spec (base ref .agent/project.yml or --spec)."""
+    import json
+    from agent_skill_toolkit.core import proc, winexec
+    from agent_skill_toolkit.workflows.verify import ladder as L
+    from agent_skill_toolkit.workflows.verify import safety
+    repo = os.path.abspath(repo)
+    spec = L.load_spec(repo, "", spec_file)
+    rung = next((r for r in spec["rungs"] if r["name"] == rung_name), None)
+    if not rung or rung.get("kind") != kind:
+        raise ValueError(f"no `kind: {kind}` rung named {rung_name!r} in the spec")
+    p = proc.run(winexec.command(L.in_repo(repo, L.argv_of(rung["run"]))), timeout=int(rung.get("timeout", 1800)),
+                 cwd=repo)
+    if p.returncode != 0:
+        raise RuntimeError(f"the command failed (exit {p.returncode}): {(p.stderr or p.stdout)[-400:]}")
+    text = p.stdout or ""
+    if rung.get("output"):
+        with open(os.path.join(repo, rung["output"]), encoding="utf-8") as f:
+            text = f.read()
+    target = rung.get("snapshot") if kind == "snapshot" else rung.get("baseline")
+    path = os.path.join(repo, L._norm(str(target or "")) or "")
+    if not L._norm(str(target or "")):
+        raise ValueError(f"rung {rung_name!r} has no valid `{'snapshot' if kind == 'snapshot' else 'baseline'}` path")
+    if kind == "snapshot":
+        body = safety.normalize(text, rung.get("format") or "text")
+    else:
+        previous = {}
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                previous = safety.parse_baseline(f.read())
+        body = safety.baseline_doc(safety.parse_metrics(text), previous, rung.get("higher_is_better") or {},
+                                   float(rung.get("tolerance", 0.05)))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(body)
+    return {"written": path, "rung": rung_name, "next": "review the file, then commit it (base ref = the reference)"}
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="refactor.py")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -137,6 +178,12 @@ def main(argv=None) -> int:
     p.add_argument("--slices", default="")
     p.add_argument("--base", default="")
     p.add_argument("--spec", default="", help="trusted verify spec file (else .agent/project.yml on the base)")
+    for kind in ("snapshot", "metrics"):
+        p = sub.add_parser(kind)
+        p.add_argument("action", choices=["record"])
+        p.add_argument("--repo", required=True)
+        p.add_argument("--rung", required=True)
+        p.add_argument("--spec", default="")
     p = sub.add_parser("ratchet")
     p.add_argument("action", choices=["check", "init", "tighten"])
     p.add_argument("--repo", required=True)
@@ -149,6 +196,8 @@ def main(argv=None) -> int:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(survey.markdown(s))
             out = {**s, "report": path}
+        elif a.cmd in ("snapshot", "metrics"):
+            out = record(a.cmd, a.repo, a.rung, a.spec)
         elif a.cmd == "program":
             if a.action == "new" and not (a.repo and a.goal and a.slices):
                 raise ValueError("program new needs --repo, --goal and --slices")

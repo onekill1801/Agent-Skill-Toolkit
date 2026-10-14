@@ -618,8 +618,86 @@ def rung_ratchet(ctx, rung: dict, job: dict) -> dict:
             "summary": summary}
 
 
+def _capture(ctx, rung: dict, job: dict) -> tuple:
+    """Run the rung's command; its output = `output` file (read after the run) or stdout.
+    -> (output text | None, failure dict | None)"""
+    repo = job["repo"]
+    argv = argv_of(rung["run"])
+    timeout = int(rung.get("timeout", 1800))
+    t0 = time.time()
+    try:
+        p = ctx.run(winexec.command(in_repo(repo, argv)), timeout=timeout, cwd=repo)
+    except FileNotFoundError as e:
+        return None, {"passed": False, "fixable": False, "summary": f"command not found: {e}"}
+    except winexec.UnsafeLauncher as e:
+        raise E.NeedsHuman(f"cannot run `{argv[0]}` safely: {e}")
+    except subprocess.TimeoutExpired:
+        return None, {"passed": False, "fixable": False, "summary": f"timed out after {timeout}s"}
+    if p.returncode != 0:
+        return None, {"passed": False, "summary": summarize((p.stdout or "") + "\n" + (p.stderr or "")),
+                      "exit": p.returncode, "seconds": round(time.time() - t0, 1)}
+    if rung.get("output"):
+        out_path = os.path.join(repo, _norm(str(rung["output"])) or "")
+        if not _norm(str(rung["output"])) or not os.path.isfile(out_path):
+            return None, {"passed": False, "fixable": False, "summary": f"`{rung['output']}` was not written"}
+        with open(out_path, encoding="utf-8", errors="replace") as f:
+            return f.read(), None
+    return p.stdout or "", None
+
+
+def rung_snapshot(ctx, rung: dict, job: dict) -> dict:
+    """Output must equal the snapshot recorded on the BASE ref (F.10c). A difference is a contract /
+    behaviour change: a human decides (re-record it on purpose), never the fixer."""
+    from agent_skill_toolkit.workflows.verify import safety
+    snap = rung.get("snapshot") or ""
+    expected = git(job["repo"], "show", f"{job['base']}:{snap}", check=False) if _norm(snap) else ""
+    if not expected:
+        return {"passed": False, "fixable": False,
+                "summary": f"no snapshot `{snap}` on {job['base'][:8]} — record it: refactor.py snapshot record"}
+    actual, failed = _capture(ctx, rung, job)
+    if failed:
+        return failed
+    cmp = safety.compare_snapshot(expected, actual, rung.get("format") or "text")
+    if cmp["equal"]:
+        return {"passed": True, "snapshot": snap}
+    return {"passed": False, "fixable": False, "snapshot": snap,
+            "summary": f"output differs from `{snap}` (a behaviour / contract change — decide, then re-record):\n"
+                       + "\n".join(cmp["diff"])}
+
+
+def rung_metrics(ctx, rung: dict, job: dict) -> dict:
+    """Every baseline metric (BASE ref) within tolerance (F.10c). Not fixable unless the rung says
+    `fixable: true` (a fixer could "optimize" by breaking behaviour)."""
+    from agent_skill_toolkit.workflows.verify import safety
+    path = rung.get("baseline") or ""
+    raw = git(job["repo"], "show", f"{job['base']}:{path}", check=False) if _norm(path) else ""
+    if not raw:
+        return {"passed": False, "fixable": False,
+                "summary": f"no baseline `{path}` on {job['base'][:8]} — record it: refactor.py metrics record"}
+    try:
+        baseline = safety.parse_baseline(raw)
+    except ValueError as e:
+        return {"passed": False, "fixable": False, "summary": f"baseline unreadable: {e}"}
+    out, failed = _capture(ctx, rung, job)
+    if failed:
+        return failed
+    try:
+        current = safety.parse_metrics(out)
+    except ValueError as e:
+        return {"passed": False, "fixable": False, "summary": f"metrics output unreadable: {e}"}
+    cmp = safety.compare_metrics(baseline, current)
+    res = {"passed": cmp["passed"], "metrics": cmp["rows"], "missing": cmp["missing"]}
+    if not cmp["passed"]:
+        res["fixable"] = bool(rung.get("fixable", False))
+        bad = [f"{r['name']}: {r['now']:g} (base {r['base']:g}, limit {r['limit']:g}, {r['better']} is better)"
+               for r in cmp["rows"] if not r["ok"]] + [f"{m}: missing" for m in cmp["missing"]]
+        res["summary"] = "metrics outside the baseline:\n" + "\n".join(bad)
+    return res
+
+
 RUNGS = {"cmd": rung_cmd, "affected_tests": rung_affected, "cross_review": rung_cross_review,
-         "ac_coverage": rung_ac_coverage, "ratchet": rung_ratchet}
+         "ac_coverage": rung_ac_coverage, "ratchet": rung_ratchet, "snapshot": rung_snapshot,
+         "metrics": rung_metrics}
 
 
 # ----------------------------------------------------------------------------- fix loop
@@ -696,7 +774,7 @@ def spec_launchers(spec: dict) -> list:
     out = []
     for r in spec.get("rungs", []):
         name = r.get("name", "?")
-        if r.get("kind", "cmd") not in ("cmd", "affected_tests"):
+        if r.get("kind", "cmd") not in ("cmd", "affected_tests", "snapshot", "metrics"):
             continue                                   # cross_review runs no repo code
         try:
             argv = argv_of(r.get("run")) if r.get("run") else []

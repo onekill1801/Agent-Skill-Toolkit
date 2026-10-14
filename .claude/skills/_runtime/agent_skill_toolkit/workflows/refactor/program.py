@@ -147,12 +147,16 @@ def create(st, repo: str, goal: str, invariants: str, slices: list, base: str, s
     if out.get("duplicate"):
         return {"program": out["duplicate"], "duplicate": True}
     t = out["tasks"]
+    kinds = {r.get("kind", "cmd") for r in spec["rungs"]}
+    warnings = [w for k, w in (("snapshot", "no `kind: snapshot` rung: API contract / behaviour is not pinned"),
+                               ("metrics", "no `kind: metrics` rung: performance >= baseline is not checked"))
+                if k not in kinds]
     publish_ids = {sl["id"]: t[f"publish:{sl['id']}"] for sl in slices}
     for sl in slices:                   # every cross-task link by id — never searched for (Codex F.10b R2/R3)
         st.patch_data(t[f"impl:{sl['id']}"], ("queued", "blocked"), publish_ids=publish_ids,
                       dep_publish={d: publish_ids[d] for d in sl["depends_on"]})
         st.patch_data(t[f"publish:{sl['id']}"], ("queued", "blocked"), verify_id=t[f"verify:{sl['id']}"])
-    return {"program": t["program"], "duplicate": False, "run": run, "base": base_sha,
+    return {"program": t["program"], "duplicate": False, "run": run, "base": base_sha, "warnings": warnings,
             "slices": [{"slice": s["id"], "implement": t[f"impl:{s['id']}"], "verify": t[f"verify:{s['id']}"],
                         "publish": t[f"publish:{s['id']}"], "branch": branches[s["id"]]} for s in slices]}
 

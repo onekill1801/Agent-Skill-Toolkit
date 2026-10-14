@@ -51,6 +51,7 @@ RUNTIME_EDGES = {
     ("agent_skill_toolkit.workflows.proposal.flow", "proposals.py"): "tells the human how to go / decide",
     ("agent_skill_toolkit.workflows.proposal.scan", "proposals.py"): "digest tells the human how to go / reject",
     ("agent_skill_toolkit.workflows.refactor.program", "refactor.py"): "tells the human how to approve",
+    ("agent_skill_toolkit.workflows.verify.ladder", "refactor.py"): "tells the human how to (re)record a snapshot",
 }
 # runtime modules that START processes, whatever the target (a variable argv cannot be resolved statically)
 SPAWNERS = {

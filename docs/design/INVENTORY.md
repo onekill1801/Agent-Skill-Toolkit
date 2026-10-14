@@ -39,6 +39,7 @@
 | `agent_skill_toolkit.workflows.refactor.survey` | workflows.refactor |
 | `agent_skill_toolkit.workflows.verify` | workflows.verify |
 | `agent_skill_toolkit.workflows.verify.ladder` | workflows.verify |
+| `agent_skill_toolkit.workflows.verify.safety` | workflows.verify |
 | `agent_skill_toolkit.workflows.verify.unittest_junit` | workflows.verify |
 
 ## Phụ thuộc giữa các vùng (số cạnh import)
@@ -77,6 +78,7 @@
 - `('agent_skill_toolkit.workflows.proposal.scan', 'proposals.py')` → `digest tells the human how to go / reject`
 - `('agent_skill_toolkit.workflows.refactor.program', 'refactor.py')` → `tells the human how to approve`
 - `('agent_skill_toolkit.workflows.verify.ladder', '.claude/skills/auto-dev/tools/agent_runner.py')` → `agents run through agent_runner`
+- `('agent_skill_toolkit.workflows.verify.ladder', 'refactor.py')` → `tells the human how to (re)record a snapshot`
 - `('agent_skill_toolkit.workflows.verify.unittest_junit', 'unittest_junit.py')` → `its own argparse prog name`
 
 ## Tool của skill (107 file; 12 là vỏ dùng runtime)
@@ -106,7 +108,7 @@
 | auto-dev | `grounding.py` |  | run, scout | 436 |
 | auto-dev | `proposals.py` | ✅ | decide, go, list, new, refresh, scan | 221 |
 | auto-dev | `queue_worker.py` |  | run | 161 |
-| auto-dev | `refactor.py` | ✅ | program, ratchet, survey | 170 |
+| auto-dev | `refactor.py` | ✅ | metrics, program, ratchet, snapshot, survey | 219 |
 | auto-dev | `review_gate.py` |  | run | 121 |
 | auto-dev | `task_queue.py` |  | add, answer, approve, ask-tg, done, intake, list, mark, next, release, remove, reply, requeue, scan, show | 884 |
 | auto-dev | `tg_gate.py` |  | parse, reply, send, wait | 228 |
@@ -155,9 +157,9 @@
 | fork-terminal | `worktree_manager.py` |  | create, remove | 174 |
 | mr-review | `review_common.py` | ✅ |  | 334 |
 | mr-review | `review_flow.py` | ✅ | enqueue, enqueue-text, reconcile, release-quarantine, status, work | 449 |
-| mr-review | `review_post.py` |  | approval-status, approve, post, reject, render, request-approval, sweep, validate | 517 |
+| mr-review | `review_post.py` |  | approval-status, approve, post, reject, render, request-approval, sweep, validate | 552 |
 | mr-review | `review_queue.py` | ✅ | add, add-text, cancel, list, next, pending, set, show | 229 |
-| mr-review | `review_rules.py` |  |  | 153 |
+| mr-review | `review_rules.py` |  |  | 165 |
 | mr-review | `review_ws.py` |  | check-stale, cleanup, diff, gc, prepare | 394 |
 | new-product | `intake.py` |  | build | 189 |
 | new-product | `registry.py` |  | add, get, list, remove | 169 |
@@ -191,7 +193,7 @@
 | tchat-automation | `ws_client.py` |  |  | 147 |
 | team-registry | `team.py` |  | bootstrap, get, list, match, remove, set | 223 |
 
-## Test: 33 file, 598 hàm test
+## Test: 34 file, 613 hàm test
 
 - `test_agent_init.py`
 - `test_agentkit.py`
@@ -218,6 +220,7 @@
 - `test_refactor_program.py`
 - `test_review_flow.py`
 - `test_run_log.py`
+- `test_safety_net.py`
 - `test_store_engine.py`
 - `test_task_queue.py`
 - `test_triage.py`

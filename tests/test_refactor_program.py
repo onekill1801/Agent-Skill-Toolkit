@@ -110,6 +110,7 @@ class ProgramTest(unittest.TestCase):
     def test_plan_gate_then_stacked_slices_verified(self):
         out = self.new()
         pid = out["program"]
+        self.assertEqual(len(out["warnings"]), 2)                # no snapshot / metrics safety net (F.10c)
         self.work()
         with S.Store() as st:
             t = st.get(pid)
