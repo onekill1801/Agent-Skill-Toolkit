@@ -87,7 +87,8 @@ API_WAIT_S = CU.TIMEOUT_S + 5
 # this process only, never written. key = (name, credentials dir, endpoint): a renamed / re-pointed
 # account is a NEW entry, never the old account's numbers (Codex usage R1 #2)
 _api_cache = {}            # key -> (fetched_at, result)
-_inflight = {}             # key -> Future: concurrent callers share ONE request (R1 #1)
+_inflight = {}             # key -> (Future, started): concurrent callers share ONE request (R1 #1)
+STUCK_S = 3 * CU.TIMEOUT_S  # an in-flight request older than this is abandoned, a new one may start (R2 #1)
 _api_lock = threading.Lock()
 
 
@@ -111,7 +112,8 @@ def _start(key, envd, timeout, asked_at) -> concurrent.futures.Future:
             res = {"error": "network"}
         with _api_lock:
             _api_cache[key] = (asked_at, res)
-            _inflight.pop(key, None)
+            if (_inflight.get(key) or (None,))[0] is fut:      # only clear OUR entry, not a newer one
+                _inflight.pop(key, None)
         fut.set_result(res)
     threading.Thread(target=run, name=f"usage-{key[0]}", daemon=True).start()
     return fut
@@ -131,10 +133,10 @@ def read_api_usage(cfg: dict, timeout: float = CU.TIMEOUT_S, now: float = None, 
             if hit and now - hit[0] < API_CACHE_S:
                 out[f"claude@{name}"] = hit[1]
                 continue
-            fut = _inflight.get(key)
-            if fut is None:
-                fut = _inflight[key] = _start(key, envd, timeout, now)
-            waiting[f"claude@{name}"] = fut
+            entry = _inflight.get(key)
+            if entry is None or time.monotonic() - entry[1] > STUCK_S:
+                entry = _inflight[key] = (_start(key, envd, timeout, now), time.monotonic())
+            waiting[f"claude@{name}"] = entry[0]
     deadline = time.monotonic() + wait_s
     for label, fut in waiting.items():
         try:

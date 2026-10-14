@@ -111,19 +111,26 @@ def fetch(token: str, timeout: float = TIMEOUT_S) -> dict:
     opener = urllib.request.build_opener(_NoRedirect(), urllib.request.HTTPSHandler(context=tls.context()))
     deadline = time.monotonic() + timeout
     with opener.open(req, timeout=timeout) as r:
-        # bounded body + overall deadline: a server trickling bytes can not hold the caller (R1 #3)
-        chunks, size = [], 0
-        while True:
-            if time.monotonic() > deadline:
-                raise TimeoutError("usage request took longer than its deadline")
-            b = r.read(8192)
-            if not b:
-                break
-            size += len(b)
-            if size > MAX_BYTES:
-                raise ValueError("usage response too large")
-            chunks.append(b)
-    return json.loads(b"".join(chunks).decode("utf-8"))
+        body = read_body(r, deadline)
+    return json.loads(body.decode("utf-8"))
+
+
+def read_body(r, deadline: float, max_bytes: int = MAX_BYTES) -> bytes:
+    """Bounded body under an overall monotonic deadline. read1() returns what ONE socket read gives
+    (read(n) would wait for n bytes — a server trickling a byte at a time could hold it far past the
+    deadline: Codex usage R2 #1), and each socket read is itself bounded by the request timeout."""
+    read = getattr(r, "read1", None) or r.read
+    chunks, size = [], 0
+    while True:
+        if time.monotonic() > deadline:
+            raise TimeoutError("usage request took longer than its deadline")
+        b = read(8192)
+        if not b:
+            return b"".join(chunks)
+        size += len(b)
+        if size > max_bytes:
+            raise ValueError("usage response too large")
+        chunks.append(b)
 
 
 def usage_for(account_env: dict, timeout: float = TIMEOUT_S, now: float = None) -> dict:

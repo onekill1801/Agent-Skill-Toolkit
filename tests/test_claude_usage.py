@@ -256,6 +256,24 @@ class FacadeTest(unittest.TestCase):
                 time.sleep(0.05)
             self.assertEqual(ACC.read_api_usage(cfg, now=NOW + 1)["claude@a"], {"error": "expired"})   # landed
 
+    def test_an_abandoned_request_lets_a_new_one_start(self):
+        import threading
+        gate = threading.Event()
+        cfg = {"accounts": {"claude": {"a": {"env": {"CLAUDE_CONFIG_DIR": "/a"}}}}}
+        calls = []
+
+        def usage_for(envd, timeout):
+            calls.append(1)
+            if len(calls) == 1:
+                gate.wait(5)                                       # the first request hangs
+            return {"error": "expired"}
+        with mock.patch.object(ACC.CU, "usage_for", side_effect=usage_for), mock.patch.object(ACC, "STUCK_S", 0.1):
+            ACC.read_api_usage(cfg, now=NOW, wait_s=0.05)
+            time.sleep(0.2)
+            out = ACC.read_api_usage(cfg, now=NOW + 1, wait_s=2)     # stuck one abandoned -> a new request
+            gate.set()
+        self.assertEqual((len(calls), out["claude@a"]), (2, {"error": "expired"}))
+
     def test_orca_only_skips_the_api(self):
         with mock.patch.object(ACC.orca_adapter, "account_list", return_value={}),                 mock.patch.object(ACC, "read_api_usage", side_effect=AssertionError("no api")):
             ACC.gather(api=False)
@@ -297,6 +315,38 @@ class ShapeAndDeadlineTest(unittest.TestCase):
     def test_body_is_bounded(self):
         with self.assertRaises(ValueError):
             self._fetch_with([b"x" * 8192] * 40)
+
+    def test_real_http_response_trickling_hits_the_deadline(self):
+        """A real buffered http.client.HTTPResponse fed one byte every 50 ms (Codex usage R2 #1)."""
+        import http.client
+
+        class Trickle(io.RawIOBase):
+            def __init__(self, head, body):
+                self.head, self.body = head, body
+
+            def readable(self):
+                return True
+
+            def readinto(self, buf):
+                if self.head:
+                    n = min(len(buf), len(self.head))
+                    buf[:n], self.head = self.head[:n], self.head[n:]
+                    return n
+                if not self.body:
+                    return 0
+                time.sleep(0.05)
+                buf[:1], self.body = self.body[:1], self.body[1:]
+                return 1
+
+        class Sock:
+            def makefile(self, mode):
+                return io.BufferedReader(Trickle(b"HTTP/1.1 200 OK\r\nContent-Length: 400\r\n\r\n", b"x" * 400))
+        r = http.client.HTTPResponse(Sock())
+        r.begin()
+        t0 = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            CU.read_body(r, time.monotonic() + 0.2)
+        self.assertLess(time.monotonic() - t0, 0.6)
 
     def test_trickling_server_hits_the_overall_deadline(self):
         def slow():
