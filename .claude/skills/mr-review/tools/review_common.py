@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Shared helpers for the mr-review tools (queue / workspace / post).
 
-Not run directly. Stdlib only; reuses dev-automation's config + gitlab_api.
+Not run directly. Stdlib only; GitLab calls go through the runtime's integrations.gitlab (R.M4);
+dev-automation's config is still used for the toolkit settings.
 
 Layout (all gitignored):
     temp/review_queue/jobs/<job_id>.json     one job per MR  (job_id = "<project_id>-<iid>")
@@ -29,6 +30,7 @@ import runpy  # noqa: E402
 
 runpy.run_path(os.path.join(_HERE, "..", "..", "_runtime", "bootstrap.py"))["activate"]()
 from agent_skill_toolkit.core import locks as _core_locks  # noqa: E402
+from agent_skill_toolkit.integrations import gitlab as _gitlab  # noqa: E402
 
 import config  # noqa: E402  (dev-automation .env loader)
 import gitlab_api  # noqa: E402
@@ -150,10 +152,10 @@ def log_event(job: dict, event: str, **detail) -> None:
 
 @contextlib.contextmanager
 def gitlab_project(project_id):
-    """Scope gitlab_api calls of THIS thread to one project (thread-local, never os.environ:
-    parallel coordinator workers review different projects at once — Codex F.7 #1)."""
-    with gitlab_api.project_scope(project_id):
-        yield gitlab_api
+    """A GitLab client for ONE project (integrations.gitlab, R.M4): the project is fixed in the object, so
+    parallel coordinator workers on different projects never share state (Codex F.7 #1); same call
+    surface as before (get_merge_request, add_mr_comment, _api, _request)."""
+    yield _gitlab.Client(project_id)
 
 
 def gl_check(res, what: str):
@@ -164,8 +166,7 @@ def gl_check(res, what: str):
 
 def gitlab_project_info(project) -> dict:
     """project = numeric id or 'group/sub/repo' path."""
-    pid = urllib.parse.quote(str(project), safe="")
-    return gl_check(gitlab_api._request(f"{config.gitlab_base_url()}/projects/{pid}"), "project lookup")
+    return gl_check(_gitlab.project_info(project), "project lookup")
 
 
 def gitlab_mr(project_id, iid) -> dict:

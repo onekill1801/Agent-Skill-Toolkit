@@ -16,6 +16,8 @@
 | `agent_skill_toolkit.core.text` | core |
 | `agent_skill_toolkit.core.winexec` | core |
 | `agent_skill_toolkit.core.yamlsub` | core |
+| `agent_skill_toolkit.integrations` | integrations |
+| `agent_skill_toolkit.integrations.gitlab` | integrations |
 | `agent_skill_toolkit.workflows` | workflows |
 | `agent_skill_toolkit.workflows.coordinator` | workflows |
 | `agent_skill_toolkit.workflows.engine` | workflows |
@@ -43,6 +45,7 @@
 
 | Từ | Tới | Cạnh |
 |---|---|---|
+| integrations | core | 1 |
 | workflows | core | 5 |
 | workflows.intake | core | 4 |
 | workflows.intake | workflows | 1 |
@@ -150,7 +153,7 @@
 | fork-terminal | `runtime_isolator.py` |  |  | 248 |
 | fork-terminal | `spawn_isolated_agent.py` |  | cleanup, spawn | 112 |
 | fork-terminal | `worktree_manager.py` |  | create, remove | 174 |
-| mr-review | `review_common.py` | ✅ |  | 333 |
+| mr-review | `review_common.py` | ✅ |  | 334 |
 | mr-review | `review_flow.py` | ✅ | enqueue, enqueue-text, reconcile, release-quarantine, status, work | 449 |
 | mr-review | `review_post.py` |  | approval-status, approve, post, reject, render, request-approval, sweep, validate | 517 |
 | mr-review | `review_queue.py` | ✅ | add, add-text, cancel, list, next, pending, set, show | 229 |
@@ -188,7 +191,7 @@
 | tchat-automation | `ws_client.py` |  |  | 147 |
 | team-registry | `team.py` |  | bootstrap, get, list, match, remove, set | 223 |
 
-## Test: 32 file, 590 hàm test
+## Test: 33 file, 598 hàm test
 
 - `test_agent_init.py`
 - `test_agentkit.py`
@@ -201,6 +204,7 @@
 - `test_dbeaver.py`
 - `test_debate_loop.py`
 - `test_fix_loop.py`
+- `test_gitlab_integration.py`
 - `test_grounding_review.py`
 - `test_intake_gate.py`
 - `test_intake_lanes.py`
