@@ -229,9 +229,6 @@ class AtaskProposalTest(Base):
             cf.load_registry(["nope"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class CoordinatorRound1FixesTest(Base):
     """Codex F.7 round 1."""
@@ -367,3 +364,41 @@ class CoordinatorRound1FixesTest(Base):
             verify._upgrade_legacy(st, repo)
             left = [st.get(t["id"]) for t in (idle, running) if st.get(t["id"])["status"] != "cancelled"]
             self.assertEqual([x["resource"] for x in left], [verify.resource_of(repo)])
+
+
+class WorkerThreadsTest(Base):
+    """`coordinator.py work` runs as many worker threads as the stored capacity unless told otherwise."""
+
+    def test_default_follows_the_stored_capacity(self):
+        import coordinator as CO
+        with S.Store() as st:
+            st.set_capacity(10)
+        self.assertEqual(CO.worker_threads(), 10)
+        self.assertEqual(CO.worker_threads(3), 3)                         # --parallel wins
+        with mock.patch.dict(os.environ, {"TOOLKIT_MAX_PARALLEL": "4"}):
+            self.assertEqual(CO.worker_threads(), 4)
+        with mock.patch.dict(os.environ, {"TOOLKIT_MAX_PARALLEL": "junk"}):
+            self.assertEqual(CO.worker_threads(), 10)
+        with S.Store() as st:
+            st.set_capacity(0)                                             # no cap -> a sane default
+        self.assertEqual(CO.worker_threads(), 2)
+
+    def test_work_uses_it(self):
+        import coordinator as CO
+        with S.Store() as st:
+            st.set_capacity(7)
+        seen = {}
+
+        class Fake:
+            def __init__(self, reg, parallel, owner, hooks):
+                seen["parallel"] = parallel
+
+            def run(self, **kw):
+                return {}
+        with mock.patch.object(CO.C, "Coordinator", Fake),                 mock.patch.object(CO, "load_registry", return_value=({}, {}, [])),                 contextlib.redirect_stdout(io.StringIO()):
+            CO.main(["work", "--once"])
+        self.assertEqual(seen["parallel"], 7)
+
+
+if __name__ == "__main__":
+    unittest.main()

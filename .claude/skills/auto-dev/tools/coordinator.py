@@ -2,7 +2,7 @@
 """Coordinator facade (checklist F.7, design §5.2 / §11): run ALL queued work with shared limits and
 show the progress board (agent_skill_toolkit.workflows.coordinator).
 
-    python coordinator.py work  [--parallel 2] [--once] [--interval 30] [--kinds review_mr,verify]
+    python coordinator.py work  [--parallel N] [--once] [--interval 30] [--kinds review_mr,verify]   # N mặc định = capacity
     python coordinator.py board [--json] [--hours 24]        # progress board (open + closed in last N h)
     python coordinator.py accept <task_id> [--lane vua]      # accept an aTask proposal (atask_intake)
     python coordinator.py capacity [N]                       # show / set the SHARED cap on live tasks
@@ -90,11 +90,28 @@ def accept(task_id: str, lane: str = "") -> dict:
     return {"task_id": task_id, "accepted": ok, "kind": tri.get("kind"), "lane": lane}
 
 
+def worker_threads(explicit=None) -> int:
+    """--parallel, else TOOLKIT_MAX_PARALLEL, else the SHARED `capacity` of the store (so `capacity 10`
+    is the one knob: more threads than that could never get work; capacity 0 = no cap -> 2)."""
+    if explicit:
+        return max(1, int(explicit))
+    try:
+        env_n = int(os.environ.get("TOOLKIT_MAX_PARALLEL") or 0)
+    except ValueError:
+        env_n = 0
+    if env_n > 0:                                  # 0 / unset / junk -> the stored capacity decides
+        return env_n
+    with store_mod.Store() as st:
+        cap = st.capacity()
+    return cap if cap > 0 else 2
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="coordinator.py")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("work")
-    p.add_argument("--parallel", type=int, default=int(os.environ.get("TOOLKIT_MAX_PARALLEL") or 2))
+    p.add_argument("--parallel", type=int, default=None,
+                   help="worker threads (default: TOOLKIT_MAX_PARALLEL, else the stored `capacity`)")
     p.add_argument("--once", action="store_true")
     p.add_argument("--interval", type=float, default=30)
     p.add_argument("--kinds", default="")
@@ -123,7 +140,8 @@ def main(argv=None) -> int:
             def show(tick):
                 if tick.get("blocked_orphans"):
                     print(f"[coordinator] blocked (dependency failed): {tick['blocked_orphans']}", file=sys.stderr)
-            out = C.Coordinator(reg, a.parallel, a.owner, hooks).run(once=a.once, interval=a.interval, on_tick=show)
+            out = C.Coordinator(reg, worker_threads(a.parallel), a.owner, hooks).run(
+                once=a.once, interval=a.interval, on_tick=show)
             out["warnings"] = warn
         elif a.cmd == "board":
             with store_mod.Store() as st:
