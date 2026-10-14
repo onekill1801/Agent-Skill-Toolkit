@@ -282,6 +282,19 @@ class AutoPostRulesTest(unittest.TestCase):
         self.assertEqual(out["inline"], 1)                                   # recognised as already posted
         self.assertEqual(len(state["posted"]), 1)
 
+    def test_reconcile_reads_every_page_and_any_index(self):                  # Codex R.M4 R2
+        job = self.job()
+        pages = {1: [{"notes": [{"body": "unrelated"}]}] * 100,
+                 2: [{"notes": [{"body": "x\n\n" + rp.inline_marker(job, 250)}]}]}
+        gl = mock.Mock()
+        gl._api.side_effect = lambda p: p
+        gl._request.side_effect = lambda url, **kw: pages.get(int(url.rsplit("page=", 1)[1]), [])
+        self.assertEqual(rp.inline_already_posted(gl, job), {250})
+        gl._request.side_effect = lambda url, **kw: (pages[1] if url.endswith("page=1") else
+                                                     {"error": True, "status": 500, "message": "boom"})
+        with self.assertRaises(RuntimeError):                                  # a partial read is not "absent"
+            rp.inline_already_posted(gl, job)
+
     def test_unreadable_notes_never_mean_not_posted(self):                     # Codex R.M4 R1 #1
         gl = mock.Mock()
         gl._api.side_effect = lambda p: p

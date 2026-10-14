@@ -314,13 +314,15 @@ def inline_marker(job: dict, i: int) -> str:
 
 
 def inline_already_posted(gl, job: dict) -> set:
-    """Finding indices whose marker is already in a discussion of this MR (reconcile, Codex R.M4 #2)."""
-    url = gl._api(f"/merge_requests/{job['iid']}/discussions?per_page=100")
-    res = gl._request(url)
-    if not isinstance(res, list):
-        raise RuntimeError(f"cannot read MR discussions to reconcile inline comments: {str(res)[:200]}")
-    bodies = " ".join((n.get("body") or "") for d in res for n in (d.get("notes") or []))
-    return {i for i in range(200) if inline_marker(job, i) in bodies}
+    """Finding indices whose marker is already in a discussion of this MR — EVERY page, any index
+    (reconcile, Codex R.M4 R1/R2)."""
+    head = (job.get("diff_refs") or {}).get("head_sha", "")[:12]
+    rx = re.compile(r"<!-- ai-review-inline " + re.escape(head) + r" #(\d+) -->")
+    found = set()
+    for d in rr.all_pages(gl, f"/merge_requests/{job['iid']}/discussions", "discussions"):
+        for n in d.get("notes") or []:
+            found |= {int(m) for m in rx.findall(n.get("body") or "")}
+    return found
 
 
 def _inline(gl, job: dict, f: dict, i: int = 0) -> bool:

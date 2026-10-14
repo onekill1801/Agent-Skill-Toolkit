@@ -124,14 +124,26 @@ def evaluate(job: dict, note: str, inline_bodies: list) -> dict:
     return {"mode": m, "rules_passed": passed, "auto_post": passed and m == "auto", "reasons": reasons}
 
 
+def all_pages(gl, path: str, what: str, per_page: int = 100, max_pages: int = 200):
+    """Every item of a paginated GitLab list (page until a short page). Anything but a list = error:
+    reconciliation never concludes "absent" from a partial or unreadable answer (Codex R.M4 R2)."""
+    sep = "&" if "?" in path else "?"
+    for page in range(1, max_pages + 1):
+        res = gl._request(gl._api(f"{path}{sep}per_page={per_page}&page={page}"))
+        if not isinstance(res, list):
+            raise RuntimeError(f"cannot read MR {what} to reconcile: "
+                               f"{str(res.get('message', res) if isinstance(res, dict) else res)[:200]}")
+        yield from res
+        if len(res) < per_page:
+            return
+    raise RuntimeError(f"MR {what}: more than {max_pages} pages — reconcile by hand")
+
+
 def already_posted(gl, job: dict) -> bool:
-    """Reconcile before (re)posting: is our marker for this head already on the MR?"""
+    """Reconcile before (re)posting: is our marker for this head already on the MR (any page)?"""
     want = marker(job)
-    url = gl._api(f"/merge_requests/{job['iid']}/notes?per_page=100&sort=desc&order_by=created_at")
-    res = gl._request(url)
-    if not isinstance(res, list):                  # an error OR an unexpected body: never "marker absent"
-        raise RuntimeError(f"cannot read MR notes to reconcile: {str(res.get('message', res) if isinstance(res, dict) else res)[:200]}")
-    return any(want in (n.get("body") or "") for n in res)
+    return any(want in (n.get("body") or "")
+               for n in all_pages(gl, f"/merge_requests/{job['iid']}/notes?sort=desc&order_by=created_at", "notes"))
 
 
 def main(argv=None) -> int:
