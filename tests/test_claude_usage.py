@@ -274,6 +274,27 @@ class FacadeTest(unittest.TestCase):
             gate.set()
         self.assertEqual((len(calls), out["claude@a"]), (2, {"error": "expired"}))
 
+    def test_a_late_abandoned_result_never_overwrites_the_newer_one(self):
+        import threading
+        gate = threading.Event()
+        cfg = {"accounts": {"claude": {"a": {"env": {"CLAUDE_CONFIG_DIR": "/a"}}}}}
+        calls = []
+
+        def usage_for(envd, timeout):
+            calls.append(1)
+            if len(calls) == 1:                                    # A: hangs, finishes LAST, says "network"
+                gate.wait(5)
+                return {"error": "network"}
+            return {"error": "http_429"}                           # B: replacement, finishes first
+        with mock.patch.object(ACC.CU, "usage_for", side_effect=usage_for), mock.patch.object(ACC, "STUCK_S", 0.1):
+            ACC.read_api_usage(cfg, now=NOW, wait_s=0.05)
+            time.sleep(0.2)
+            self.assertEqual(ACC.read_api_usage(cfg, now=NOW + 1, wait_s=2)["claude@a"], {"error": "http_429"})
+            gate.set()
+            time.sleep(0.2)                                        # A completes now
+            self.assertEqual(ACC.read_api_usage(cfg, now=NOW + 2)["claude@a"], {"error": "http_429"})
+        self.assertEqual(len(calls), 2)                            # B's cached answer was used, not overwritten
+
     def test_orca_only_skips_the_api(self):
         with mock.patch.object(ACC.orca_adapter, "account_list", return_value={}),                 mock.patch.object(ACC, "read_api_usage", side_effect=AssertionError("no api")):
             ACC.gather(api=False)

@@ -111,9 +111,11 @@ def _start(key, envd, timeout, asked_at) -> concurrent.futures.Future:
         except Exception:  # noqa: BLE001 — usage_for never raises; belt and braces
             res = {"error": "network"}
         with _api_lock:
-            _api_cache[key] = (asked_at, res)
-            if (_inflight.get(key) or (None,))[0] is fut:      # only clear OUR entry, not a newer one
+            # an ABANDONED request (replaced after STUCK_S) neither clears nor overwrites the newer
+            # request's entry / result (Codex usage R2 #1, R3 #1)
+            if (_inflight.get(key) or (None,))[0] is fut:
                 _inflight.pop(key, None)
+                _api_cache[key] = (asked_at, res)
         fut.set_result(res)
     threading.Thread(target=run, name=f"usage-{key[0]}", daemon=True).start()
     return fut
