@@ -166,6 +166,14 @@ class AttributionTest(unittest.TestCase):
         sqlite3.connect(empty).close()
         self.assertEqual(ACC.read_turns(empty), [])                     # no usage table yet
 
+    def test_read_turns_never_creates_the_state_dir(self):
+        state = os.path.join(self.tmp, "no-such-state")
+        env = {k: v for k, v in os.environ.items() if k != "TOOLKIT_STORE"}
+        env["TOOLKIT_STATE_DIR"] = state
+        with mock.patch.dict(os.environ, env, clear=True),                 mock.patch("os.makedirs", side_effect=PermissionError("read-only view must not mkdir")):
+            self.assertEqual(ACC.read_turns(), [])
+        self.assertFalse(os.path.exists(state))
+
     def test_slot_release_retries_while_a_reader_holds_it(self):
         d = os.path.join(self.tmp, "slots")
         real = os.remove

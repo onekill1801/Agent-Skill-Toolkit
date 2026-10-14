@@ -61,7 +61,7 @@ def read_slots(d: str) -> list:
 def read_turns(path: str = None) -> list:
     """Today's agent turns, read through a READ-ONLY connection: no Store() (it migrates the schema,
     takes write locks and would contend with agent reservations — Codex accounts #3)."""
-    path = path or store_mod.default_path()
+    path = path or store_mod.default_path(create=False)       # never mkdir the state dir (Codex R2)
     if not os.path.exists(path):
         return []
     try:

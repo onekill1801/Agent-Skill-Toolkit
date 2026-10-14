@@ -76,8 +76,9 @@ class LeaseLost(Exception):
     """The caller no longer holds the task (lease expired, or the task was claimed again)."""
 
 
-def default_path() -> str:
-    return os.environ.get("TOOLKIT_STORE") or paths.state_dir("toolkit.db")
+def default_path(create: bool = True) -> str:
+    """create=False: just the path (no state directory made) — for read-only views."""
+    return os.environ.get("TOOLKIT_STORE") or (paths.state_dir if create else paths.state_path)("toolkit.db")
 
 
 def _row(r) -> dict:

@@ -16,9 +16,14 @@ def toolkit_root() -> str:
     return os.environ.get("TOOLKIT_ROOT") or _DEFAULT_ROOT
 
 
-def state_dir(*parts: str) -> str:
+def state_path(*parts: str) -> str:
+    """Where state_dir() would point — WITHOUT creating anything (for read-only views)."""
     base = os.environ.get("TOOLKIT_STATE_DIR") or os.path.join(toolkit_root(), "temp")
-    path = os.path.join(base, *parts)
+    return os.path.join(base, *parts)
+
+
+def state_dir(*parts: str) -> str:
+    path = state_path(*parts)
     os.makedirs(path if not os.path.splitext(path)[1] else os.path.dirname(path), exist_ok=True)
     return path
 
