@@ -46,10 +46,10 @@ IDLE_S = 60                 # no request for this long: the worker stops polling
 ACCOUNTS_CACHE_S = 30       # `orca account list` is a subprocess: at most twice a minute
 ORCA_TIMEOUT_S = 10
 FRESH_WAIT_S = 6            # `?fresh=1` waits at most this long for the new snapshot
-# free-text keys redacted before leaving the process (task errors / notes / titles may echo a command
-# output with a token in it — Codex dashboard #1); ids, paths and numbers are left alone
-TEXT_KEYS = {"error", "note", "title", "detail", "summary", "message", "orca_error", "name", "warning",
-             "last_error", "verdict", "by", "requested_by"}
+# EVERY string leaving the process is redacted (a token can hide in a title, an error, a branch, a
+# resource… — Codex dashboard #1, R2 #1), except values the toolkit generates itself: ids / enums
+SAFE_KEYS = {"id", "task_id", "parent", "deps", "orca_id", "qid", "run_id", "status", "kind", "icon",
+             "state", "event", "usage_source", "tier", "orca", "account", "backend", "host"}
 _cache = {"accounts_at": 0.0, "accounts": None}
 
 
@@ -58,7 +58,7 @@ def _clean(obj, key=""):
         return {k: _clean(v, k) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_clean(v, key) for v in obj]
-    if isinstance(obj, str) and key in TEXT_KEYS:
+    if isinstance(obj, str) and key not in SAFE_KEYS:
         return redact(obj)
     return obj
 
@@ -91,8 +91,11 @@ def read_store() -> dict:
         settings = {"capacity": st.capacity(),
                     "daily_agent_runs": int(st.get_setting("daily_agent_runs") or 0),
                     "agent_runs_today": today["runs"], "agent_seconds_today": round(today["seconds"])}
+        # counted in SQL, independent of the board's display limit (Codex dashboard R2 #3)
+        done_24h = st.db.execute("select count(*) n from tasks where status='done' and updated>=?",
+                                 (time.time() - 86400,)).fetchone()["n"]
         return {"exists": True, "rows": b["rows"], "summary": b["summary"], "settings": settings,
-                "done_24h": sum(r["status"] == "done" for r in b["rows"])}
+                "done_24h": done_24h}
     finally:
         st.close()
 
@@ -108,9 +111,42 @@ def read_accounts() -> dict:
     return data
 
 
-def read_approvals() -> list:
+def _json_files(d: str):
+    """(name, data) of every *.json in d, plus how many could NOT be read: a skipped file must
+    never turn into "nothing to do" on the page (Codex dashboard R2 #2)."""
+    ok, bad = [], 0
+    if not os.path.isdir(d):
+        return ok, bad
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return ok, 1
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(d, name), encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            continue                                          # removed while listing: not an error
+        except (OSError, ValueError):
+            bad += 1
+            continue
+        if isinstance(data, dict):
+            ok.append((name, data))
+        else:
+            bad += 1
+    return ok, bad
+
+
+def read_approvals() -> dict:
     """Pending approval requests — the SAME directory rc_config/approvals write (TOOLKIT_STATE_DIR aware)."""
-    return status_mod.sect_approvals(os.path.join(_state_base(), "tg_approvals"))
+    files, bad = _json_files(os.path.join(_state_base(), "tg_approvals"))
+    items = [{"id": r.get("id"), "tool": r.get("tool"), "risk": r.get("risk"),
+              "summary": (r.get("summary") or "")[:60], "created": r.get("created") or 0}
+             for _, r in files if r.get("status") == "pending" and r.get("id") and r.get("tool")]
+    items.sort(key=lambda a: a["created"], reverse=True)
+    return {"items": items, "unreadable": bad}
 
 
 def read_reviews() -> dict:
@@ -118,26 +154,17 @@ def read_reviews() -> dict:
     jobs_dir = os.path.join(os.environ.get("REVIEW_STATE_DIR")
                             or os.path.join(status_mod._repo_root(), "temp", "review_queue"), "jobs")
     out = []
-    if os.path.isdir(jobs_dir):
-        for name in sorted(os.listdir(jobs_dir)):
-            if not name.endswith(".json"):
-                continue
-            try:
-                with open(os.path.join(jobs_dir, name), encoding="utf-8") as f:
-                    j = json.load(f)
-            except (OSError, ValueError):
-                continue
-            if not isinstance(j, dict):
-                continue
-            out.append({"id": j.get("id"), "status": j.get("status"),
-                        "mr": f"{j.get('project_path') or j.get('project')}!{j.get('iid')}",
-                        "title": (j.get("title") or "")[:90], "verdict": j.get("verdict"),
-                        "branches": f"{j.get('source_branch')} → {j.get('target_branch')}",
-                        "updated": j.get("updated") or j.get("created"),
-                        "by": ", ".join(sorted({str(r.get("by") or r.get("source", ""))
-                                                for r in j.get("requests") or [] if isinstance(r, dict)}))})
+    files, bad = _json_files(jobs_dir)
+    for _, j in files:
+        out.append({"id": j.get("id"), "status": j.get("status"),
+                    "mr": f"{j.get('project_path') or j.get('project')}!{j.get('iid')}",
+                    "title": (j.get("title") or "")[:90], "verdict": j.get("verdict"),
+                    "branches": f"{j.get('source_branch')} → {j.get('target_branch')}",
+                    "updated": j.get("updated") or j.get("created"),
+                    "by": ", ".join(sorted({str(r.get("by") or r.get("source", ""))
+                                            for r in j.get("requests") or [] if isinstance(r, dict)}))})
     out.sort(key=lambda j: str(j.get("updated") or ""), reverse=True)
-    return {"jobs": out}
+    return {"jobs": out, "unreadable": bad}
 
 
 def _port_open(port) -> bool:

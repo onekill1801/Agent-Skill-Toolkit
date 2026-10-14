@@ -86,13 +86,30 @@ class CollectTest(Base):
         self.assertNotIn(tok, text)
         self.assertIn("[REDACTED]", text)
 
+    def test_every_string_is_redacted_except_generated_ids(self):
+        tok = "glpat-" + "B" * 24
+        out = D._clean({"resource": f"repo@{tok}", "branches": tok, "nested": [{"spec": tok}],
+                        "id": "t-1", "status": "blocked"})
+        self.assertNotIn(tok, json.dumps(out))
+        self.assertEqual((out["id"], out["status"]), ("t-1", "blocked"))
+
+    def test_done_24h_is_not_capped_by_the_board_limit(self):
+        with S.Store() as st:
+            for i in range(205):
+                t = st.add("verify", f"r@{i}", title=str(i))
+                st.db.execute("update tasks set status='done' where id=?", (t["id"],))
+        self.assertEqual(D.read_store()["done_24h"], 205)
+
     def test_approvals_follow_toolkit_state_dir(self):
         d = os.path.join(self.tmp, "tg_approvals")
         os.makedirs(d)
         with open(os.path.join(d, "abc.json"), "w", encoding="utf-8") as f:
             json.dump({"id": "abc", "tool": "review_post", "status": "pending", "summary": "post review x-1",
                        "created": 1}, f)
-        self.assertEqual([a["id"] for a in D.read_approvals()], ["abc"])
+        with open(os.path.join(d, "broken.json"), "w", encoding="utf-8") as f:
+            f.write("{not json")
+        out = D.read_approvals()
+        self.assertEqual(([a["id"] for a in out["items"]], out["unreadable"]), (["abc"], 1))
 
     def test_forwards_read_without_creating_dirs_or_running_tools(self):
         with mock.patch("os.makedirs", side_effect=AssertionError("no mkdir")),                 mock.patch("subprocess.run", side_effect=AssertionError("no subprocess")):
@@ -107,15 +124,19 @@ class CollectTest(Base):
 
 
     def test_review_jobs_are_listed_without_creating_dirs(self):
-        self.assertEqual(D.read_reviews(), {"jobs": []})
+        self.assertEqual(D.read_reviews(), {"jobs": [], "unreadable": 0})
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "rq")))
         d = os.path.join(self.tmp, "rq", "jobs")
         os.makedirs(d)
         with open(os.path.join(d, "etask-12.json"), "w", encoding="utf-8") as f:
             json.dump({"id": "etask-12", "status": "awaiting_approval", "project_path": "g/etask", "iid": 12,
                        "title": "Fix NPE", "requests": [{"by": "dungpd15"}]}, f)
-        [j] = D.read_reviews()["jobs"]
+        with open(os.path.join(d, "bad.json"), "w", encoding="utf-8") as f:
+            f.write("[1, 2")
+        out = D.read_reviews()
+        [j] = out["jobs"]
         self.assertEqual((j["mr"], j["status"], j["by"]), ("g/etask!12", "awaiting_approval", "dungpd15"))
+        self.assertEqual(out["unreadable"], 1)                           # surfaced, not silently skipped
 
 
 class SnapshotsTest(unittest.TestCase):

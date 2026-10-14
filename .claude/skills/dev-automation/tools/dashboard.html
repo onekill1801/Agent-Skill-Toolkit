@@ -189,19 +189,33 @@ function pct(b) {
   return `${bar(b.left)} ${Math.round(b.left)}%`;
 }
 
+// what could NOT be read for the "needs you" view: a failed section or a skipped file must never look
+// like "nothing to do" (Codex dashboard #5, R2 #2)
+const ATTN_LABEL = { store: "hàng đợi việc", approvals: "yêu cầu duyệt", reviews: "review MR" };
+function attentionGaps() {
+  const gaps = [];
+  for (const k of Object.keys(ATTN_LABEL)) {
+    const s = state.sections[k];
+    if (!s || !s.ok) gaps.push(`${ATTN_LABEL[k]} — ${s ? s.error : "chưa có dữ liệu"}`);
+    else if (s.data && s.data.unreadable) gaps.push(`${ATTN_LABEL[k]} — ${s.data.unreadable} file không đọc được`);
+  }
+  return gaps;
+}
+
 function renderKpis() {
   const st = section("store").data || {};
   const counts = (st.summary || {}).counts || {};
   const usage = (st.summary || {}).usage || {};
   const set = st.settings || {};
-  const appr = (section("approvals").data || []).length;
+  const appr = ((section("approvals").data || {}).items || []).length;
+  const gaps = attentionGaps();
   const accts = ((section("accounts").data || {}).accounts) || [];
   const busy = accts.filter((a) => a.running.length).length;
   const tier = { normal: "bình thường", save: "tiết kiệm", critical: "khẩn", exhausted: "hết" }[usage.tier] || usage.tier || "?";
   const k = [
     ["Đang chạy", counts.running || 0, ""],
-    ["Chờ bạn", ["store", "approvals"].every((s) => section(s).data !== undefined) ? (counts.blocked || 0) + appr : "?",
-      (counts.blocked || 0) + appr ? "bad" : section("store").err || section("approvals").err ? "warn" : "ok"],
+    ["Chờ bạn", ((counts.blocked || 0) + appr) + (gaps.length ? "+?" : ""),
+      (counts.blocked || 0) + appr ? "bad" : gaps.length ? "warn" : "ok"],
     ["Hết quota (tạm dừng)", counts.paused_quota || 0, counts.paused_quota ? "warn" : ""],
     ["Đang chờ chạy", counts.queued || 0, ""],
     ["Xong (24h)", st.done_24h || 0, "ok"],
@@ -224,9 +238,9 @@ function renderAttention() {
         (r.status === "blocked" ? "<br>" + code(`python ${T}/dev-automation/tools/taskstore.py unblock ${r.id}`) : "")]);
     }
   }
-  for (const a of section("approvals").data || []) {
+  for (const a of ((section("approvals").data || {}).items) || []) {
     const job = (/^post review (\S+)/.exec(a.summary || "") || [])[1];
-    rows.push([`<span class="badge s-blocked">🔐 duyệt</span>`, `<b>${esc(a.tool)}</b> · ${esc(a.summary)}<div class="note">${esc(a.age)} · risk ${esc(a.risk)} · id ${esc(a.id)}</div>`,
+    rows.push([`<span class="badge s-blocked">🔐 duyệt</span>`, `<b>${esc(a.tool)}</b> · ${esc(a.summary)}<div class="note">${ago(a.created)} · risk ${esc(a.risk)} · id ${esc(a.id)}</div>`,
       `<span class="note">Duyệt qua Telegram${job ? ", hoặc:" : ""}</span>` +
       (job ? "<br>" + code(`python ${T}/mr-review/tools/review_post.py approve ${job}`) : "")]);
   }
@@ -236,11 +250,9 @@ function renderAttention() {
         code(`python ${T}/mr-review/tools/review_post.py render ${j.id}`) + "<br>" + code(`python ${T}/mr-review/tools/review_post.py approve ${j.id}`)]);
     }
   }
-  // a section that could not be read must never look like "nothing to do" (Codex dashboard #5)
-  const LABEL = { store: "hàng đợi việc", approvals: "yêu cầu duyệt", reviews: "review MR" };
-  const failed = Object.keys(LABEL).filter((k) => !(state.sections[k] && state.sections[k].ok));
+  const failed = attentionGaps();
   const warn = failed.length
-    ? `<div class="err">⚠ Không đọc được: ${failed.map((k) => esc(LABEL[k]) + (state.sections[k] ? " — " + esc(state.sections[k].error) : "")).join("; ")}. Danh sách dưới có thể THIẾU.</div>`
+    ? `<div class="err">⚠ Không đọc được: ${failed.map(esc).join("; ")}. Danh sách dưới có thể THIẾU.</div>`
     : "";
   $("attn-count").textContent = `(${rows.length}${failed.length ? "+?" : ""})`;
   const MAX = showAllAttn ? rows.length : 15;
