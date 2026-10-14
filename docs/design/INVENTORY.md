@@ -22,6 +22,7 @@
 | `agent_skill_toolkit.workflows.coordinator` | workflows |
 | `agent_skill_toolkit.workflows.engine` | workflows |
 | `agent_skill_toolkit.workflows.execution` | workflows |
+| `agent_skill_toolkit.workflows.execution.accounts` | workflows |
 | `agent_skill_toolkit.workflows.execution.agent_call` | workflows |
 | `agent_skill_toolkit.workflows.execution.handoff` | workflows |
 | `agent_skill_toolkit.workflows.execution.quota` | workflows |
@@ -81,7 +82,7 @@
 - `('agent_skill_toolkit.workflows.verify.ladder', 'refactor.py')` → `tells the human how to (re)record a snapshot`
 - `('agent_skill_toolkit.workflows.verify.unittest_junit', 'unittest_junit.py')` → `its own argparse prog name`
 
-## Tool của skill (107 file; 12 là vỏ dùng runtime)
+## Tool của skill (108 file; 13 là vỏ dùng runtime)
 
 | Skill | Tool | Vỏ runtime | Lệnh con | Dòng |
 |---|---|---|---|---|
@@ -97,8 +98,9 @@
 | atask-automation | `task_resolver.py` |  |  | 746 |
 | atask-automation | `tasks.py` |  |  | 328 |
 | atask-automation | `view.py` |  |  | 167 |
+| auto-dev | `accounts.py` | ✅ |  | 132 |
 | auto-dev | `agent_init.py` |  | add, apply, check, docs, draft, scan | 1586 |
-| auto-dev | `agent_runner.py` | ✅ |  | 571 |
+| auto-dev | `agent_runner.py` | ✅ |  | 579 |
 | auto-dev | `autopilot.py` |  | run, watch | 197 |
 | auto-dev | `clarify.py` |  | analyze, brief, bundle | 392 |
 | auto-dev | `context_pack.py` |  | build | 346 |
@@ -134,7 +136,7 @@
 | dev-automation | `mr_watch.py` |  |  | 358 |
 | dev-automation | `mysql_client.py` |  |  | 267 |
 | dev-automation | `notifier.py` |  |  | 128 |
-| dev-automation | `orca_adapter.py` |  |  | 265 |
+| dev-automation | `orca_adapter.py` |  |  | 273 |
 | dev-automation | `podfwd.py` |  | fetch, list, logs, start, start-saved, stop | 344 |
 | dev-automation | `postgres_client.py` |  |  | 239 |
 | dev-automation | `postman_gen.py` |  |  | 276 |
@@ -193,8 +195,9 @@
 | tchat-automation | `ws_client.py` |  |  | 147 |
 | team-registry | `team.py` |  | bootstrap, get, list, match, remove, set | 223 |
 
-## Test: 34 file, 624 hàm test
+## Test: 35 file, 635 hàm test
 
+- `test_accounts.py`
 - `test_agent_init.py`
 - `test_agentkit.py`
 - `test_cg.py`

@@ -336,7 +336,7 @@ def _effective_model(backend: str, model: str, cmd_template: str) -> str:
     return model or CLI_PRESETS[backend]["default_model"] or ""
 
 
-def _charged_turn(backend, model, role, timeout, notes, fn):
+def _charged_turn(backend, model, role, timeout, notes, fn, account=""):
     """Every REAL agent turn goes through here (Codex F.11 #1/#2/#7): the claude model follows the
     usage tier, the turn is reserved atomically against the daily cap / the task's budget BEFORE it
     starts (worst case = its timeout), then settled to the real duration. The task comes from
@@ -352,7 +352,7 @@ def _charged_turn(backend, model, role, timeout, notes, fn):
     task_id, step = os.environ.get("TOOLKIT_TASK_ID", ""), os.environ.get("TOOLKIT_STEP", "")
     with store_mod.Store() as st:
         try:
-            res = usage_mod.reserve(st, task_id, step, backend, model, timeout)
+            res = usage_mod.reserve(st, task_id, step, backend, model, timeout, account=account or "")
         except usage_mod.BudgetSpent as b:
             if b.kind == "quota":
                 raise AgentQuotaError(str(b), {"kind": "quota", "resume_at": b.resume_at,
@@ -373,7 +373,7 @@ def run_turn(prompt: str, *, system: str = None, backend: str = "claude",
              model: str = None, cmd_template: str = None, prompt_via: str = None,
              timeout: int = CLI_TIMEOUT, max_tokens: int = DEFAULT_MAX_TOKENS,
              dry_run_text: str = None, cwd: str = None, env_extra: dict = None,
-             role: str = "", notes: list = None, read_only: bool = False) -> str:
+             role: str = "", notes: list = None, read_only: bool = False, account: str = "") -> str:
     """Run one headless agent turn; return raw stdout text. Raises AgentRunError.
 
     `dry_run_text` (or backend='dry-run') short-circuits to a canned response so
@@ -392,10 +392,11 @@ def run_turn(prompt: str, *, system: str = None, backend: str = "claude",
     eff = _effective_model(backend, model, cmd_template)
     if backend == "api":
         return _charged_turn(backend, eff, role, timeout, notes,
-                             lambda m, t: _run_api(prompt, system, m, max_tokens, t))
+                             lambda m, t: _run_api(prompt, system, m, max_tokens, t), account)
     return _charged_turn(backend, eff, role, timeout, notes,
                          lambda m, t: _run_cli(prompt, system, backend, m, cmd_template, prompt_via, t,
-                                               cwd=cwd, env_extra=env_extra, read_only=read_only))
+                                               cwd=cwd, env_extra=env_extra, read_only=read_only),
+                         account)
 
 
 # --------------------------------------------------------------------------- role routing
@@ -424,14 +425,18 @@ def _account_env(cfg: dict, backend: str, account: str) -> dict:
     return {k: os.path.expanduser(str(v)) for k, v in (acct.get("env") or {}).items()}
 
 
+def slots_dir() -> str:
+    return os.path.normpath(os.path.join(os.path.dirname(_SKILLS.rstrip(os.sep)), "..", "temp", "agent_slots"))
+
+
 class _Slot:
     """Cross-process slot for one account (O_EXCL lock files) — caps parallel sessions."""
 
-    def __init__(self, key: str, limit: int):
-        self.key, self.limit, self.path = key, max(1, limit), None
+    def __init__(self, key: str, limit: int, info: dict = None):
+        self.key, self.limit, self.path, self.info = key, max(1, limit), None, info or {}
 
     def __enter__(self):
-        d = os.path.join(os.path.dirname(_SKILLS.rstrip(os.sep)), "..", "temp", "agent_slots")
+        d = slots_dir()
         os.makedirs(d, exist_ok=True)
         for i in range(self.limit):
             p = os.path.join(d, f"{self.key.replace('/', '_')}.{i}.lock")
@@ -439,7 +444,8 @@ class _Slot:
                 if os.path.exists(p) and time.time() - os.path.getmtime(p) > CLI_TIMEOUT * 3:
                     os.remove(p)                      # stale slot from a crashed run
                 fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, str(os.getpid()).encode())
+                # what this slot is doing, for `accounts.py` (who runs what right now)
+                os.write(fd, json.dumps({"pid": os.getpid(), "started": time.time(), **self.info}).encode())
                 os.close(fd)
                 self.path = p
                 return self
@@ -488,14 +494,16 @@ def run_role(prompt: str, role: str, *, system: str = None, cwd: str = None,
             continue
         key = f"{c['backend']}@{c['account'] or 'default'}"
         limit = int(((cfg.get("limits") or {}).get(key) or {}).get("max_parallel", 99))
-        slot = _Slot(key, limit)
+        slot = _Slot(key, limit, {"spec": spec, "role": role, "task_id": os.environ.get("TOOLKIT_TASK_ID", ""),
+                                  "step": os.environ.get("TOOLKIT_STEP", "")})
         if slot.__enter__() is None:
             tried.append({"spec": spec, "skipped": "no free slot"})
             continue
         try:
             text = run_turn(prompt, system=system, backend=c["backend"], model=c["model"],
                             timeout=timeout, cwd=cwd, role=role, notes=tried, read_only=read_only,
-                            env_extra=_account_env(cfg, c["backend"], c["account"]))
+                            env_extra=_account_env(cfg, c["backend"], c["account"]),
+                            account=c["account"] or "")
             return {"text": text, "used": spec, "tried": tried}
         except AgentRunError as e:
             msg = str(e)

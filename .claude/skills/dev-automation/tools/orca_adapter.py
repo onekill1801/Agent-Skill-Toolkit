@@ -129,6 +129,14 @@ def status() -> dict:
         return res
 
 
+# ------------------------------------------------------------------ accounts
+
+def account_list() -> dict:
+    """`orca account list`: managed Claude/Codex accounts (email, org — no tokens) + rateLimits
+    (the active account's live usage, `inactiveClaudeAccounts` = Orca's last cached reading)."""
+    return call("account", "list")
+
+
 # ------------------------------------------------------------------ automations
 
 def automation_list() -> list:

@@ -124,9 +124,11 @@ def _int_setting(st, key: str) -> int:
         return 1                                   # unreadable cap: the safest reading
 
 
-def reserve(st, task_id: str, step: str, backend: str, model: str, timeout: float) -> dict:
+def reserve(st, task_id: str, step: str, backend: str, model: str, timeout: float,
+            account: str = "") -> dict:
     """Atomically admit ONE agent turn: tier, daily cap, task budget — then record it at its worst
-    case (the timeout it may use). Returns {"row", "timeout"} (timeout possibly shortened to what is
+    case (the timeout it may use); `account` (agents.json name) is kept in the model column as
+    "backend:model@account" so `accounts.py` can tell which account did what. Returns {"row", "timeout"} (timeout possibly shortened to what is
     left of the task's seconds budget). Raises BudgetSpent."""
     timeout = float(timeout)
     with st._tx():
@@ -153,7 +155,8 @@ def reserve(st, task_id: str, step: str, backend: str, model: str, timeout: floa
                                                 "agent seconds for this task")
                 timeout = min(timeout, left)
         cur = st.db.execute("insert into usage(task_id, step, backend, model, seconds, ts) values (?,?,?,?,?,?)",
-                            (task_id or None, step or "", AGENT_BACKEND, f"{backend}:{model or ''}",
+                            (task_id or None, step or "", AGENT_BACKEND,
+                             f"{backend}:{model or ''}" + (f"@{account}" if account else ""),
                              timeout, time.time()))
     return {"row": cur.lastrowid, "timeout": timeout}
 
