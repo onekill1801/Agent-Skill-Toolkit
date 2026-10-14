@@ -234,20 +234,35 @@ def extend(st, program_id: str, slices: list) -> dict:
 
 
 def progress(st, program_id: str) -> dict:
-    """Per slice: status + the ratchet count its verification measured (design §12.3: "142 -> 0")."""
+    """Per slice: verify / publish state, the commit measured, and the ratchet count measured ON THAT
+    BRANCH. Slices on independent branches are NOT a cumulative trend (Codex F.10d #3): `stacked_on`
+    tells which counts include an earlier slice's changes."""
     from agent_skill_toolkit.workflows.verify import ladder as L
-    rows, trend = [], []
-    for k in st.children(program_id):
-        if k["kind"] != L.KIND:
-            continue
-        sid = (k.get("data") or {}).get("slice")
-        ratchet = next((c["data"] for c in reversed(st.checkpoints(k["id"], valid_only=True))
-                        if "baseline_count" in (c.get("data") or {})), None)
-        rows.append({"slice": sid, "verify": k["status"],
-                     "ratchet": (f"{ratchet['baseline_count']} -> {ratchet['count']}" if ratchet else None)})
-        if ratchet:
-            trend.append(ratchet["count"])
-    return {"slices": rows, "ratchet_trend": trend}
+    kids = st.children(program_id)
+    for k in [k for k in kids if k["kind"] == PROGRAM]:             # extensions' slices too
+        kids += st.children(k["id"])
+    by_slice = {}
+    for k in kids:
+        sid = ((k.get("data") or {}).get("slice") or {})
+        sid = sid.get("id") if isinstance(sid, dict) else sid
+        if sid:
+            by_slice.setdefault(sid, {})[k["kind"]] = k
+    rows = []
+    for sid, tasks in by_slice.items():
+        impl, ver, pub = tasks.get(SLICE), tasks.get(L.KIND), tasks.get(PUBLISH)
+        ratchet, sha = None, ""
+        if ver:
+            cp = next((c for c in reversed(st.checkpoints(ver["id"], valid_only=True))
+                       if "baseline_count" in (c.get("data") or {})), None)
+            if cp:
+                ratchet = {"base": cp["data"]["baseline_count"], "branch": cp["data"]["count"]}
+                sha = (cp["data"].get("sha") or "")[:10]
+        mode = ((impl or {}).get("data") or {}).get("start_mode", "")
+        rows.append({"slice": sid, "implement": (impl or {}).get("status"), "verify": (ver or {}).get("status"),
+                     "published": (pub or {}).get("status") == "done", "commit": sha, "ratchet": ratchet,
+                     "stacked_on": mode.split(":", 1)[1] if mode.startswith("stack:") else
+                     ("merged deps" if mode == "merged" else None)})
+    return {"slices": rows}
 
 
 # ----------------------------------------------------------------------------- program task
@@ -289,7 +304,12 @@ def _publications(ctx, since: float, until: float) -> dict:
     """{ref: (old, new)} publications by this program's publish steps that happened INSIDE the window
     (their checkpoint time), with the exact transition they recorded."""
     out = {}
-    for sid, tid in (ctx.data.get("publish_ids") or {}).items():
+    # read LIVE from the store: every publish task of this program, including slices added by `extend`
+    # after this task started (never a cached list — Codex F.10d #2)
+    program = ctx.task.get("parent") or ""
+    tids = {k["id"] for k in ctx.store.children(program) if k["kind"] == PUBLISH} if program else set()
+    tids |= set((ctx.data.get("publish_ids") or {}).values())
+    for tid in tids:
         for c in ctx.store.checkpoints(tid, valid_only=True):
             d = c.get("data") or {}
             if c["step"] == "publish" and d.get("sha") and since <= float(c.get("ts") or 0) <= until:
@@ -366,17 +386,28 @@ def step_implement(ctx) -> dict:
     t_before = _time.time()
     shared_before = _snapshot(repo)
     if s.get("run"):
-        # MECHANICAL slice: the approved plan's command does the change (no agent, no tokens)
+        # MECHANICAL slice: the approved plan's command does the change (no agent, no tokens). Whatever
+        # happens to the tool, the same safety checks as after an agent turn run FIRST (Codex F.10d #1).
         from agent_skill_toolkit.core import winexec
+        failure = None
+        text = ""
         try:
             p = ctx.run(winexec.command(list(s["run"])), timeout=int(s.get("timeout") or 3600), cwd=clone)
+            text = ((p.stdout or "") + "\n" + (p.stderr or ""))[-3000:]
+            if p.returncode != 0:
+                failure = f"its tool failed (exit {p.returncode}):\n{text[-800:]}"
         except (FileNotFoundError, winexec.UnsafeLauncher) as e:
-            raise E.NeedsHuman(f"slice {s['id']}: cannot run its tool: {e}")
+            failure = f"cannot run its tool: {e}"
         except subprocess.TimeoutExpired:
-            raise E.NeedsHuman(f"slice {s['id']}: its tool timed out")
-        text = ((p.stdout or "") + "\n" + (p.stderr or ""))[-3000:]
-        if p.returncode != 0:
-            raise E.NeedsHuman(f"slice {s['id']}: its tool failed (exit {p.returncode}):\n{text[-800:]}")
+            failure = "its tool timed out (killed)"
+        finally:
+            bad = _unauthorised(shared_before, _snapshot(repo), _publications(ctx, t_before, _time.time() + 1))
+            if bad:
+                raise E.NeedsHuman(f"slice {s['id']}: the tool changed your clone {repo} — check it by hand: "
+                                   + "; ".join(bad[:5]))
+            check("after the tool")
+        if failure:
+            raise E.NeedsHuman(f"slice {s['id']}: {failure}")
     else:
         q = lambda t, n=600: lanes.quoted(t, n)                                # noqa: E731
         prompt = IMPLEMENT.format(worktree=clone, branch=branch, goal=q(d.get("goal")),

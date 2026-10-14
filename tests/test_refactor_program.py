@@ -419,6 +419,35 @@ class F10dTest(ProgramTest):
         self.assertEqual(t["status"], "blocked")
         self.assertIn("tool made no change", t["last_error"])
 
+    def test_failing_tool_still_gets_the_safety_checks(self):                # Codex F.10d R1 #1
+        tool = os.path.join(self.tmp, "evil.py")
+        with open(tool, "w") as f:
+            f.write(f"import subprocess, sys\nsubprocess.run(['git', '-C', r'{self.repo}', 'branch', 'sneaky'])\n"
+                    "sys.exit(2)\n")
+        with open(self.slices, "w") as f:
+            json.dump([{"id": "evil", "title": "x", "run": [sys.executable, tool]}], f)
+        out = self.new()
+        self.run_all(out["program"])
+        with S.Store() as st:
+            t = st.get(out["slices"][0]["implement"])
+        self.assertEqual(t["status"], "blocked")
+        self.assertIn("tool changed your clone", t["last_error"])        # reported before the exit code
+
+    def test_publications_are_read_live_after_extend(self):                   # Codex F.10d R1 #2
+        out = self.new()
+        with S.Store() as st:
+            ext = P.extend(st, out["program"], [{"id": "s9", "title": "later"}])
+            impl = st.get(out["slices"][0]["implement"])
+
+            class Ctx:
+                store, task, data = st, impl, impl["data"]
+            st.patch_data(ext["slices"][0]["publish"], ("queued", "blocked"), x=1)
+            pub_ids = {k["id"] for k in st.children(out["program"]) if k["kind"] == P.PUBLISH}
+        self.assertIn(ext["slices"][0]["publish"], pub_ids)
+        with S.Store() as st:
+            Ctx.store = st
+            self.assertEqual(P._publications(Ctx, 0, 9e12), {})        # nothing published yet, but read live
+
     def test_bad_run_is_refused(self):
         with self.assertRaises(ValueError):
             P.parse_slices([{"id": "a", "title": "x", "run": "rm -rf /"}])
@@ -444,8 +473,10 @@ class F10dTest(ProgramTest):
         git(self.repo, "merge-base", "--is-ancestor", b2, b3)         # stacked on s2's published commit
         rep = RF.program("status", type("A", (), {"program_id": out["program"]})())
         self.assertEqual(rep["progress"], "10/10")                    # 2x3 + gate + 3
-        self.assertEqual([r["slice"] for r in rep["slices"]], ["s1", "s2", "s3"])
-        self.assertEqual(len(rep["ratchet_trend"]), 3)                # the ratchet rung measured every slice
+        self.assertEqual(sorted(r["slice"] for r in rep["slices"]), ["s1", "s2", "s3"])
+        rows = {r["slice"]: r for r in rep["slices"]}
+        self.assertTrue(all(r["ratchet"] is not None and r["published"] and r["commit"] for r in rows.values()))
+        self.assertEqual((rows["s2"]["stacked_on"], rows["s3"]["stacked_on"]), ("s1", "s2"))   # which counts stack
 
 
 if __name__ == "__main__":
