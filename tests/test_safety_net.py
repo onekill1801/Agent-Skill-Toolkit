@@ -243,3 +243,29 @@ class Round1LadderTest(LadderTest):
         self.assertTrue(exists)
         self.assertTrue(text.startswith("{"))
         self.assertEqual(L._git_blob(self.repo, "main", "nope.txt"), (False, ""))
+
+
+class Round2Test(unittest.TestCase):
+    def test_record_rechecks_the_output_after_the_command(self):          # Codex F.10c R2
+        real = safety.repo_path
+        calls = []
+
+        def spy(repo, rel):
+            calls.append(rel)
+            if len([c for c in calls if c == "build/out.json"]) >= 2:
+                raise ValueError("planted link")
+            return real(repo, rel)
+        tmp = tempfile.mkdtemp(prefix="rec-")
+        repo = os.path.join(tmp, "r")
+        os.makedirs(os.path.join(repo, "s"))
+        open(os.path.join(repo, "s", "d.py"), "w").write(
+            "import os\nos.makedirs('build', exist_ok=True)\nopen('build/out.json','w').write('{}')\n")
+        git(repo, "init", "-q", "-b", "main")
+        spec = os.path.join(tmp, "spec.yml")
+        open(spec, "w").write("verify:\n  base: main\n  ladder:\n    c:\n      kind: snapshot\n      run:\n"
+                              f"        - {PY}\n        - s/d.py\n      output: build/out.json\n"
+                              "      snapshot: .agent/s.json\n      format: json\n      protects:\n        - s/d.py\n")
+        with mock.patch.object(safety, "repo_path", side_effect=spy):
+            with self.assertRaises(ValueError):
+                RF.record("snapshot", repo, "c", spec)
+        self.assertFalse(os.path.exists(os.path.join(repo, ".agent", "s.json")))

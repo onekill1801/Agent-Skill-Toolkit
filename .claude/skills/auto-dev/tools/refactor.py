@@ -144,15 +144,18 @@ def record(kind: str, repo: str, rung_name: str, spec_file: str = "") -> dict:
         raise RuntimeError(f"the command failed (exit {p.returncode}): {safety.redact((p.stderr or p.stdout)[-400:])}")
     text = p.stdout or ""
     if out_path:
-        if not os.path.isfile(out_path):
-            raise RuntimeError(f"`{rung['output']}` was not written by this run")
+        # the command may have planted a link / junction meanwhile: re-check before reading (Codex F.10c R2)
+        out_path = safety.repo_path(repo, str(rung["output"]))
+        if os.path.islink(out_path) or not os.path.isfile(out_path):
+            raise RuntimeError(f"`{rung['output']}` was not written by this run (or is not a regular file)")
         with open(out_path, encoding="utf-8") as f:
             text = f.read()
+    path = safety.repo_path(repo, str(target))                     # destination re-checked after the command
     if kind == "snapshot":
         body = safety.normalize(text, rung.get("format") or "text")
     else:
         previous = {}
-        if os.path.isfile(path):
+        if os.path.isfile(path) and not os.path.islink(path):
             with open(path, encoding="utf-8") as f:
                 previous = safety.parse_baseline(f.read())
         body = safety.baseline_doc(safety.parse_metrics(text), previous, rung.get("higher_is_better") or {},
