@@ -109,7 +109,9 @@ python $T/auto-dev/tools/verify.py report <task_id>                       # AC n
 python $T/auto-dev/tools/accounts.py          # bảng: 5h còn / tuần còn / reset / đang làm / số lượt hôm nay
 ```
 - Danh sách tài khoản + thứ tự dùng: `work/agents.json` (gồm 5 tài khoản Orca qua `CLAUDE_CONFIG_DIR`). Tài khoản đầu hết quota → tự chuyển tài khoản kế.
-- Số dung lượng lấy từ Orca: tài khoản Orca đang chọn (`*`) là số trực tiếp; tài khoản khác là số Orca đọc lần cuối (cột "Cập nhật"). `reset?` = đã qua giờ reset, số mới chưa biết.
+- Dung lượng **đọc thẳng từ Anthropic** cho từng tài khoản (dùng access token có sẵn trong thư mục tài khoản, tối đa 5 phút/lần) — cột "Cập nhật" ghi `API …`.
+- Tài khoản có access token **đã hết hạn** thì toolkit KHÔNG tự gia hạn (tránh đụng Orca) → hiện số Orca đọc lần cuối + dòng "token hết hạn". Token được gia hạn khi tài khoản đó được dùng trong Orca / Claude CLI.
+- `reset?` = đã qua giờ reset sau lần đọc, số mới chưa biết. `--orca-only` = chỉ dùng số của Orca.
 
 ### 4.5 Khi sắp hết quota Claude
 

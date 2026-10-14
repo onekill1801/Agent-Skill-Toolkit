@@ -1,0 +1,220 @@
+"""Direct Claude usage reading (integrations/claude_usage.py, core/tls.py, accounts merge) — checklist F.15.
+No network: fetch / TLS are mocked."""
+
+import io
+import json
+import os
+import runpy
+import sys
+import tempfile
+import time
+import unittest
+import urllib.error
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[1]
+runpy.run_path(str(ROOT / ".claude" / "skills" / "_runtime" / "bootstrap.py"))["activate"]()
+from agent_skill_toolkit.core import tls  # noqa: E402
+from agent_skill_toolkit.integrations import claude_usage as CU  # noqa: E402
+from agent_skill_toolkit.workflows.execution import accounts as A  # noqa: E402
+
+sys.path.insert(0, str(ROOT / ".claude" / "skills" / "auto-dev" / "tools"))
+import accounts as ACC  # noqa: E402
+
+NOW = 2_000_000_000.0
+TOKEN = "sk-ant-oat01-" + "x" * 40
+BODY = {"five_hour": {"utilization": 5.0, "resets_at": "2033-05-18T05:00:00+00:00"},
+        "seven_day": {"utilization": 14.0, "resets_at": "2033-05-20T00:00:00Z"}, "extra_usage": {"is_enabled": False}}
+
+
+def creds(d, token=TOKEN, exp_s=NOW + 3600):
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, ".credentials.json"), "w", encoding="utf-8") as f:
+        json.dump({"claudeAiOauth": {"accessToken": token, "expiresAt": exp_s * 1000, "refreshToken": "r"}}, f)
+
+
+class UsageTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        e = mock.patch.dict(os.environ, {"CLAUDE_USAGE_URL": ""})
+        e.start()
+        self.addCleanup(e.stop)
+
+    def test_config_dir_rules(self):
+        self.assertEqual(CU.config_dir({"CLAUDE_CONFIG_DIR": "~/a"}), os.path.expanduser("~/a"))
+        self.assertEqual(CU.config_dir({"HOME": "/h", "USERPROFILE": "/u"}), os.path.join("/u", ".claude"))
+        self.assertEqual(CU.config_dir({}), os.path.join(os.path.expanduser("~"), ".claude"))
+
+    def test_read_access(self):
+        self.assertEqual(CU.read_access(self.tmp, NOW), {"error": "missing"})
+        creds(self.tmp, exp_s=NOW - 60)
+        self.assertEqual(CU.read_access(self.tmp, NOW)["error"], "expired")
+        self.assertNotIn("token", CU.read_access(self.tmp, NOW))           # never hands out an expired token
+        creds(self.tmp)
+        self.assertEqual(CU.read_access(self.tmp, NOW)["token"], TOKEN)
+        creds(self.tmp, token="")
+        self.assertEqual(CU.read_access(self.tmp, NOW), {"error": "no_token"})
+        with open(os.path.join(self.tmp, ".credentials.json"), "w") as f:
+            f.write("{broken")
+        self.assertEqual(CU.read_access(self.tmp, NOW), {"error": "unreadable"})
+
+    def test_parse(self):
+        u = CU.parse(BODY, NOW)
+        self.assertEqual((u["session"]["left"], u["weekly"]["left"], u["age_min"]), (95.0, 86.0, 0))
+        self.assertGreater(u["weekly"]["resets_at"], NOW)
+        self.assertIsNone(CU.parse({"five_hour": {"utilization": 150}, "seven_day": BODY["seven_day"]})["session"])
+        with self.assertRaises(ValueError):
+            CU.parse({"five_hour": None, "seven_day": {"utilization": True}})
+
+    def test_usage_for_never_leaks_the_token(self):
+        creds(self.tmp)
+        envd = {"CLAUDE_CONFIG_DIR": self.tmp}
+        with mock.patch.object(CU, "fetch", return_value=BODY) as f:
+            ok = CU.usage_for(envd, now=NOW)
+        self.assertEqual(f.call_args[0][0], TOKEN)
+        self.assertEqual(ok["usage"]["session"]["left"], 95.0)
+        cases = [(urllib.error.HTTPError("u", 401, f"bad {TOKEN}", {}, io.BytesIO(TOKEN.encode())), "http_401"),
+                 (urllib.error.URLError("[SSL: CERTIFICATE_VERIFY_FAILED] x"), "tls"),
+                 (urllib.error.URLError("refused"), "network"), (TimeoutError("t"), "network"),
+                 (ValueError("json"), "bad_response")]
+        for exc, want in cases:
+            with mock.patch.object(CU, "fetch", side_effect=exc):
+                res = CU.usage_for(envd, now=NOW)
+            self.assertEqual(res, {"error": want})
+            self.assertNotIn(TOKEN, json.dumps(res))
+
+    def test_only_plain_https_urls(self):
+        creds(self.tmp)
+        for bad in ("http://api.anthropic.com/x", "https://u:p@h/x", "file:///etc/passwd"):
+            with mock.patch.dict(os.environ, {"CLAUDE_USAGE_URL": bad}), \
+                    mock.patch.object(CU, "fetch", side_effect=AssertionError("must not call")):
+                self.assertEqual(CU.usage_for({"CLAUDE_CONFIG_DIR": self.tmp}, now=NOW), {"error": "bad_url"})
+
+    def test_redirects_are_refused(self):
+        self.assertIsNone(CU._NoRedirect().redirect_request(None, None, 302, "", {}, "https://evil/"))
+
+    def test_fetch_uses_the_verifying_context_and_sends_the_bearer(self):
+        seen = {}
+
+        class Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def opener(*handlers):
+            seen["handlers"] = handlers
+            o = mock.Mock()
+            o.open.side_effect = lambda req, timeout: (seen.update(req=req, timeout=timeout),
+                                                       Resp(json.dumps(BODY).encode()))[1]
+            return o
+        ctx = mock.Mock()
+        with mock.patch.object(CU.tls, "context", return_value=ctx), \
+                mock.patch.object(CU.urllib.request, "build_opener", side_effect=opener), \
+                mock.patch.object(CU.urllib.request, "HTTPSHandler") as https:
+            self.assertEqual(CU.fetch(TOKEN, timeout=3), BODY)
+        self.assertIs(https.call_args.kwargs["context"], ctx)
+        self.assertTrue(any(isinstance(h, CU._NoRedirect) for h in seen["handlers"]))
+        self.assertEqual(seen["req"].get_header("Authorization"), "Bearer " + TOKEN)
+        self.assertEqual(seen["req"].full_url, CU.DEFAULT_URL)
+        self.assertEqual(seen["timeout"], 3)
+
+
+class TlsTest(unittest.TestCase):
+    def setUp(self):
+        tls._ctx = None
+        self.addCleanup(setattr, tls, "_ctx", None)
+
+    def test_empty_store_on_windows_loads_the_windows_roots(self):
+        ctx = mock.Mock()
+        ctx.cert_store_stats.return_value = {"x509_ca": 0}
+        pem = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
+        with mock.patch.object(tls.ssl, "create_default_context", return_value=ctx), \
+                mock.patch.object(tls.sys, "platform", "win32"), \
+                mock.patch.object(tls, "windows_roots_pem", return_value=pem):
+            self.assertIs(tls.context(), ctx)
+            self.assertIs(tls.context(), ctx)                              # built once
+        ctx.load_verify_locations.assert_called_with(cadata=pem)
+        self.assertNotIn("verify_mode", ctx.__dict__)                     # never turned off
+        self.assertNotIn("check_hostname", ctx.__dict__)
+
+    def test_a_store_with_roots_is_left_alone(self):
+        ctx = mock.Mock()
+        ctx.cert_store_stats.return_value = {"x509_ca": 120}
+        with mock.patch.object(tls.ssl, "create_default_context", return_value=ctx), \
+                mock.patch.object(tls, "windows_roots_pem", side_effect=AssertionError("not needed")):
+            tls.context()
+        ctx.load_verify_locations.assert_not_called()
+
+    def test_one_bad_certificate_does_not_drop_the_others(self):
+        ctx = mock.Mock()
+        calls = []
+
+        def load(cadata):
+            calls.append(cadata)
+            if "BAD" in cadata:
+                raise tls.ssl.SSLError("bad")
+        ctx.load_verify_locations.side_effect = load
+        pem = ("-----BEGIN CERTIFICATE-----\nBAD\n-----END CERTIFICATE-----\n"
+               "-----BEGIN CERTIFICATE-----\nGOOD\n-----END CERTIFICATE-----\n")
+        tls._load_pem(ctx, pem)
+        self.assertTrue(any("GOOD" in c and "BAD" not in c for c in calls))
+
+
+class MergeTest(unittest.TestCase):
+    CFG = {"accounts": {"claude": {"a": {"orca_id": "id-a"}, "b": {"orca_id": "id-b"}}}}
+    ORCA = {"claude": {"activeAccountId": "id-a", "accounts": [{"id": "id-a"}, {"id": "id-b"}]},
+            "rateLimits": {"inactiveClaudeAccounts": [{"accountId": "id-b", "rateLimits": {
+                "status": "ok", "updatedAt": (NOW - 3000) * 1000,
+                "session": {"usedPercent": 50, "resetsAt": (NOW + 600) * 1000},
+                "weekly": {"usedPercent": 10, "resetsAt": (NOW + 9000) * 1000}}}]}}
+
+    def test_api_wins_and_errors_keep_orca(self):
+        api = {"claude@a": {"usage": CU.parse(BODY, NOW), "at": NOW - 120}, "claude@b": {"error": "expired"}}
+        rows = {r["account"]: r for r in A.report(self.CFG, self.ORCA, [], [], NOW, api=api)["accounts"]}
+        self.assertEqual((rows["claude@a"]["usage_source"], rows["claude@a"]["usage"]["age_min"]), ("api", 2))
+        self.assertEqual(rows["claude@b"]["usage_source"], "cached")
+        self.assertEqual(rows["claude@b"]["usage"]["session"]["left"], 50)
+        self.assertIn("hết hạn", rows["claude@b"]["api_error"])
+
+    def test_cached_api_reading_after_a_reset_is_unknown(self):
+        u = CU.parse(BODY, NOW)
+        u["session"]["resets_at"] = NOW - 1
+        rows = A.report(self.CFG, None, [], [], NOW, api={"claude@a": {"usage": u, "at": NOW - 900}})["accounts"]
+        a = next(r for r in rows if r["account"] == "claude@a")
+        self.assertTrue(a["usage"]["session"]["reset_passed"])
+        self.assertEqual(a["usage"]["weekly"]["left"], 86.0)
+
+
+class FacadeTest(unittest.TestCase):
+    def setUp(self):
+        ACC._api_cache.clear()
+        self.addCleanup(ACC._api_cache.clear)
+
+    def test_parallel_fetch_is_cached_per_account(self):
+        cfg = {"accounts": {"claude": {"a": {"env": {"CLAUDE_CONFIG_DIR": "/a"}}, "b": {}}, "codex": {"m": {}}}}
+        calls = []
+
+        def usage_for(envd, timeout):
+            calls.append(envd.get("CLAUDE_CONFIG_DIR"))
+            time.sleep(0.2)
+            return {"error": "expired"}
+        with mock.patch.object(ACC.CU, "usage_for", side_effect=usage_for):
+            t0 = time.time()
+            out = ACC.read_api_usage(cfg, now=NOW)
+            self.assertLess(time.time() - t0, 0.39)                       # both at once, not 0.4 s
+            ACC.read_api_usage(cfg, now=NOW + 60)                          # cached
+            ACC.read_api_usage(cfg, now=NOW + ACC.API_CACHE_S + 1)         # expired -> asked again
+        self.assertEqual(set(out), {"claude@a", "claude@b"})               # codex is not asked
+        self.assertEqual(sorted(calls, key=str), sorted(["/a", None, "/a", None], key=str))
+
+    def test_orca_only_skips_the_api(self):
+        with mock.patch.object(ACC.orca_adapter, "account_list", return_value={}), \
+                mock.patch.object(ACC, "read_api_usage", side_effect=AssertionError("no api")):
+            ACC.gather(api=False)
+
+
+if __name__ == "__main__":
+    unittest.main()

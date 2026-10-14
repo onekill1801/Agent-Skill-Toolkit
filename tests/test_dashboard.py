@@ -145,7 +145,7 @@ class CollectTest(Base):
     def test_accounts_get_a_bounded_orca_call(self):
         sys.path.insert(0, str(ROOT / ".claude" / "skills" / "auto-dev" / "tools"))
         import accounts as ACC
-        with mock.patch.object(ACC.orca_adapter, "account_list", return_value={}) as al:
+        with mock.patch.object(ACC.orca_adapter, "account_list", return_value={}) as al,                 mock.patch.object(ACC, "read_api_usage", return_value={}):          # no network in tests
             D.read_accounts()
         self.assertEqual(al.call_args.kwargs["timeout"], D.ORCA_TIMEOUT_S)
 

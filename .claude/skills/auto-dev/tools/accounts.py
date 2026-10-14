@@ -12,16 +12,19 @@ recorded since local midnight (only turns run through a role carry an account).
 """
 
 import argparse
+import concurrent.futures
 import json
 import os
 import runpy
 import sqlite3
 import sys
+import threading
 import time
 from pathlib import Path
 
 runpy.run_path(str(Path(__file__).resolve().parents[2] / "_runtime" / "bootstrap.py"))["activate"]()
 from agent_skill_toolkit.core import store as store_mod  # noqa: E402
+from agent_skill_toolkit.integrations import claude_usage as CU  # noqa: E402
 from agent_skill_toolkit.workflows.execution import accounts as A  # noqa: E402
 from agent_skill_toolkit.workflows.execution import usage as usage_mod  # noqa: E402
 
@@ -79,13 +82,47 @@ def read_turns(path: str = None) -> list:
         db.close()
 
 
-def gather(orca_timeout: int = orca_adapter.DEFAULT_TIMEOUT) -> dict:
+API_CACHE_S = 300          # one direct usage call per account per 5 min (dashboard polls more often)
+_api_cache = {}            # "claude@name" -> (fetched_at, result)   (this process only — never written)
+_api_lock = threading.Lock()
+
+
+def read_api_usage(cfg: dict, timeout: float = CU.TIMEOUT_S, now: float = None) -> dict:
+    """Direct usage of every claude account (integrations.claude_usage), cached per account; the
+    accounts are asked in parallel so one slow call never multiplies the wait."""
+    now = now or time.time()
+    accts = ((cfg or {}).get("accounts") or {}).get("claude") or {}
+    todo, out = {}, {}
+    with _api_lock:
+        for name, a in accts.items():
+            key = f"claude@{name}"
+            hit = _api_cache.get(key)
+            if hit and now - hit[0] < API_CACHE_S:
+                out[key] = hit[1]
+            else:
+                todo[key] = (a or {}).get("env") or {}
+    if todo:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(todo))) as ex:
+            futs = {k: ex.submit(CU.usage_for, e, timeout) for k, e in todo.items()}
+            for k, f in futs.items():
+                try:
+                    res = f.result(timeout=timeout + 15)
+                except Exception:  # noqa: BLE001 — one account never breaks the view
+                    res = {"error": "network"}
+                out[k] = res
+                with _api_lock:
+                    _api_cache[k] = (now, res)
+    return out
+
+
+def gather(orca_timeout: int = orca_adapter.DEFAULT_TIMEOUT, api: bool = True) -> dict:
     try:
         orca, err = orca_adapter.account_list(timeout=orca_timeout), None
     except (orca_adapter.OrcaError, OSError) as e:
         orca, err = None, getattr(e, "message", str(e))
-    out = A.report(agent_runner._agents_config(), orca, read_slots(agent_runner.slots_dir()), read_turns(),
-                   stale_s=agent_runner.SLOT_STALE_S)
+    cfg = agent_runner._agents_config()
+    out = A.report(cfg, orca, read_slots(agent_runner.slots_dir()), read_turns(),
+                   stale_s=agent_runner.SLOT_STALE_S, api=read_api_usage(cfg) if api else None)
     if err:
         out["orca_error"] = err
     return out
@@ -108,7 +145,8 @@ def render(rep: dict) -> str:
              "-" * 124]
     for r in rep["accounts"]:
         u = r.get("usage")
-        src = {"live": "trực tiếp", "cached": f"{(u or {}).get('age_min')} phút trước", "none": "—"}[r["usage_source"]]
+        src = {"live": "Orca trực tiếp", "api": "API " + (f"{u['age_min']}p trước" if (u or {}).get("age_min") else "vừa đọc"),
+               "cached": f"Orca {(u or {}).get('age_min')}p trước", "none": "—"}[r["usage_source"]]
         doing = "; ".join(f"{x['role'] or '?'} {x['task_id'] or ''} {x['step'] or ''} ({x['minutes']}p)".replace("  ", " ")
                           for x in r["running"]) or "rảnh"
         today = f"{r['today']['runs']} lượt"
@@ -117,6 +155,8 @@ def render(rep: dict) -> str:
                      f"{_pct((u or {}).get('weekly')):>8}  {_reset(u):<10}  {src:<15}  {today:<8}  {doing}")
         if r.get("warning"):
             lines.append(f"{'':<20} ! {r['warning']}")
+        if r.get("api_error") and r["usage_source"] != "api":
+            lines.append(f"{'':<20} ! đọc trực tiếp không được: {r['api_error']}")
     if rep.get("unattributed"):
         o = rep["unattributed"]
         lines.append(f"{o['account']:<20} {'':<22} {'':>6}  {'':>8}  {'':<10}  {'':<15}  {o['today']['runs']} lượt"
@@ -132,8 +172,9 @@ def render(rep: dict) -> str:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--orca-only", action="store_true", help="do not ask Anthropic directly (Orca's numbers only)")
     a = ap.parse_args(argv)
-    rep = gather()
+    rep = gather(api=not a.orca_only)
     if a.json:
         print(json.dumps(rep, ensure_ascii=False, indent=2))
     else:

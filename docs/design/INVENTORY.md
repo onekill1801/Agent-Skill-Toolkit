@@ -14,9 +14,11 @@
 | `agent_skill_toolkit.core.proc` | core |
 | `agent_skill_toolkit.core.store` | core |
 | `agent_skill_toolkit.core.text` | core |
+| `agent_skill_toolkit.core.tls` | core |
 | `agent_skill_toolkit.core.winexec` | core |
 | `agent_skill_toolkit.core.yamlsub` | core |
 | `agent_skill_toolkit.integrations` | integrations |
+| `agent_skill_toolkit.integrations.claude_usage` | integrations |
 | `agent_skill_toolkit.integrations.gitlab` | integrations |
 | `agent_skill_toolkit.workflows` | workflows |
 | `agent_skill_toolkit.workflows.coordinator` | workflows |
@@ -47,7 +49,7 @@
 
 | Từ | Tới | Cạnh |
 |---|---|---|
-| integrations | core | 1 |
+| integrations | core | 3 |
 | workflows | core | 5 |
 | workflows.intake | core | 4 |
 | workflows.intake | workflows | 1 |
@@ -98,7 +100,7 @@
 | atask-automation | `task_resolver.py` |  |  | 746 |
 | atask-automation | `tasks.py` |  |  | 328 |
 | atask-automation | `view.py` |  |  | 167 |
-| auto-dev | `accounts.py` | ✅ |  | 146 |
+| auto-dev | `accounts.py` | ✅ |  | 187 |
 | auto-dev | `agent_init.py` |  | add, apply, check, docs, draft, scan | 1586 |
 | auto-dev | `agent_runner.py` | ✅ |  | 588 |
 | auto-dev | `autopilot.py` |  | run, watch | 197 |
@@ -124,7 +126,7 @@
 | dev-automation | `code_context.py` |  | affected, callers, impact, locate, status, trace | 423 |
 | dev-automation | `config.py` |  |  | 122 |
 | dev-automation | `daemon_common.py` |  | status | 236 |
-| dev-automation | `dashboard.py` | ✅ | serve, snapshot | 210 |
+| dev-automation | `dashboard.py` | ✅ | serve, snapshot | 345 |
 | dev-automation | `dbeaver.py` |  | forwards, list, probe, show | 226 |
 | dev-automation | `doctor.py` |  |  | 142 |
 | dev-automation | `feedback.py` |  | add, recall, stats | 280 |
@@ -149,7 +151,7 @@
 | dev-automation | `project_config.py` |  |  | 234 |
 | dev-automation | `run_log.py` |  | ac-add, ac-map, ac-waive, advance, checkpoint, field, get, init, list, note, record-gate, require, stage | 613 |
 | dev-automation | `spring_config.py` |  | read | 244 |
-| dev-automation | `status.py` | ✅ |  | 364 |
+| dev-automation | `status.py` | ✅ |  | 366 |
 | dev-automation | `taskstore.py` | ✅ | add, cancel, events, list, show, summary, unblock | 77 |
 | dev-automation | `test_runner.py` |  | detect, run | 344 |
 | dev-automation | `vpn.py` |  | down, ensure, fingerprint, set-password, status, up, watch | 331 |
@@ -196,7 +198,7 @@
 | tchat-automation | `ws_client.py` |  |  | 147 |
 | team-registry | `team.py` |  | bootstrap, get, list, match, remove, set | 223 |
 
-## Test: 36 file, 648 hàm test
+## Test: 37 file, 671 hàm test
 
 - `test_accounts.py`
 - `test_agent_init.py`
@@ -204,6 +206,7 @@
 - `test_cg.py`
 - `test_clarify.py`
 - `test_claude_account_rotation.py`
+- `test_claude_usage.py`
 - `test_code_context.py`
 - `test_coordinator.py`
 - `test_core_primitives.py`

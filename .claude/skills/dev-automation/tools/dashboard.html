@@ -106,7 +106,7 @@ code { background: var(--code); padding: 1px 5px; border-radius: 4px; cursor: co
 
   <section class="card">
     <h2>Tài khoản agent <span class="count" id="acct-count"></span>
-      <span class="hint">dung lượng lấy từ Orca · * = tài khoản Orca đang chọn</span></h2>
+      <span class="hint">dung lượng đọc thẳng từ Anthropic (5 phút/lần), không được thì lấy số của Orca · * = tài khoản Orca đang chọn</span></h2>
     <div class="body" id="acct-body"></div>
   </section>
 
@@ -296,12 +296,14 @@ function renderAccounts() {
   setBody("acct-body", "acct-count", section("accounts"), (d) => {
     const rows = (d.accounts || []).map((a) => {
       const u = a.usage || {};
-      const src = { live: "trực tiếp", cached: u.age_min != null ? `${u.age_min} phút trước` : "cache", none: "—" }[a.usage_source] || "";
+      const src = { live: "Orca, trực tiếp", api: u.age_min ? `API, ${u.age_min} phút trước` : "API, vừa đọc",
+        cached: u.age_min != null ? `Orca, ${u.age_min} phút trước` : "Orca (cache)", none: "—" }[a.usage_source] || "";
       const resets = [u.session, u.weekly].filter((b) => b && b.resets_at && !b.reset_passed).map((b) => b.resets_at);
       const doing = a.running.length ? a.running.map((x) => `🔄 ${esc(x.role || "?")} ${esc(x.task_id || "")} ${esc(x.step || "")} <span class="note">(${esc(x.minutes)} phút)</span>`).join("<br>") : `<span class="note">rảnh</span>`;
       const last = a.last ? `<div class="note">gần nhất: ${esc(a.last.model || "")} ${esc(a.last.task_id || "")} · ${ago(a.last.ts)}</div>` : "";
       return [`<b>${esc(a.account)}${a.orca_active ? " *" : ""}</b><div class="note">${esc(a.email || "")}${a.org ? " · " + esc(a.org) : ""}</div>` +
-              (a.warning ? `<div class="note" style="color:var(--bad)">${esc(a.warning)}</div>` : ""),
+              (a.warning ? `<div class="note" style="color:var(--bad)">${esc(a.warning)}</div>` : "") +
+              (a.api_error && a.usage_source !== "api" ? `<div class="note" style="color:var(--warn)">không đọc trực tiếp được: ${esc(a.api_error)}</div>` : ""),
         pct(u.session), pct(u.weekly), resets.length ? esc(clock(Math.min(...resets))) : "", `<span class="note">${esc(src)}</span>`,
         `${a.today.runs} lượt<div class="note">${Math.round(a.today.seconds / 60)} phút</div>`, doing + last];
     });

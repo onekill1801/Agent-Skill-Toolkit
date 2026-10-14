@@ -74,9 +74,29 @@ def _split_model(model: str):
     return backend, m, account or None
 
 
-def report(cfg: dict, orca: dict, slots: list, turns: list, now: float = None, stale_s: float = 1800) -> dict:
+def _api_usage(res: dict, now: float):
+    """integrations.claude_usage result (possibly cached) -> usage dict with its age; a window that has
+    reset since the reading becomes unknown, exactly like an old Orca reading."""
+    u = dict(res["usage"])
+    for k in ("session", "weekly"):
+        b = u.get(k)
+        if b and b.get("resets_at") and b["resets_at"] <= now:
+            u[k] = {"used": None, "left": None, "resets_at": b["resets_at"], "reset_passed": True}
+    u["age_min"] = round((now - (res.get("at") or now)) / 60)
+    return u
+
+
+API_ERRORS = {"expired": "token hết hạn (chưa gia hạn)", "missing": "chưa đăng nhập", "no_token": "chưa đăng nhập",
+              "unreadable": "không đọc được credentials", "tls": "lỗi chứng chỉ TLS", "network": "lỗi mạng",
+              "bad_response": "phản hồi lạ", "bad_url": "CLAUDE_USAGE_URL sai", "http_401": "token bị từ chối (401)",
+              "http_403": "không có quyền (403)", "http_429": "bị giới hạn tần suất (429)"}
+
+
+def report(cfg: dict, orca: dict, slots: list, turns: list, now: float = None, stale_s: float = 1800,
+           api: dict = None) -> dict:
     """`stale_s` = agent_runner.SLOT_STALE_S: a slot file older than that (by mtime, the same basis
-    agent_runner reclaims on) is a crashed run, not work in progress."""
+    agent_runner reclaims on) is a crashed run, not work in progress. `api` = {"claude@name":
+    integrations.claude_usage result}: a successful direct reading wins over Orca's."""
     now = now or time.time()
     by_orca = orca_usage(orca, now)
     rows, index = [], {}
@@ -91,6 +111,11 @@ def report(cfg: dict, orca: dict, slots: list, turns: list, now: float = None, s
                    "running": [], "today": {"runs": 0, "seconds": 0.0}, "last": None}
             if a.get("orca_id") and o is None and orca is not None:
                 row["warning"] = "orca_id không có trong Orca (đã xoá tài khoản?)"
+            res = (api or {}).get(row["account"])
+            if res and res.get("usage"):
+                row["usage"], row["usage_source"] = _api_usage(res, now), "api"
+            elif res and res.get("error"):
+                row["api_error"] = API_ERRORS.get(res["error"], res["error"])
             rows.append(row)
             index[row["account"]] = row
     other = {"account": "(không rõ tài khoản)", "running": [], "today": {"runs": 0, "seconds": 0.0}, "last": None}

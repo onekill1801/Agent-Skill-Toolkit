@@ -56,6 +56,7 @@ RUNTIME_EDGES = {
 # runtime modules that START processes, whatever the target (a variable argv cannot be resolved statically)
 SPAWNERS = {
     "agent_skill_toolkit.core.proc": "the process-tree runner everything else uses",
+    "agent_skill_toolkit.core.tls": "PowerShell export of the Windows cert stores (empty-trust-store Pythons)",
     "agent_skill_toolkit.workflows.engine": "StepContext.run: steps run their commands through proc",
     "agent_skill_toolkit.workflows.verify.ladder": "git + the repo's verify commands + agents",
     "agent_skill_toolkit.workflows.refactor.ratchet": "git ls-files + the isolated scan child",
