@@ -35,18 +35,29 @@ def _ssl_context() -> ssl.SSLContext:
 
 
 def request(url: str, method: str = "GET", data: dict = None, timeout: float = TIMEOUT):
-    """JSON request with the private token. Errors -> {"error": True, "status": code|None, "message": ...}."""
+    """JSON request with the private token. Errors -> {"error": True, "status": code|None, "message": ...}.
+    An EMPTY or non-JSON success body is an error, never `{}` (Codex R.M4 #1). For a write (non-GET), a
+    failure after the request may have reached GitLab — network error, timeout, unreadable body — is
+    flagged "uncertain": True: the caller must reconcile before retrying, not treat it as a rejection
+    (Codex R.M4 #2). A definite HTTP rejection (4xx/5xx status) is never uncertain."""
     headers = {"PRIVATE-TOKEN": env.get("GITLAB_PRIVATE_TOKEN"), "Content-Type": "application/json"}
     body = json.dumps(data).encode() if data else None
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    write = method.upper() != "GET"
     try:
         with urllib.request.urlopen(req, context=_ssl_context(), timeout=timeout) as resp:
             raw = resp.read().decode()
-            return json.loads(raw) if raw.strip() else {}
     except urllib.error.HTTPError as e:
         return {"error": True, "status": e.code, "message": (e.read().decode(errors="replace") if e.fp else "")}
-    except (urllib.error.URLError, OSError, ValueError) as e:
-        return {"error": True, "status": None, "message": f"{type(e).__name__}: {getattr(e, 'reason', e)}"}
+    except (urllib.error.URLError, OSError) as e:
+        return {"error": True, "status": None, "uncertain": write,
+                "message": f"{type(e).__name__}: {getattr(e, 'reason', e)}"}
+    try:
+        if not raw.strip():
+            raise ValueError("empty response body")
+        return json.loads(raw)
+    except ValueError as e:
+        return {"error": True, "status": "bad-body", "uncertain": write, "message": str(e)[:200]}
 
 
 def project_info(project) -> dict:

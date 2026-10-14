@@ -33,6 +33,11 @@ class FakeGitLab(http.server.BaseHTTPRequestHandler):
         FakeGitLab.seen.append(("GET", self.path, self.headers.get("PRIVATE-TOKEN")))
         if self.path == "/api/v4/projects/77/merge_requests/5":
             return self._reply(200, {"iid": 5, "state": "opened", "sha": "abc"})
+        if self.path == "/api/v4/projects/77/empty":
+            self.send_response(200)
+            self.send_header("content-length", "0")
+            self.end_headers()
+            return None
         if self.path == "/api/v4/projects/grp%2Fproj":
             return self._reply(200, {"id": 77, "path_with_namespace": "grp/proj"})
         return self._reply(404, {"message": "404 Not Found"})
@@ -40,7 +45,9 @@ class FakeGitLab(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["content-length"])))
         FakeGitLab.seen.append(("POST", self.path, body))
-        return self._reply(201, {"id": 9, "body": body["body"]})
+        if "nope" in self.path:
+            return self._reply(400, {"message": "line is not part of the diff"})
+        return self._reply(201, {"id": 9, "body": body.get("body")})
 
     def log_message(self, *a):
         pass
@@ -80,6 +87,18 @@ class GitLabClientTest(unittest.TestCase):
         self.assertEqual((res["error"], res["status"]), (True, None))
         with self.assertRaises(ValueError):
             gitlab.Client("")
+
+    def test_empty_body_and_uncertain_writes(self):                    # Codex R.M4 R1
+        gl = gitlab.Client(77)
+        res = gl._request(gl._api("/empty"))
+        self.assertEqual((res["error"], res["status"], res["uncertain"]), (True, "bad-body", False))
+        with mock.patch.dict(os.environ, {"GITLAB_URL": "http://127.0.0.1:1"}):
+            w = gitlab.Client(77).add_mr_comment(1, "x")
+            r = gitlab.Client(77).get_merge_request(1)
+        self.assertTrue(w["uncertain"])                                # a write we cannot know about
+        self.assertFalse(r["uncertain"])                               # a read is just an error
+        rej = gl._request(gl._api("/nope"), method="POST", data={"a": 1})
+        self.assertEqual(rej.get("uncertain"), None)                   # HTTP rejection: definite
 
     def test_project_info_quotes_paths(self):
         self.assertEqual(gitlab.project_info("grp/proj")["id"], 77)

@@ -308,15 +308,39 @@ def human_decide(job: dict, approved: bool) -> dict:
 
 # --------------------------------------------------------------------------- post
 
-def _inline(gl, job: dict, f: dict) -> bool:
+def inline_marker(job: dict, i: int) -> str:
+    """Invisible per-finding marker: an inline discussion can be found again after an uncertain POST."""
+    return f"<!-- ai-review-inline {(job.get('diff_refs') or {}).get('head_sha', '')[:12]} #{i} -->"
+
+
+def inline_already_posted(gl, job: dict) -> set:
+    """Finding indices whose marker is already in a discussion of this MR (reconcile, Codex R.M4 #2)."""
+    url = gl._api(f"/merge_requests/{job['iid']}/discussions?per_page=100")
+    res = gl._request(url)
+    if not isinstance(res, list):
+        raise RuntimeError(f"cannot read MR discussions to reconcile inline comments: {str(res)[:200]}")
+    bodies = " ".join((n.get("body") or "") for d in res for n in (d.get("notes") or []))
+    return {i for i in range(200) if inline_marker(job, i) in bodies}
+
+
+def _inline(gl, job: dict, f: dict, i: int = 0) -> bool:
     refs = job["diff_refs"]
     side_new = f.get("side", "new") == "new"
     pos = {"position_type": "text", "base_sha": refs["base_sha"], "start_sha": refs["start_sha"],
            "head_sha": refs["head_sha"], "new_path": f["file"], "old_path": f.get("old_file") or f["file"]}
     pos["new_line" if side_new else "old_line"] = f["line"]
     url = gl._api(f"/merge_requests/{job['iid']}/discussions")
-    res = gl._request(url, method="POST", data={"body": render_inline(f), "position": pos})
-    return not (isinstance(res, dict) and res.get("error"))
+    res = gl._request(url, method="POST", data={"body": render_inline(f) + "\n\n" + inline_marker(job, i),
+                                                  "position": pos})
+    if isinstance(res, dict) and res.get("uncertain"):
+        # it may exist: stop, the next attempt reconciles by marker before posting anything (Codex R.M4 #2)
+        job.setdefault("inline_uncertain", {})[refs["head_sha"]] = True
+        rc.save_job(job, sync=False)
+        raise RuntimeError(f"inline comment #{i}: outcome unknown ({res.get('message', '')[:120]}) — "
+                           "will reconcile before retrying")
+    if isinstance(res, dict) and res.get("error"):
+        return False                               # a definite rejection (e.g. line outside the diff)
+    return isinstance(res, dict) and bool(res.get("id"))
 
 
 def post(jid: str, dry_run: bool = False, notify: bool = True) -> dict:
@@ -369,15 +393,24 @@ def _post_locked(jid: str, dry_run: bool, notify: bool) -> dict:
             rc.log_event(job, "posted_reconciled")
             rc.save_job(job)
             return {"job_id": jid, "posted": True, "reconciled": True}
+        if (job.get("inline_uncertain") or {}).get(head):    # a previous inline POST had no clear outcome
+            found = inline_already_posted(gl, job) & set(inline_cands)
+            done |= found
+            inline_ok |= found
+            job.setdefault("inline_done", {})[head] = sorted(inline_ok)
+            job["inline_uncertain"].pop(head, None)
+            rc.save_job(job, sync=False)
         for i in inline_cands:
             if i in done:
                 continue
-            if _inline(gl, job, findings[i]):
+            if _inline(gl, job, findings[i], i):
                 inline_ok.add(i)
                 job.setdefault("inline_done", {})[head] = sorted(inline_ok)
                 rc.save_job(job, sync=False)
         note = rc.gl_check(gl.add_mr_comment(job["iid"], render_note(job, review, inline_ok, approver)),
                            "post note")
+        if not (isinstance(note, dict) and note.get("id")):          # Codex R.M4 #1: no id = not posted
+            raise RuntimeError(f"GitLab post note returned no note id: {str(note)[:200]}")
     ws = _ws(job)
     import review_ws as rw
     reviewed = [c for c in (ws.get("commits") or {}).get("list", []) if not c.get("merge")]

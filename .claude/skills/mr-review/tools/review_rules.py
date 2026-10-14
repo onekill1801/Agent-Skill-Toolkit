@@ -129,9 +129,9 @@ def already_posted(gl, job: dict) -> bool:
     want = marker(job)
     url = gl._api(f"/merge_requests/{job['iid']}/notes?per_page=100&sort=desc&order_by=created_at")
     res = gl._request(url)
-    if isinstance(res, dict) and res.get("error"):
-        raise RuntimeError(f"cannot read MR notes to reconcile: {res.get('message', res)}")
-    return any(want in (n.get("body") or "") for n in (res if isinstance(res, list) else []))
+    if not isinstance(res, list):                  # an error OR an unexpected body: never "marker absent"
+        raise RuntimeError(f"cannot read MR notes to reconcile: {str(res.get('message', res) if isinstance(res, dict) else res)[:200]}")
+    return any(want in (n.get("body") or "") for n in res)
 
 
 def main(argv=None) -> int:

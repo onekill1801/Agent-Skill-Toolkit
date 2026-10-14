@@ -256,6 +256,50 @@ class AutoPostRulesTest(unittest.TestCase):
         self.assertIn(rr.marker(job), note)
         self.assertIn("AI review", note)
 
+    def test_uncertain_inline_stops_then_reconciles_by_marker(self):          # Codex R.M4 R1 #2
+        gl = mock.Mock()
+        gl._api.side_effect = lambda p: p
+        state = {"posted": []}
+
+        def req(url, method="GET", data=None):
+            if "notes" in url:
+                return []
+            if method == "POST":
+                state["posted"].append(data["body"])
+                return {"error": True, "status": None, "uncertain": True, "message": "timed out"}
+            return [{"notes": [{"body": b} for b in state["posted"]]}]      # GitLab DID create it
+        gl._request.side_effect = req
+        gl.add_mr_comment.return_value = {"id": 9}
+        job = self.job(approval={"via": "rules"})
+        with self.assertRaises(RuntimeError):
+            self._post_with(gl, job)
+        self.assertTrue(rc.load_job(job["id"])["inline_uncertain"][HEAD])
+        gl._request.side_effect = lambda url, method="GET", data=None: (
+            [] if "notes" in url else [{"notes": [{"body": b} for b in state["posted"]]}] if method == "GET"
+            else self.fail("inline must not be posted twice"))
+        out = self._post_with(gl, rc.load_job(job["id"]))
+        self.assertTrue(out["posted"])
+        self.assertEqual(out["inline"], 1)                                   # recognised as already posted
+        self.assertEqual(len(state["posted"]), 1)
+
+    def test_unreadable_notes_never_mean_not_posted(self):                     # Codex R.M4 R1 #1
+        gl = mock.Mock()
+        gl._api.side_effect = lambda p: p
+        gl._request.return_value = {"error": True, "status": "bad-body", "message": "empty response body"}
+        with self.assertRaises(RuntimeError):
+            self._post_with(gl, self.job(approval={"via": "rules"}))
+        gl.add_mr_comment.assert_not_called()
+
+    def test_note_without_id_is_not_posted(self):                              # Codex R.M4 R1 #1
+        gl = mock.Mock()
+        gl._api.side_effect = lambda p: p
+        gl._request.side_effect = lambda url, **kw: [] if "notes" in url else {"id": 1}
+        gl.add_mr_comment.return_value = {}
+        job = self.job(approval={"via": "rules"})
+        with self.assertRaises(RuntimeError):
+            self._post_with(gl, job)
+        self.assertNotEqual(rc.load_job(job["id"]).get("status"), "posted")
+
 
 class GuardHookTest(unittest.TestCase):
     HOOK = os.path.join(_ROOT, ".claude", "hooks", "guard_write.py")
