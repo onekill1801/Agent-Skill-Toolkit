@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Toolkit Dashboard</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --line: #e3e6ea; --text: #1d232b; --muted: #6b7480;
+  --accent: #2f6fdb; --ok: #1f9d55; --warn: #c27c0e; --bad: #d14343; --info: #6b52c8;
+  --chip: #eef1f5; --code: #f1f3f6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12151a; --panel: #1a1f26; --line: #2a313b; --text: #e3e7ec; --muted: #8b95a3;
+    --accent: #6b9cf0; --ok: #46c27f; --warn: #e2a33b; --bad: #ef6b6b; --info: #a08cf0;
+    --chip: #232a33; --code: #232a33;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12151a; --panel: #1a1f26; --line: #2a313b; --text: #e3e7ec; --muted: #8b95a3;
+  --accent: #6b9cf0; --ok: #46c27f; --warn: #e2a33b; --bad: #ef6b6b; --info: #a08cf0;
+  --chip: #232a33; --code: #232a33;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif; }
+header { position: sticky; top: 0; z-index: 5; background: var(--panel); border-bottom: 1px solid var(--line);
+  padding: 10px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+header h1 { font-size: 16px; margin: 0; }
+header .meta { color: var(--muted); font-size: 12px; }
+header .spacer { flex: 1; }
+button, select { font: inherit; background: var(--chip); color: var(--text); border: 1px solid var(--line);
+  border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+main { padding: 16px; max-width: 1400px; margin: 0 auto; display: grid; gap: 16px; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.kpi .v { font-size: 24px; font-weight: 600; }
+.kpi .l { color: var(--muted); font-size: 12px; }
+.kpi.bad .v { color: var(--bad); } .kpi.warn .v { color: var(--warn); } .kpi.ok .v { color: var(--ok); }
+section.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+section.card > h2 { margin: 0; font-size: 14px; padding: 10px 14px; border-bottom: 1px solid var(--line);
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+section.card > h2 .count { color: var(--muted); font-weight: 400; }
+section.card > h2 .hint { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: auto; }
+.body { padding: 0; overflow-x: auto; }
+.empty { color: var(--muted); padding: 12px 14px; }
+.err { color: var(--bad); padding: 12px 14px; white-space: pre-wrap; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 6px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+td.num { text-align: right; white-space: nowrap; }
+.mono, code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+code { background: var(--code); padding: 1px 5px; border-radius: 4px; cursor: copy; white-space: nowrap; }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; background: var(--chip); white-space: nowrap; }
+.s-running { color: var(--accent); } .s-queued { color: var(--muted); } .s-blocked { color: var(--bad); }
+.s-paused_quota { color: var(--warn); } .s-done { color: var(--ok); } .s-failed { color: var(--bad); }
+.s-cancelled { color: var(--muted); }
+.note { color: var(--muted); font-size: 12px; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip { font-size: 12px; padding: 2px 10px; border-radius: 999px; background: var(--chip); border: 1px solid var(--line); cursor: pointer; }
+.chip.on { border-color: var(--accent); color: var(--accent); }
+.bar { position: relative; height: 8px; width: 90px; background: var(--chip); border-radius: 4px; overflow: hidden; display: inline-block; vertical-align: middle; }
+.bar > i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--ok); }
+.bar.mid > i { background: var(--warn); } .bar.low > i { background: var(--bad); }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; }
+.indent { display: inline-block; }
+.toast { position: fixed; bottom: 16px; right: 16px; background: var(--text); color: var(--bg); padding: 6px 12px; border-radius: 6px; opacity: 0; transition: opacity .2s; }
+.toast.show { opacity: .92; }
+@media (max-width: 600px) { .grid2 { grid-template-columns: 1fr; } main { padding: 12px 16px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Toolkit Dashboard</h1>
+  <span class="meta" id="meta">đang tải…</span>
+  <span class="spacer"></span>
+  <label class="meta">Tự làm mới
+    <select id="interval">
+      <option value="5">5 giây</option>
+      <option value="10" selected>10 giây</option>
+      <option value="30">30 giây</option>
+      <option value="0">Tắt</option>
+    </select>
+  </label>
+  <button id="refresh" title="Đọc lại ngay">↻ Làm mới</button>
+  <button id="theme" title="Sáng / tối">◐</button>
+</header>
+<main>
+  <div class="kpis" id="kpis"></div>
+
+  <section class="card" id="attention">
+    <h2>Cần bạn xử lý <span class="count" id="attn-count"></span>
+      <span class="hint">bấm vào lệnh để copy — chạy ở terminal thật</span></h2>
+    <div class="body" id="attn-body"></div>
+  </section>
+
+  <section class="card">
+    <h2>Việc trong hàng đợi <span class="count" id="tasks-count"></span>
+      <span class="chips" id="kind-chips"></span>
+      <span class="hint">mở + đóng trong 24 giờ · <code>coordinator.py board</code></span></h2>
+    <div class="body" id="tasks-body"></div>
+  </section>
+
+  <section class="card">
+    <h2>Tài khoản agent <span class="count" id="acct-count"></span>
+      <span class="hint">dung lượng lấy từ Orca · * = tài khoản Orca đang chọn</span></h2>
+    <div class="body" id="acct-body"></div>
+  </section>
+
+  <section class="card">
+    <h2>Review MR <span class="count" id="rev-count"></span>
+      <span class="hint"><code>review_flow.py status</code></span></h2>
+    <div class="body" id="rev-body"></div>
+  </section>
+
+  <div class="grid2">
+    <section class="card"><h2>Daemon <span class="count" id="dmn-count"></span>
+      <span class="hint"><code>daemon_common.py status</code></span></h2><div class="body" id="dmn-body"></div></section>
+    <section class="card"><h2>Pipeline run <span class="count" id="run-count"></span></h2><div class="body" id="run-body"></div></section>
+    <section class="card"><h2>Hàng đợi intake <span class="count" id="q-count"></span></h2><div class="body" id="q-body"></div></section>
+    <section class="card"><h2>Port-forward <span class="count" id="fw-count"></span>
+      <span class="hint"><code>podfwd.py list</code></span></h2><div class="body" id="fw-body"></div></section>
+    <section class="card"><h2>Feedback (sổ học) <span class="count" id="fb-count"></span></h2><div class="body" id="fb-body"></div></section>
+  </div>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+const STATUS = { queued: "chờ", running: "đang chạy", paused_quota: "hết quota", blocked: "chờ bạn",
+  done: "xong", failed: "lỗi", cancelled: "đã huỷ" };
+const ICON = { queued: "⏳", running: "🔄", paused_quota: "⏸", blocked: "✋", done: "✅", failed: "❌", cancelled: "🚫" };
+const KIND = { review_mr: "Review MR", verify: "Thang kiểm", proposal: "Đề xuất", atask_intake: "aTask",
+  refactor_program: "Refactor", refactor_slice: "Lát refactor", refactor_publish: "Publish lát", code: "Code",
+  investigate: "Điều tra" };
+const T = ".claude/skills";
+let state = null, kindFilter = "", timer = null, showAllAttn = false;
+
+const $ = (id) => document.getElementById(id);
+function esc(v) {
+  return String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+const code = (s) => `<code data-copy="${esc(s)}">${esc(s)}</code>`;
+function ago(ts) {
+  if (!ts) return "";
+  const t = typeof ts === "number" ? ts * (ts > 1e12 ? 1 : 1000) : Date.parse(ts);
+  if (!isFinite(t)) return esc(ts);
+  const s = Math.round((Date.now() - t) / 1000);
+  if (s < 0) return "sắp tới";
+  if (s < 60) return s + " giây trước";
+  if (s < 3600) return Math.round(s / 60) + " phút trước";
+  if (s < 86400) return Math.round(s / 3600) + " giờ trước";
+  return Math.round(s / 86400) + " ngày trước";
+}
+function clock(epoch) {
+  if (!epoch) return "";
+  const d = new Date(epoch * 1000);
+  return d.toLocaleString("vi-VN", { weekday: "short", hour: "2-digit", minute: "2-digit" });
+}
+function table(cols, rows) {
+  if (!rows.length) return `<div class="empty">Không có gì.</div>`;
+  return `<table><thead><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>` +
+    rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("") + `</tbody></table>`;
+}
+function section(name) {
+  const s = state && state.sections[name];
+  if (!s) return { err: "chưa có dữ liệu" };
+  return s.ok ? { data: s.data } : { err: s.error };
+}
+function setBody(id, countId, sec, render) {
+  const el = $(id);
+  if (sec.err) { el.innerHTML = `<div class="err">${esc(sec.err)}</div>`; if (countId) $(countId).textContent = ""; return; }
+  const out = render(sec.data);
+  el.innerHTML = out.html;
+  if (countId) $(countId).textContent = out.count === undefined ? "" : `(${out.count})`;
+}
+function statusBadge(s) { return `<span class="badge s-${esc(s)}">${ICON[s] || ""} ${esc(STATUS[s] || s)}</span>`; }
+function bar(left) {
+  if (left === null || left === undefined) return "";
+  const cls = left < 20 ? "low" : left < 50 ? "mid" : "";
+  return `<span class="bar ${cls}"><i style="width:${Math.max(0, Math.min(100, left))}%"></i></span>`;
+}
+function pct(b) {
+  if (!b) return `<span class="note">?</span>`;
+  if (b.reset_passed) return `<span class="note" title="đã qua giờ reset sau lần đọc — số mới chưa biết">reset?</span>`;
+  return `${bar(b.left)} ${Math.round(b.left)}%`;
+}
+
+function renderKpis() {
+  const st = section("store").data || {};
+  const counts = (st.summary || {}).counts || {};
+  const usage = (st.summary || {}).usage || {};
+  const set = st.settings || {};
+  const appr = (section("approvals").data || []).length;
+  const accts = ((section("accounts").data || {}).accounts) || [];
+  const busy = accts.filter((a) => a.running.length).length;
+  const tier = { normal: "bình thường", save: "tiết kiệm", critical: "khẩn", exhausted: "hết" }[usage.tier] || usage.tier || "?";
+  const k = [
+    ["Đang chạy", counts.running || 0, ""],
+    ["Chờ bạn", (counts.blocked || 0) + appr, (counts.blocked || 0) + appr ? "bad" : "ok"],
+    ["Hết quota (tạm dừng)", counts.paused_quota || 0, counts.paused_quota ? "warn" : ""],
+    ["Đang chờ chạy", counts.queued || 0, ""],
+    ["Xong (24h)", counts.done || 0, "ok"],
+    ["Lỗi", counts.failed || 0, counts.failed ? "bad" : ""],
+    ["Mức dùng", tier + (usage.pct != null ? ` ${Math.round(usage.pct)}%` : ""), usage.tier && usage.tier !== "normal" ? "warn" : ""],
+    ["Song song tối đa", set.capacity ?? "?", ""],
+    ["Lượt agent hôm nay", (set.agent_runs_today ?? 0) + (set.daily_agent_runs ? ` / ${set.daily_agent_runs}` : ""), ""],
+    ["Tài khoản đang bận", `${busy} / ${accts.length}`, ""],
+  ];
+  $("kpis").innerHTML = k.map(([l, v, c]) => `<div class="kpi ${c}"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join("");
+}
+
+function renderAttention() {
+  const rows = [];
+  const st = section("store").data || {};
+  for (const r of st.rows || []) {
+    if (r.status === "blocked" || r.status === "failed") {
+      rows.push([statusBadge(r.status), `<b>${esc(KIND[r.kind] || r.kind)}</b> · ${esc(r.title)}<div class="note">${esc(r.note)}</div>`,
+        code(`python ${T}/dev-automation/tools/taskstore.py show ${r.id}`) +
+        (r.status === "blocked" ? "<br>" + code(`python ${T}/dev-automation/tools/taskstore.py unblock ${r.id}`) : "")]);
+    }
+  }
+  for (const a of section("approvals").data || []) {
+    const job = (/^post review (\S+)/.exec(a.summary || "") || [])[1];
+    rows.push([`<span class="badge s-blocked">🔐 duyệt</span>`, `<b>${esc(a.tool)}</b> · ${esc(a.summary)}<div class="note">${esc(a.age)} · risk ${esc(a.risk)} · id ${esc(a.id)}</div>`,
+      `<span class="note">Duyệt qua Telegram${job ? ", hoặc:" : ""}</span>` +
+      (job ? "<br>" + code(`python ${T}/mr-review/tools/review_post.py approve ${job}`) : "")]);
+  }
+  for (const j of ((section("reviews").data || {}).jobs) || []) {
+    if (["awaiting_approval", "needs_human", "blocked"].includes(j.status)) {
+      rows.push([`<span class="badge s-blocked">${esc(j.status)}</span>`, `<b>${esc(j.mr)}</b> · ${esc(j.title)}`,
+        code(`python ${T}/mr-review/tools/review_post.py render ${j.id}`) + "<br>" + code(`python ${T}/mr-review/tools/review_post.py approve ${j.id}`)]);
+    }
+  }
+  $("attn-count").textContent = `(${rows.length})`;
+  const MAX = showAllAttn ? rows.length : 15;
+  $("attn-body").innerHTML = rows.length
+    ? table(["", "Việc", "Lệnh"], rows.slice(0, MAX)) +
+      (rows.length > MAX ? `<div class="empty"><span class="chip" data-more="1">Xem thêm ${rows.length - MAX} mục</span></div>` : "")
+    : `<div class="empty">Không có việc nào chờ bạn. 👍</div>`;
+}
+
+function renderTasks() {
+  setBody("tasks-body", "tasks-count", section("store"), (d) => {
+    if (!d.exists) return { html: `<div class="empty">Chưa có store (temp/toolkit.db). Thêm việc: <code>review_flow.py enqueue</code>, <code>verify.py start</code>, <code>proposals.py scan --enqueue</code>…</div>`, count: 0 };
+    const rows = d.rows || [];
+    const kinds = [...new Set(rows.map((r) => r.kind))].sort();
+    $("kind-chips").innerHTML = [["", "Tất cả"], ...kinds.map((k) => [k, KIND[k] || k])].map(([k, l]) =>
+      `<span class="chip ${k === kindFilter ? "on" : ""}" data-kind="${esc(k)}">${esc(l)} ${k ? `(${rows.filter((r) => r.kind === k).length})` : ""}</span>`).join("");
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+    const depth = (r) => { let n = 0, p = r.parent; while (p && byId[p] && n < 6) { n++; p = byId[p].parent; } return n; };
+    const order = { blocked: 0, running: 1, paused_quota: 2, queued: 3, failed: 4, done: 5, cancelled: 6 };
+    // children right under their parent, parents ordered by status
+    const roots = rows.filter((r) => !r.parent || !byId[r.parent]).sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
+    const kids = {};
+    rows.forEach((r) => { if (r.parent && byId[r.parent]) (kids[r.parent] = kids[r.parent] || []).push(r); });
+    const flat = [];
+    const walk = (r, seen) => { if (seen.has(r.id)) return; seen.add(r.id); flat.push(r); (kids[r.id] || []).forEach((c) => walk(c, seen)); };
+    const seen = new Set(); roots.forEach((r) => walk(r, seen));
+    const shown = flat.filter((r) => !kindFilter || r.kind === kindFilter);
+    return { count: shown.length, html: table(["Trạng thái", "Loại", "Việc", "Bước", "Ghi chú", "ID"], shown.map((r) => [
+      statusBadge(r.status), esc(KIND[r.kind] || r.kind),
+      `<span class="indent" style="width:${depth(r) * 18}px"></span>${depth(r) ? "└ " : ""}${esc(r.title)}` +
+        (r.resource ? `<div class="note mono">${esc(r.resource)}</div>` : ""),
+      esc(r.step) + (r.done_steps && r.done_steps.length ? `<div class="note">xong: ${esc(r.done_steps.join(", "))}</div>` : ""),
+      `<span class="note">${esc(r.note)}${r.attempts > 1 ? ` · lần ${esc(r.attempts)}` : ""}${r.source ? ` · từ ${esc(r.source)}` : ""}</span>`,
+      `<span class="mono note">${esc(r.id)}</span>`])) };
+  });
+}
+
+function renderAccounts() {
+  setBody("acct-body", "acct-count", section("accounts"), (d) => {
+    const rows = (d.accounts || []).map((a) => {
+      const u = a.usage || {};
+      const src = { live: "trực tiếp", cached: u.age_min != null ? `${u.age_min} phút trước` : "cache", none: "—" }[a.usage_source] || "";
+      const resets = [u.session, u.weekly].filter((b) => b && b.resets_at && !b.reset_passed).map((b) => b.resets_at);
+      const doing = a.running.length ? a.running.map((x) => `🔄 ${esc(x.role || "?")} ${esc(x.task_id || "")} ${esc(x.step || "")} <span class="note">(${esc(x.minutes)} phút)</span>`).join("<br>") : `<span class="note">rảnh</span>`;
+      const last = a.last ? `<div class="note">gần nhất: ${esc(a.last.model || "")} ${esc(a.last.task_id || "")} · ${ago(a.last.ts)}</div>` : "";
+      return [`<b>${esc(a.account)}${a.orca_active ? " *" : ""}</b><div class="note">${esc(a.email || "")}${a.org ? " · " + esc(a.org) : ""}</div>` +
+              (a.warning ? `<div class="note" style="color:var(--bad)">${esc(a.warning)}</div>` : ""),
+        pct(u.session), pct(u.weekly), resets.length ? esc(clock(Math.min(...resets))) : "", `<span class="note">${esc(src)}</span>`,
+        `${a.today.runs} lượt<div class="note">${Math.round(a.today.seconds / 60)} phút</div>`, doing + last];
+    });
+    let html = table(["Tài khoản", "5 giờ còn", "Tuần còn", "Reset sớm nhất", "Số liệu", "Hôm nay", "Đang làm"], rows);
+    if (d.unattributed) html += `<div class="empty">Không rõ tài khoản: ${d.unattributed.today.runs} lượt hôm nay, ${d.unattributed.running.length} đang chạy (gọi không qua role).</div>`;
+    if (d.orca !== "ok") html += `<div class="err">Orca không đọc được${d.orca_error ? ": " + esc(d.orca_error) : ""} — không có số dung lượng.</div>`;
+    return { html, count: rows.length };
+  });
+}
+
+function renderReviews() {
+  setBody("rev-body", "rev-count", section("reviews"), (d) => {
+    const jobs = d.jobs || [];
+    return { count: jobs.length, html: table(["Trạng thái", "MR", "Tiêu đề", "Kết luận", "Nhánh", "Ai nhờ", "Cập nhật"], jobs.slice(0, 50).map((j) => [
+      `<span class="badge">${esc(j.status)}</span>`, `<span class="mono">${esc(j.mr)}</span>`, esc(j.title),
+      esc(j.verdict || ""), `<span class="note mono">${esc(j.branches)}</span>`, esc(j.by), `<span class="note">${ago(j.updated)}</span>`])) };
+  });
+}
+
+function renderSystem() {
+  setBody("dmn-body", "dmn-count", section("daemons"), (d) => ({ count: d.length, html: table(["Daemon", "Sự kiện cuối", "Lúc", "Chi tiết"],
+    d.map((x) => [esc(x.daemon), `<span class="badge">${esc(x.event)}</span>`, esc(x.age), `<span class="note">${esc(x.detail)}</span>`])) }));
+  setBody("run-body", "run-count", section("runs"), (d) => {
+    const open = d.filter((r) => r.open);
+    return { count: open.length, html: table(["Run", "Task", "Project", "Giai đoạn", "Tiến độ"], open.map((r) => [
+      `<span class="mono">${esc(r.run_id)}</span>`, esc(r.task_id), esc(r.project), (r.failed ? "❌ " : "") + esc(r.current_stage), esc(r.stages_done)])) };
+  });
+  setBody("q-body", "q-count", section("queue"), (d) => {
+    const items = d.items || [];
+    return { count: items.length, html: table(["Trạng thái", "Task", "Tên", "Lúc"], items.map((i) => [
+      `<span class="badge">${esc(i.state)}</span>`, esc(i.task_id), esc(i.name), esc(i.age)])) +
+      ((d.locks || []).length ? `<div class="empty">Khoá: ${d.locks.map((l) => esc(l.owner) + " " + esc(l.age)).join(", ")}</div>` : "") };
+  });
+  setBody("fw-body", "fw-count", section("forwards"), (d) => {
+    const f = d.forwards || [];
+    return { count: f.length, html: table(["Tên", "Local", "Đích", "Context", "Đang nghe", "Nối lại"], f.map((x) => [
+      esc(x.name), `<span class="mono">${esc(x.local)}</span>`, `<span class="mono">${esc(x.target)}</span>`,
+      esc(x.context || ""), x.listening ? "✅" : (x.supervisor_alive ? "⏳" : "❌"), esc(x.restarts)])) };
+  });
+  setBody("fb-body", "fb-count", section("feedback"), (d) => ({ count: d.length, html: table(["Project", "Bản ghi", "Lần sửa tay", "Tỉ lệ thẳng"],
+    d.map((x) => [esc(x.project), `<span class="num">${esc(x.records)}</span>`, esc(x.corrections),
+      x.straight_through_rate == null ? "" : Math.round(x.straight_through_rate * 100) + "%"])) }));
+}
+
+function render() {
+  const slow = Object.entries(state.sections).filter(([, s]) => s.ms > 1500).map(([k, s]) => `${k} ${s.ms}ms`);
+  $("meta").textContent = `${state.host} · cập nhật ${new Date(state.generated_at * 1000).toLocaleTimeString("vi-VN")}` +
+    (slow.length ? ` · chậm: ${slow.join(", ")}` : "");
+  renderKpis(); renderAttention(); renderTasks(); renderAccounts(); renderReviews(); renderSystem();
+}
+
+async function load(fresh) {
+  try {
+    const res = await fetch("/api/state" + (fresh ? "?fresh=1" : ""), { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    state = await res.json();
+    render();
+  } catch (e) {
+    $("meta").textContent = "Mất kết nối tới dashboard.py (" + e.message + ") — server còn chạy không?";
+  }
+}
+function schedule() {
+  clearInterval(timer);
+  const s = +$("interval").value;
+  try { localStorage.setItem("dash.interval", String(s)); } catch (e) {}
+  if (s > 0) timer = setInterval(() => { if (!document.hidden) load(false); }, s * 1000);
+}
+function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("show"); setTimeout(() => t.classList.remove("show"), 1200); }
+
+document.addEventListener("click", (e) => {
+  const c = e.target.closest("[data-copy]");
+  if (c) {
+    const text = c.getAttribute("data-copy");
+    (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject()).then(() => toast("Đã copy lệnh"), () => {
+      const r = document.createRange(); r.selectNodeContents(c); const s = getSelection(); s.removeAllRanges(); s.addRange(r); toast("Đã chọn — Ctrl+C");
+    });
+    return;
+  }
+  if (e.target.closest("[data-more]")) { showAllAttn = true; render(); return; }
+  const k = e.target.closest("[data-kind]");
+  if (k) { kindFilter = k.getAttribute("data-kind"); render(); }
+});
+$("refresh").addEventListener("click", () => load(true));
+$("interval").addEventListener("change", schedule);
+$("theme").addEventListener("click", () => {
+  const root = document.documentElement;
+  const dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  root.dataset.theme = dark ? "light" : "dark";
+  try { localStorage.setItem("dash.theme", root.dataset.theme); } catch (e) {}
+});
+try {
+  const th = localStorage.getItem("dash.theme"); if (th) document.documentElement.dataset.theme = th;
+  const iv = localStorage.getItem("dash.interval"); if (iv !== null) $("interval").value = iv;
+} catch (e) {}
+schedule();
+load(true);
+</script>
+</body>
+</html>

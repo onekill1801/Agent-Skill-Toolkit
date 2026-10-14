@@ -118,6 +118,22 @@ class Store:
             self.db.execute("insert or ignore into settings(key, value) values ('max_running', ?)",
                             (str(max_running_default()),))
 
+    @classmethod
+    def reader(cls, path: str = "") -> "Store":
+        """READ-ONLY handle for views that poll (dashboard): sqlite `mode=ro` — no WAL switch, no
+        schema setup, no settings insert, no write lock; any write method fails ('readonly database').
+        Raises FileNotFoundError when there is no database yet (nothing is created)."""
+        self = cls.__new__(cls)
+        self.path = os.path.abspath(path or default_path(create=False))
+        if not os.path.exists(self.path):
+            raise FileNotFoundError(self.path)
+        from pathlib import Path
+        uri = Path(self.path).as_uri() + "?mode=ro"          # file:///D:/... percent-encoded
+        self.db = sqlite3.connect(uri, uri=True, timeout=5, isolation_level=None, check_same_thread=False)
+        self.db.row_factory = sqlite3.Row
+        self.db.execute("pragma busy_timeout=5000")
+        return self
+
     def close(self):
         self.db.close()
 

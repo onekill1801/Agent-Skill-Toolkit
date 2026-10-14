@@ -40,6 +40,16 @@ Project đăng ký trong `work/projects.json` (hiện có: etask, eintelligent, 
 
 ## 4. Các tình huống dùng hằng ngày
 
+### 4.0 Giao diện web theo dõi (mở trong trình duyệt Orca)
+
+```bash
+python $T/dev-automation/tools/dashboard.py serve        # rồi mở http://127.0.0.1:8765
+```
+Một trang tự làm mới (5/10/30 giây): ô số tổng quan, **"Cần bạn xử lý"** (việc bị chặn, yêu cầu duyệt — kèm lệnh, bấm để copy),
+toàn bộ việc trong hàng đợi (lọc theo loại), tài khoản agent + dung lượng, review MR, daemon, pipeline run, port-forward, feedback.
+Chỉ đọc: không có nút hành động — mọi thao tác vẫn là lệnh ở terminal. Chỉ nghe `127.0.0.1` (máy khác không vào được).
+Đổi cổng: `--port 9000`. Dừng: Ctrl+C.
+
 ### 4.1 Xem đang có việc gì — lệnh dùng nhiều nhất
 
 ```bash
