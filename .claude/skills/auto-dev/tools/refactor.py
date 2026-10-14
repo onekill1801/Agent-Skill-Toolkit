@@ -7,11 +7,14 @@
     python refactor.py ratchet tighten --repo DIR                       # shrink the baseline (never grows)
     python refactor.py program new --repo DIR --goal "..." --invariants "..." --slices FILE.json [--base develop]
     python refactor.py program approve <program_id>                     # YOU approve the plan -> slices start
-    python refactor.py program status <program_id>
+    python refactor.py program status <program_id>                      # progress + ratchet trend per slice
+    python refactor.py program extend <program_id> --slices MORE.json   # re-plan: more slices, new approval gate
     python refactor.py snapshot record --repo DIR --rung NAME [--spec FILE]   # (re)write the rung's snapshot
     python refactor.py metrics  record --repo DIR --rung NAME [--spec FILE]   # (re)write the rung's baseline
 
 slices.json: [{"id": "s1", "title": "...", "desc": "...", "acs": ["..."], "depends_on": []}, ...]
+  a MECHANICAL slice adds "run": ["mvn", "rewrite:run", "-Drewrite.activeRecipes=..."] — the tool does the
+  change, no agent (the verify ladder still proves it)
 Each slice: own worktree + branch refactor/<goal>-<id>, the implement agent codes it, the verify ladder
 proves it (`coordinator.py work` runs both); merging = your MR.
 
@@ -117,9 +120,13 @@ def program(action: str, a) -> dict:
                 raise ValueError("the program changed meanwhile — look again")
             st.unblock(a.program_id, by="human:approve")
             return {"program": a.program_id, "approved": True, "next": "coordinator.py work"}
+        if action == "extend":
+            with open(a.slices, encoding="utf-8") as f:
+                return P.extend(st, a.program_id, json.load(f))
         kids = st.children(a.program_id)
         done = sum(1 for k in kids if k["status"] == "done")
         return {"program": a.program_id, "status": t["status"], "progress": f"{done}/{len(kids)}",
+                **P.progress(st, a.program_id),
                 "tasks": [{k2: k.get(k2) for k2 in ("id", "kind", "title", "status", "last_error")} for k in kids]}
 
 
@@ -175,7 +182,7 @@ def main(argv=None) -> int:
     p.add_argument("--depth", type=int, default=1)
     p.add_argument("--out", default="")
     p = sub.add_parser("program")
-    p.add_argument("action", choices=["new", "approve", "status"])
+    p.add_argument("action", choices=["new", "approve", "status", "extend"])
     p.add_argument("program_id", nargs="?", default="")
     p.add_argument("--repo", default="")
     p.add_argument("--goal", default="")
@@ -207,7 +214,9 @@ def main(argv=None) -> int:
             if a.action == "new" and not (a.repo and a.goal and a.slices):
                 raise ValueError("program new needs --repo, --goal and --slices")
             if a.action != "new" and not a.program_id:
-                raise ValueError("program approve/status needs the program id")
+                raise ValueError("program approve/status/extend needs the program id")
+            if a.action == "extend" and not a.slices:
+                raise ValueError("program extend needs --slices")
             out = program(a.action, a)
         else:
             if a.action != "check" and a.base:

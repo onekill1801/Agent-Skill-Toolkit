@@ -388,5 +388,65 @@ class Round1Test(ProgramTest):
         self.assertFalse(self.new()["duplicate"])
 
 
+class F10dTest(ProgramTest):
+    """Mechanical slices, re-plan, ratchet trend (checklist F.10d)."""
+
+    def run_all(self, pid):
+        self.work()
+        self.approve(pid)
+        self.work()
+
+    def test_mechanical_slice_runs_its_tool_not_an_agent(self):
+        tool = os.path.join(self.tmp, "codemod.py")
+        with open(tool, "w") as f:
+            f.write("import pathlib\np = pathlib.Path('src/app.py')\np.write_text(p.read_text().replace('x = 1', 'value = 1'))\n")
+        with open(self.slices, "w") as f:
+            json.dump([{"id": "rename", "title": "Đổi tên biến", "run": [sys.executable, tool]}], f)
+        out = self.new()
+        self.run_all(out["program"])
+        self.assertEqual(self.prompts, [])                             # no agent turn at all
+        with S.Store() as st:
+            self.assertEqual({k["status"] for k in st.children(out["program"])}, {"done"})
+        self.assertIn("value = 1", git(self.repo, "show", f"{out['slices'][0]['branch']}:src/app.py"))
+
+    def test_mechanical_slice_without_effect_blocks(self):
+        with open(self.slices, "w") as f:
+            json.dump([{"id": "noop", "title": "x", "run": [sys.executable, "-c", "pass"]}], f)
+        out = self.new()
+        self.run_all(out["program"])
+        with S.Store() as st:
+            t = st.get(out["slices"][0]["implement"])
+        self.assertEqual(t["status"], "blocked")
+        self.assertIn("tool made no change", t["last_error"])
+
+    def test_bad_run_is_refused(self):
+        with self.assertRaises(ValueError):
+            P.parse_slices([{"id": "a", "title": "x", "run": "rm -rf /"}])
+
+    def test_replan_after_a_wave(self):
+        out = self.new()
+        self.run_all(out["program"])                                  # s1, s2 done
+        more = os.path.join(self.tmp, "more.json")
+        with open(more, "w") as f:
+            json.dump([{"id": "s3", "title": "Dọn dẹp", "depends_on": ["s2"]}], f)
+        with S.Store() as st:
+            with self.assertRaises(ValueError):                        # ids never collide
+                P.extend(st, out["program"], [{"id": "s1", "title": "again"}])
+            ext = P.extend(st, out["program"], json.load(open(more)))
+        self.work()
+        with S.Store() as st:
+            gate = st.get(ext["gate"])
+            self.assertEqual(gate["status"], "blocked")                # waits for YOUR approval
+            self.assertEqual(gate["parent"], out["program"])
+        self.approve(ext["gate"])
+        self.work()
+        b2, b3 = out["slices"][1]["branch"], ext["slices"][0]["branch"]
+        git(self.repo, "merge-base", "--is-ancestor", b2, b3)         # stacked on s2's published commit
+        rep = RF.program("status", type("A", (), {"program_id": out["program"]})())
+        self.assertEqual(rep["progress"], "10/10")                    # 2x3 + gate + 3
+        self.assertEqual([r["slice"] for r in rep["slices"]], ["s1", "s2", "s3"])
+        self.assertEqual(len(rep["ratchet_trend"]), 3)                # the ratchet rung measured every slice
+
+
 if __name__ == "__main__":
     unittest.main()

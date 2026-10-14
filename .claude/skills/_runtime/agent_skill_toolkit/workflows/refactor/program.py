@@ -46,25 +46,36 @@ branches or other directories, never edit .agent/. Commit on {branch} with messa
 "refactor({slice}): <summary>". Finish with a short summary."""
 
 
-def parse_slices(doc) -> list:
-    """[{id, title, desc, depends_on: [ids], acs: [..]}] validated: ids are slugs, deps exist and come
-    first (no cycles)."""
+def parse_slices(doc, known=()) -> list:
+    """[{id, title, desc, depends_on: [ids], acs: [..], run?: [argv]}] validated: ids are slugs, deps exist
+    and come first (no cycles). `known` = slice ids already in the program (an extension may depend on
+    them, never reuse them). `run` = a MECHANICAL slice: this command (OpenRewrite recipe, codemod,
+    IDE refactoring CLI ...) does the change instead of an agent (design §12.3: tools for the mechanical
+    part, the LLM only for the semantic part)."""
     if not isinstance(doc, list) or not doc:
         raise ValueError("slices: a non-empty JSON list")
-    seen, out = [], []
+    known = list(known)
+    seen, out = list(known), []
     for s in doc:
         if not isinstance(s, dict) or not SLUG.match(str(s.get("id", ""))):
             raise ValueError(f"slice id must be a short slug (a-z0-9-): {s!r:.80}")
         if s["id"] in seen:
-            raise ValueError(f"duplicate slice id {s['id']}")
+            raise ValueError(f"duplicate slice id {s['id']}" + (" (already in the program)" if s["id"] in known else ""))
         deps = s.get("depends_on") or []
         if not isinstance(deps, list) or any(d not in seen for d in deps):
             raise ValueError(f"slice {s['id']}: depends_on must list EARLIER slice ids")
         if not str(s.get("title") or "").strip():
             raise ValueError(f"slice {s['id']}: title is required")
+        run = s.get("run")
+        if run is not None and not (isinstance(run, list) and run and all(isinstance(a, str) and a for a in run)):
+            raise ValueError(f"slice {s['id']}: `run` must be a non-empty list of strings (argv)")
         seen.append(s["id"])
-        out.append({"id": s["id"], "title": str(s["title"]).strip(), "desc": str(s.get("desc") or ""),
-                    "depends_on": deps, "acs": [str(a) for a in (s.get("acs") or [])]})
+        item = {"id": s["id"], "title": str(s["title"]).strip(), "desc": str(s.get("desc") or ""),
+                "depends_on": deps, "acs": [str(a) for a in (s.get("acs") or [])]}
+        if run:
+            item["run"] = list(run)
+            item["timeout"] = int(s.get("timeout") or 3600)
+        out.append(item)
     return out
 
 
@@ -89,6 +100,58 @@ def check_spec(repo: str, base_sha: str, spec_file: str = "") -> dict:
     return spec
 
 
+def slice_nodes(common: dict, slices: list, gate_key: str, existing_publish: dict) -> list:
+    """implement -> verify -> publish nodes per slice, behind the gate node `gate_key`. A dependency on a
+    slice created EARLIER (an extension) uses its real publish task id."""
+    from agent_skill_toolkit.workflows.verify import ladder as L
+    run, nodes = common["run"], []
+    for s in slices:
+        branch = f"refactor/{run}-{s['id']}"
+        clone = paths.state_dir("refactor-clones", run, s["id"])
+        mode = ("base" if not s["depends_on"] else f"stack:{s['depends_on'][0]}" if len(s["depends_on"]) == 1
+                else "merged")
+        nodes.append({"key": f"impl:{s['id']}", "kind": SLICE, "ref": f"{run}:{s['id']}",
+                      "title": f"{s['id']}: {s['title'][:120]}" + (" [tool]" if s.get("run") else ""),
+                      "parent": common.get("program_id", ""), "parent_key": gate_key if not common.get("program_id") else None,
+                      "depends_keys": [gate_key] + [f"publish:{d}" for d in s["depends_on"] if d not in existing_publish],
+                      "depends_on": [existing_publish[d] for d in s["depends_on"] if d in existing_publish],
+                      "resource": f"slice:{clone}",
+                      "data": {**common, "slice": s, "worktree": clone, "branch": branch, "start_mode": mode,
+                               "deps": {d: f"refactor/{run}-{d}" for d in s["depends_on"]}}})
+        nodes.append({"key": f"verify:{s['id']}", "kind": L.KIND, "ref": f"{clone}@{branch}",
+                      "title": f"verify {s['id']}", "parent": common.get("program_id", ""),
+                      "parent_key": gate_key if not common.get("program_id") else None,
+                      "depends_keys": [f"impl:{s['id']}"],
+                      "resource": "repo:" + os.path.normcase(os.path.realpath(clone)), "max_attempts": 3,
+                      "data": {"repo": clone, "branch": branch, "base": common["base"], "allow_default": False,
+                               "acs": [{"id": f"AC{i}", "text": a} for i, a in enumerate(s["acs"], 1)],
+                               "spec_file": common["spec_file"], "fixer_role": "implement", "program_run": run,
+                               "slice": s["id"], "program_repo": common["repo"], "name": common["name"]}})
+        nodes.append({"key": f"publish:{s['id']}", "kind": PUBLISH, "ref": f"{run}:{s['id']}:publish",
+                      "title": f"publish {s['id']}", "parent": common.get("program_id", ""),
+                      "parent_key": gate_key if not common.get("program_id") else None,
+                      "depends_keys": [f"verify:{s['id']}"],
+                      "data": {**common, "slice": s, "worktree": clone, "branch": branch}})
+    for n in nodes:                                     # add_graph takes either a parent id or a parent key
+        if not n.get("parent_key"):
+            n.pop("parent_key", None)
+        if not n.get("parent"):
+            n.pop("parent", None)
+    return nodes
+
+
+def _link(st, tasks: dict, slices: list, existing_publish: dict, open_impl_ids=()) -> None:
+    """Cross-task links by id (never searched for later — Codex F.10b R2/R3): every open implement task
+    learns ALL publish ids of the program (authorised publications), each new one its dependencies."""
+    publish_ids = {**existing_publish, **{sl["id"]: tasks[f"publish:{sl['id']}"] for sl in slices}}
+    for sl in slices:
+        st.patch_data(tasks[f"impl:{sl['id']}"], ("queued", "blocked"), publish_ids=publish_ids,
+                      dep_publish={d: publish_ids[d] for d in sl["depends_on"]})
+        st.patch_data(tasks[f"publish:{sl['id']}"], ("queued", "blocked"), verify_id=tasks[f"verify:{sl['id']}"])
+    for tid in open_impl_ids:
+        st.patch_data(tid, ("queued", "blocked"), publish_ids=publish_ids)
+
+
 def create(st, repo: str, goal: str, invariants: str, slices: list, base: str, spec_file: str = "",
            source: str = "self") -> dict:
     """Program + per-slice (implement, verify) tasks in ONE transaction, all behind the plan approval."""
@@ -111,30 +174,7 @@ def create(st, repo: str, goal: str, invariants: str, slices: list, base: str, s
               "spec_file": spec_file, "spec_hash": spec["hash"], "name": name, "run": run}
     nodes = [{"key": "program", "kind": PROGRAM, "ref": f"{repo}#{name}", "title": f"Refactor: {goal[:150]}",
               "priority": 6, "data": {**common, "slices": slices, "intake": gate.admit(source, PROGRAM)}}]
-    branches = {}
-    for s in slices:
-        branch = f"refactor/{run}-{s['id']}"
-        branches[s["id"]] = branch
-        clone = paths.state_dir("refactor-clones", run, s["id"])
-        mode = ("base" if not s["depends_on"] else f"stack:{s['depends_on'][0]}" if len(s["depends_on"]) == 1
-                else "merged")
-        nodes.append({"key": f"impl:{s['id']}", "kind": SLICE, "ref": f"{run}:{s['id']}",
-                      "title": f"{s['id']}: {s['title'][:120]}", "parent_key": "program",
-                      "depends_keys": ["program"] + [f"publish:{d}" for d in s["depends_on"]],
-                      "resource": f"slice:{clone}",
-                      "data": {**common, "slice": s, "worktree": clone, "branch": branch, "start_mode": mode,
-                               "deps": {d: branches[d] for d in s["depends_on"]}}})
-        nodes.append({"key": f"verify:{s['id']}", "kind": L.KIND, "ref": f"{clone}@{branch}",
-                      "title": f"verify {s['id']}", "parent_key": "program", "depends_keys": [f"impl:{s['id']}"],
-                      "resource": "repo:" + os.path.normcase(os.path.realpath(clone)), "max_attempts": 3,
-                      "data": {"repo": clone, "branch": branch, "base": base_sha, "allow_default": False,
-                               "acs": [{"id": f"AC{i}", "text": a} for i, a in enumerate(s["acs"], 1)],
-                               "spec_file": spec_file, "fixer_role": "implement", "program_run": run,
-                               "slice": s["id"], "program_repo": repo, "name": name}})
-        nodes.append({"key": f"publish:{s['id']}", "kind": PUBLISH, "ref": f"{run}:{s['id']}:publish",
-                      "title": f"publish {s['id']}", "parent_key": "program", "depends_keys": [f"verify:{s['id']}"],
-                      "data": {**common, "slice": s, "worktree": clone, "branch": branch}})
-
+    nodes += slice_nodes(common, slices, "program", {})
     def guard(db):
         import json as _json
         for r in db.execute("select data from tasks where kind in (?,?,?) and status in ('queued','running',"
@@ -151,14 +191,63 @@ def create(st, repo: str, goal: str, invariants: str, slices: list, base: str, s
     warnings = [w for k, w in (("snapshot", "no `kind: snapshot` rung: API contract / behaviour is not pinned"),
                                ("metrics", "no `kind: metrics` rung: performance >= baseline is not checked"))
                 if k not in kinds]
-    publish_ids = {sl["id"]: t[f"publish:{sl['id']}"] for sl in slices}
-    for sl in slices:                   # every cross-task link by id — never searched for (Codex F.10b R2/R3)
-        st.patch_data(t[f"impl:{sl['id']}"], ("queued", "blocked"), publish_ids=publish_ids,
-                      dep_publish={d: publish_ids[d] for d in sl["depends_on"]})
-        st.patch_data(t[f"publish:{sl['id']}"], ("queued", "blocked"), verify_id=t[f"verify:{sl['id']}"])
+    _link(st, t, slices, {})
+    branches = {sl["id"]: f"refactor/{run}-{sl['id']}" for sl in slices}
     return {"program": t["program"], "duplicate": False, "run": run, "base": base_sha, "warnings": warnings,
             "slices": [{"slice": s["id"], "implement": t[f"impl:{s['id']}"], "verify": t[f"verify:{s['id']}"],
                         "publish": t[f"publish:{s['id']}"], "branch": branches[s["id"]]} for s in slices]}
+
+
+def extend(st, program_id: str, slices: list) -> dict:
+    """Re-plan (design §12.3 ⑤): add slices to a running / finished program. They wait behind a NEW plan
+    gate (kind refactor_program, child of the program) that YOU approve; they may depend on earlier slices
+    (stacked on their published commits); ids never collide; branches keep the program's run id."""
+    prog = st.get(program_id)
+    if not prog or prog["kind"] != PROGRAM or (prog.get("data") or {}).get("extension_of"):
+        raise ValueError(f"{program_id} is not a refactor program")
+    d = prog["data"]
+    kids = st.children(program_id)
+    existing = {}
+    for k in kids:
+        if k["kind"] == PUBLISH:
+            existing[(k.get("data") or {}).get("slice", {}).get("id")] = k["id"]
+    existing.pop(None, None)
+    slices = parse_slices(slices, known=list(existing))
+    n_ext = 1 + sum(1 for k in kids if k["kind"] == PROGRAM)
+    common = {k: d[k] for k in ("repo", "goal", "invariants", "base_ref", "base", "spec_file", "spec_hash", "name", "run")}
+    common["program_id"] = program_id
+    gate = {"key": "gate", "kind": PROGRAM, "ref": f"{d['repo']}#{d['name']}#ext-{n_ext}", "parent": program_id,
+            "title": f"Re-plan {n_ext}: {len(slices)} more slice(s)", "priority": 6,
+            "data": {**{k: v for k, v in common.items() if k != "program_id"}, "slices": slices,
+                     "extension_of": program_id}}
+    nodes = [gate] + slice_nodes(common, slices, "gate", existing)
+    out = st.add_graph(nodes)
+    if out.get("duplicate"):
+        raise ValueError("an identical re-plan is already open")
+    open_impl = [k["id"] for k in kids if k["kind"] == SLICE and k["status"] in ("queued", "blocked")]
+    _link(st, out["tasks"], slices, existing, open_impl)
+    t = out["tasks"]
+    return {"program": program_id, "gate": t["gate"], "next": f"refactor.py program approve {t['gate']}",
+            "slices": [{"slice": s_["id"], "implement": t[f"impl:{s_['id']}"], "publish": t[f"publish:{s_['id']}"],
+                        "branch": f"refactor/{d['run']}-{s_['id']}", "mechanical": bool(s_.get("run"))}
+                       for s_ in slices]}
+
+
+def progress(st, program_id: str) -> dict:
+    """Per slice: status + the ratchet count its verification measured (design §12.3: "142 -> 0")."""
+    from agent_skill_toolkit.workflows.verify import ladder as L
+    rows, trend = [], []
+    for k in st.children(program_id):
+        if k["kind"] != L.KIND:
+            continue
+        sid = (k.get("data") or {}).get("slice")
+        ratchet = next((c["data"] for c in reversed(st.checkpoints(k["id"], valid_only=True))
+                        if "baseline_count" in (c.get("data") or {})), None)
+        rows.append({"slice": sid, "verify": k["status"],
+                     "ratchet": (f"{ratchet['baseline_count']} -> {ratchet['count']}" if ratchet else None)})
+        if ratchet:
+            trend.append(ratchet["count"])
+    return {"slices": rows, "ratchet_trend": trend}
 
 
 # ----------------------------------------------------------------------------- program task
@@ -276,12 +365,26 @@ def step_implement(ctx) -> dict:
     import time as _time
     t_before = _time.time()
     shared_before = _snapshot(repo)
-    q = lambda t, n=600: lanes.quoted(t, n)                                    # noqa: E731
-    prompt = IMPLEMENT.format(worktree=clone, branch=branch, goal=q(d.get("goal")), invariants=q(d.get("invariants") or "-"),
-                              title=q(s["title"], 200), desc=q(s.get("desc") or "-", 3000),
-                              acs=q("; ".join(s.get("acs") or []) or "-", 1500), slice=s["id"])
-    text = agent_call.run(ctx, d.get("implement_role") or "implement", prompt, cwd=clone,
-                          timeout=int(d.get("implement_timeout") or 3600))
+    if s.get("run"):
+        # MECHANICAL slice: the approved plan's command does the change (no agent, no tokens)
+        from agent_skill_toolkit.core import winexec
+        try:
+            p = ctx.run(winexec.command(list(s["run"])), timeout=int(s.get("timeout") or 3600), cwd=clone)
+        except (FileNotFoundError, winexec.UnsafeLauncher) as e:
+            raise E.NeedsHuman(f"slice {s['id']}: cannot run its tool: {e}")
+        except subprocess.TimeoutExpired:
+            raise E.NeedsHuman(f"slice {s['id']}: its tool timed out")
+        text = ((p.stdout or "") + "\n" + (p.stderr or ""))[-3000:]
+        if p.returncode != 0:
+            raise E.NeedsHuman(f"slice {s['id']}: its tool failed (exit {p.returncode}):\n{text[-800:]}")
+    else:
+        q = lambda t, n=600: lanes.quoted(t, n)                                # noqa: E731
+        prompt = IMPLEMENT.format(worktree=clone, branch=branch, goal=q(d.get("goal")),
+                                  invariants=q(d.get("invariants") or "-"), title=q(s["title"], 200),
+                                  desc=q(s.get("desc") or "-", 3000),
+                                  acs=q("; ".join(s.get("acs") or []) or "-", 1500), slice=s["id"])
+        text = agent_call.run(ctx, d.get("implement_role") or "implement", prompt, cwd=clone,
+                              timeout=int(d.get("implement_timeout") or 3600))
     bad = _unauthorised(shared_before, _snapshot(repo), _publications(ctx, t_before, _time.time() + 1))
     if bad:
         raise E.NeedsHuman(f"the agent changed your clone {repo} — check it by hand: " + "; ".join(bad[:5]))
@@ -291,7 +394,7 @@ def step_implement(ctx) -> dict:
         _git(clone, "commit", "-q", "-m", f"refactor({s['id']}): {s['title'][:60]}")
     after = _git(clone, "rev-parse", "HEAD")
     if after == before_head:
-        raise E.NeedsHuman(f"slice {s['id']}: the agent made no change:\n{text[-800:]}")
+        raise E.NeedsHuman(f"slice {s['id']}: the {'tool' if s.get('run') else 'agent'} made no change:\n{text[-800:]}")
     return {"sha": after, "commits": int(_git(clone, "rev-list", "--count", f"{start}..{after}")),
             "summary": text[-1500:]}
 

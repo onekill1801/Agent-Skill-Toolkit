@@ -52,7 +52,7 @@
 | workflows.intake | workflows | 1 |
 | workflows.proposal | core | 3 |
 | workflows.proposal | workflows | 2 |
-| workflows.refactor | core | 4 |
+| workflows.refactor | core | 5 |
 | workflows.refactor | workflows | 2 |
 | workflows.refactor | workflows.intake | 1 |
 | workflows.refactor | workflows.proposal | 1 |
@@ -108,7 +108,7 @@
 | auto-dev | `grounding.py` |  | run, scout | 436 |
 | auto-dev | `proposals.py` | ✅ | decide, go, list, new, refresh, scan | 221 |
 | auto-dev | `queue_worker.py` |  | run | 161 |
-| auto-dev | `refactor.py` | ✅ | metrics, program, ratchet, snapshot, survey | 219 |
+| auto-dev | `refactor.py` | ✅ | metrics, program, ratchet, snapshot, survey | 233 |
 | auto-dev | `review_gate.py` |  | run | 121 |
 | auto-dev | `task_queue.py` |  | add, answer, approve, ask-tg, done, intake, list, mark, next, release, remove, reply, requeue, scan, show | 884 |
 | auto-dev | `tg_gate.py` |  | parse, reply, send, wait | 228 |
@@ -193,7 +193,7 @@
 | tchat-automation | `ws_client.py` |  |  | 147 |
 | team-registry | `team.py` |  | bootstrap, get, list, match, remove, set | 223 |
 
-## Test: 34 file, 613 hàm test
+## Test: 34 file, 624 hàm test
 
 - `test_agent_init.py`
 - `test_agentkit.py`
