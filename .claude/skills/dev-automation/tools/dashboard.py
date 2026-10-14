@@ -54,7 +54,7 @@ def _clean(obj):
     """EVERY string leaving the process goes through the secret redactor — no key is trusted, since
     ids / statuses of state files are as untrusted as titles (Codex dashboard #1, R2 #1, R3 #1)."""
     if isinstance(obj, dict):
-        return {k: _clean(v) for k, v in obj.items()}
+        return {(redact(k) if isinstance(k, str) else k): _clean(v) for k, v in obj.items()}   # keys too (R4)
     if isinstance(obj, list):
         return [_clean(v) for v in obj]
     if isinstance(obj, str):

@@ -110,6 +110,15 @@ class CollectTest(Base):
         self.assertEqual([f["id"] for f in out["failed_recent"]], [bad["id"]])   # still "needs you"
         self.assertEqual(out["failed_window_count"], 1)
 
+    def test_secret_in_a_dict_key_is_redacted(self):
+        tok = "glpat-" + "D" * 24
+        with S.Store() as st:
+            t = st.add("verify", "r@x", title="x")
+            st.db.execute("update tasks set status=? where id=?", (tok, t["id"]))   # status -> summary key
+        sec = D._section(D.read_store)
+        self.assertTrue(sec["ok"])
+        self.assertNotIn(tok, json.dumps(sec))
+
     def test_secret_in_a_review_status_is_redacted(self):
         tok = "glpat-" + "C" * 24
         d = os.path.join(self.tmp, "rq", "jobs")
