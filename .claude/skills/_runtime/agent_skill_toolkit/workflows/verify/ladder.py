@@ -618,12 +618,41 @@ def rung_ratchet(ctx, rung: dict, job: dict) -> dict:
             "summary": summary}
 
 
+def _git_blob(repo: str, ref: str, path: str):
+    """(exists, exact content) of a file at a ref — no stripping (leading spaces are content, #4)."""
+    p = subprocess.run(["git", "-C", repo, "show", f"{ref}:{path}"], capture_output=True, timeout=120)
+    if p.returncode != 0:
+        return False, ""
+    return True, p.stdout.decode("utf-8", "replace")
+
+
+def prepare_output(repo: str, rel: str) -> str:
+    """The `output` file of a snapshot / metrics rung: inside the repo (no links), not tracked, and
+    REMOVED before the run — only a file this run writes can be read (Codex F.10c #1)."""
+    from agent_skill_toolkit.workflows.verify import safety
+    path = safety.repo_path(repo, rel)
+    if git(repo, "ls-files", "--", rel.replace("\\", "/"), check=False):
+        raise ValueError(f"`output: {rel}` is a tracked file — point it at build output")
+    if os.path.lexists(path):
+        if not os.path.isfile(path) or os.path.islink(path):
+            raise ValueError(f"`output: {rel}` is not a regular file")
+        os.remove(path)
+    return path
+
+
 def _capture(ctx, rung: dict, job: dict) -> tuple:
-    """Run the rung's command; its output = `output` file (read after the run) or stdout.
-    -> (output text | None, failure dict | None)"""
+    """Run the rung's command; its output = `output` file (written by THIS run) or stdout.
+    -> (output text | None, failure dict | None). Failure text is redacted (#5)."""
+    from agent_skill_toolkit.workflows.verify import safety
     repo = job["repo"]
     argv = argv_of(rung["run"])
     timeout = int(rung.get("timeout", 1800))
+    out_path = None
+    if rung.get("output"):
+        try:
+            out_path = prepare_output(repo, str(rung["output"]))
+        except ValueError as e:
+            return None, {"passed": False, "fixable": False, "summary": str(e)}
     t0 = time.time()
     try:
         p = ctx.run(winexec.command(in_repo(repo, argv)), timeout=timeout, cwd=repo)
@@ -634,12 +663,15 @@ def _capture(ctx, rung: dict, job: dict) -> tuple:
     except subprocess.TimeoutExpired:
         return None, {"passed": False, "fixable": False, "summary": f"timed out after {timeout}s"}
     if p.returncode != 0:
-        return None, {"passed": False, "summary": summarize((p.stdout or "") + "\n" + (p.stderr or "")),
-                      "exit": p.returncode, "seconds": round(time.time() - t0, 1)}
-    if rung.get("output"):
-        out_path = os.path.join(repo, _norm(str(rung["output"])) or "")
-        if not _norm(str(rung["output"])) or not os.path.isfile(out_path):
-            return None, {"passed": False, "fixable": False, "summary": f"`{rung['output']}` was not written"}
+        return None, {"passed": False, "exit": p.returncode, "seconds": round(time.time() - t0, 1),
+                      "summary": safety.redact(summarize((p.stdout or "") + "\n" + (p.stderr or "")))}
+    if out_path:
+        if not os.path.isfile(out_path) or os.path.islink(out_path):
+            return None, {"passed": False, "fixable": False, "summary": f"`{rung['output']}` was not written by this run"}
+        try:
+            safety.repo_path(repo, str(rung["output"]))          # still inside, still no link
+        except ValueError as e:
+            return None, {"passed": False, "fixable": False, "summary": str(e)}
         with open(out_path, encoding="utf-8", errors="replace") as f:
             return f.read(), None
     return p.stdout or "", None
@@ -650,8 +682,8 @@ def rung_snapshot(ctx, rung: dict, job: dict) -> dict:
     behaviour change: a human decides (re-record it on purpose), never the fixer."""
     from agent_skill_toolkit.workflows.verify import safety
     snap = rung.get("snapshot") or ""
-    expected = git(job["repo"], "show", f"{job['base']}:{snap}", check=False) if _norm(snap) else ""
-    if not expected:
+    exists, expected = _git_blob(job["repo"], job["base"], snap) if _norm(snap) else (False, "")
+    if not exists:
         return {"passed": False, "fixable": False,
                 "summary": f"no snapshot `{snap}` on {job['base'][:8]} — record it: refactor.py snapshot record"}
     actual, failed = _capture(ctx, rung, job)
@@ -662,7 +694,7 @@ def rung_snapshot(ctx, rung: dict, job: dict) -> dict:
         return {"passed": True, "snapshot": snap}
     return {"passed": False, "fixable": False, "snapshot": snap,
             "summary": f"output differs from `{snap}` (a behaviour / contract change — decide, then re-record):\n"
-                       + "\n".join(cmp["diff"])}
+                       + safety.redact("\n".join(cmp["diff"]))}
 
 
 def rung_metrics(ctx, rung: dict, job: dict) -> dict:
@@ -670,8 +702,8 @@ def rung_metrics(ctx, rung: dict, job: dict) -> dict:
     `fixable: true` (a fixer could "optimize" by breaking behaviour)."""
     from agent_skill_toolkit.workflows.verify import safety
     path = rung.get("baseline") or ""
-    raw = git(job["repo"], "show", f"{job['base']}:{path}", check=False) if _norm(path) else ""
-    if not raw:
+    exists, raw = _git_blob(job["repo"], job["base"], path) if _norm(path) else (False, "")
+    if not exists:
         return {"passed": False, "fixable": False,
                 "summary": f"no baseline `{path}` on {job['base'][:8]} — record it: refactor.py metrics record"}
     try:

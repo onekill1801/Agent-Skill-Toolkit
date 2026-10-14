@@ -180,3 +180,66 @@ class LadderTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Round1Test(unittest.TestCase):
+    """Codex F.10c round 1."""
+
+    def test_non_finite_metrics_rejected(self):
+        for doc in ('{"latency_ms": -Infinity}', '{"x": NaN}'):
+            with self.assertRaises(ValueError):
+                safety.parse_metrics(doc)
+        with self.assertRaises(ValueError):
+            safety.parse_baseline('{"metrics": {"a": {"value": Infinity}}}')
+
+    def test_repo_path_containment(self):
+        repo = tempfile.mkdtemp(prefix="rp-")
+        self.assertTrue(safety.repo_path(repo, ".agent/x.json").endswith(os.path.join(".agent", "x.json")))
+        for bad in ("../x", "/etc/passwd", "C:/x", "a/../../x", ""):
+            with self.assertRaises(ValueError, msg=bad):
+                safety.repo_path(repo, bad)
+        os.makedirs(os.path.join(repo, ".agent"))
+        with mock.patch.object(safety.os.path, "islink", side_effect=lambda p: p.endswith(".agent")):
+            with self.assertRaises(ValueError):
+                safety.repo_path(repo, ".agent/snapshots/api.json")
+
+    def test_redaction(self):
+        out = safety.redact("token=abcd1234efgh glpat-xxxxxxxxxxxxxx Bearer abcdefghijklmnopqrst normal text")
+        self.assertNotIn("abcd1234efgh", out)
+        self.assertNotIn("glpat-", out)
+        self.assertIn("normal text", out)
+
+
+class Round1LadderTest(LadderTest):
+    def test_stale_output_file_never_passes(self):
+        rung = ("    filed:\n      kind: snapshot\n      run:\n        - " + PY + "\n        - scripts/dump.py\n"
+                "      output: build/api.json\n      snapshot: .agent/snapshots/filed.json\n      format: json\n"
+                "      protects:\n        - scripts/dump.py\n")
+        text = open(self.spec).read()
+        open(self.spec, "w").write(text.rstrip("\n") + "\n" + rung)
+        git(self.repo, "checkout", "-q", "main")
+        self.write("scripts/dump.py", "import json, os\nos.makedirs('build', exist_ok=True)\n"
+                   "json.dump({'a': 1}, open('build/api.json', 'w'))\n")
+        self.write(".gitignore", "__pycache__/\nbuild/\n")
+        RF.record("snapshot", self.repo, "filed", self.spec)
+        self.commit("filed snapshot")
+        git(self.repo, "checkout", "-q", "feat/x")
+        git(self.repo, "rebase", "-q", "main")
+        self.write("scripts/dump.py", "print('forgot to write the file')\n")        # build/api.json stays
+        self.commit("stops writing")
+        status, t = self.verify()
+        self.assertEqual(status, "blocked")
+        self.assertIn("not written by this run", t["last_error"])
+
+    def test_secrets_in_failing_output_are_redacted(self):
+        self.write("scripts/api.py", "import sys\nprint('password=hunter2hunter2 glpat-abcdefghijklmnop')\nsys.exit(3)\n")
+        self.commit("leaky failure")
+        _, t = self.verify()
+        self.assertNotIn("hunter2hunter2", t.get("last_error") or "")
+        self.assertNotIn("glpat-abcdefghijklmnop", t.get("last_error") or "")
+
+    def test_leading_whitespace_is_content(self):
+        exists, text = L._git_blob(self.repo, "main", ".agent/snapshots/api.json")
+        self.assertTrue(exists)
+        self.assertTrue(text.startswith("{"))
+        self.assertEqual(L._git_blob(self.repo, "main", "nope.txt"), (False, ""))

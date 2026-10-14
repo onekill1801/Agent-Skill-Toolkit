@@ -135,18 +135,19 @@ def record(kind: str, repo: str, rung_name: str, spec_file: str = "") -> dict:
     rung = next((r for r in spec["rungs"] if r["name"] == rung_name), None)
     if not rung or rung.get("kind") != kind:
         raise ValueError(f"no `kind: {kind}` rung named {rung_name!r} in the spec")
+    target = rung.get("snapshot") if kind == "snapshot" else rung.get("baseline")
+    path = safety.repo_path(repo, str(target or ""))                # inside the repo, no link (Codex F.10c #2)
+    out_path = L.prepare_output(repo, str(rung["output"])) if rung.get("output") else None
     p = proc.run(winexec.command(L.in_repo(repo, L.argv_of(rung["run"]))), timeout=int(rung.get("timeout", 1800)),
                  cwd=repo)
     if p.returncode != 0:
-        raise RuntimeError(f"the command failed (exit {p.returncode}): {(p.stderr or p.stdout)[-400:]}")
+        raise RuntimeError(f"the command failed (exit {p.returncode}): {safety.redact((p.stderr or p.stdout)[-400:])}")
     text = p.stdout or ""
-    if rung.get("output"):
-        with open(os.path.join(repo, rung["output"]), encoding="utf-8") as f:
+    if out_path:
+        if not os.path.isfile(out_path):
+            raise RuntimeError(f"`{rung['output']}` was not written by this run")
+        with open(out_path, encoding="utf-8") as f:
             text = f.read()
-    target = rung.get("snapshot") if kind == "snapshot" else rung.get("baseline")
-    path = os.path.join(repo, L._norm(str(target or "")) or "")
-    if not L._norm(str(target or "")):
-        raise ValueError(f"rung {rung_name!r} has no valid `{'snapshot' if kind == 'snapshot' else 'baseline'}` path")
     if kind == "snapshot":
         body = safety.normalize(text, rung.get("format") or "text")
     else:
@@ -157,6 +158,7 @@ def record(kind: str, repo: str, rung_name: str, spec_file: str = "") -> dict:
         body = safety.baseline_doc(safety.parse_metrics(text), previous, rung.get("higher_is_better") or {},
                                    float(rung.get("tolerance", 0.05)))
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    path = safety.repo_path(repo, str(target))                     # re-checked after creating the folders
     with open(path, "w", encoding="utf-8") as f:
         f.write(body)
     return {"written": path, "rung": rung_name, "next": "review the file, then commit it (base ref = the reference)"}
