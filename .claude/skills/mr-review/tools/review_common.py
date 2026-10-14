@@ -25,6 +25,11 @@ _DEV_TOOLS = os.path.normpath(os.path.join(_HERE, "..", "..", "dev-automation", 
 if _DEV_TOOLS not in sys.path:
     sys.path.insert(0, _DEV_TOOLS)
 
+import runpy  # noqa: E402
+
+runpy.run_path(os.path.join(_HERE, "..", "..", "_runtime", "bootstrap.py"))["activate"]()
+from agent_skill_toolkit.core import locks as _core_locks  # noqa: E402
+
 import config  # noqa: E402  (dev-automation .env loader)
 import gitlab_api  # noqa: E402
 import probe_common as pc  # noqa: E402,F401  (UTF-8 stdout on Windows)
@@ -77,34 +82,11 @@ def now() -> int:
 
 # --------------------------------------------------------------------------- locks
 
-@contextlib.contextmanager
 def file_lock(name: str, timeout: float = 120, stale_after: float = 900):
-    """Portable exclusive lock (O_EXCL lock file). Breaks locks older than stale_after."""
+    """Portable exclusive lock (O_EXCL lock file). Breaks locks older than stale_after.
+    Same lock file as before (temp/locks/<name>.lock); the primitive lives in core.locks (R.M3)."""
     path = temp_dir("locks", re.sub(r"[^A-Za-z0-9_.-]", "_", name) + ".lock")
-    deadline = time.time() + timeout
-    while True:
-        try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, f"{os.getpid()} {now()}".encode())
-            os.close(fd)
-            break
-        except FileExistsError:
-            try:
-                if time.time() - os.path.getmtime(path) > stale_after:
-                    os.remove(path)
-                    continue
-            except OSError:
-                continue
-            if time.time() > deadline:
-                raise TimeoutError(f"lock busy: {name}")
-            time.sleep(0.2)
-    try:
-        yield
-    finally:
-        try:
-            os.remove(path)
-        except OSError:
-            pass
+    return _core_locks.file_lock(path, timeout=timeout, stale_after=stale_after)
 
 
 # --------------------------------------------------------------------------- jobs

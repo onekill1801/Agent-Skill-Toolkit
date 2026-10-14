@@ -6,7 +6,10 @@
 |---|---|
 | `agent_skill_toolkit` | root |
 | `agent_skill_toolkit.core` | core |
+| `agent_skill_toolkit.core.console` | core |
+| `agent_skill_toolkit.core.env` | core |
 | `agent_skill_toolkit.core.human` | core |
+| `agent_skill_toolkit.core.locks` | core |
 | `agent_skill_toolkit.core.paths` | core |
 | `agent_skill_toolkit.core.proc` | core |
 | `agent_skill_toolkit.core.store` | core |
@@ -73,7 +76,7 @@
 - `('agent_skill_toolkit.workflows.verify.ladder', '.claude/skills/auto-dev/tools/agent_runner.py')` → `agents run through agent_runner`
 - `('agent_skill_toolkit.workflows.verify.unittest_junit', 'unittest_junit.py')` → `its own argparse prog name`
 
-## Tool của skill (107 file; 11 là vỏ dùng runtime)
+## Tool của skill (107 file; 12 là vỏ dùng runtime)
 
 | Skill | Tool | Vỏ runtime | Lệnh con | Dòng |
 |---|---|---|---|---|
@@ -147,7 +150,7 @@
 | fork-terminal | `runtime_isolator.py` |  |  | 248 |
 | fork-terminal | `spawn_isolated_agent.py` |  | cleanup, spawn | 112 |
 | fork-terminal | `worktree_manager.py` |  | create, remove | 174 |
-| mr-review | `review_common.py` |  |  | 351 |
+| mr-review | `review_common.py` | ✅ |  | 333 |
 | mr-review | `review_flow.py` | ✅ | enqueue, enqueue-text, reconcile, release-quarantine, status, work | 449 |
 | mr-review | `review_post.py` |  | approval-status, approve, post, reject, render, request-approval, sweep, validate | 517 |
 | mr-review | `review_queue.py` | ✅ | add, add-text, cancel, list, next, pending, set, show | 229 |
@@ -185,7 +188,7 @@
 | tchat-automation | `ws_client.py` |  |  | 147 |
 | team-registry | `team.py` |  | bootstrap, get, list, match, remove, set | 223 |
 
-## Test: 31 file, 582 hàm test
+## Test: 32 file, 590 hàm test
 
 - `test_agent_init.py`
 - `test_agentkit.py`
@@ -194,6 +197,7 @@
 - `test_claude_account_rotation.py`
 - `test_code_context.py`
 - `test_coordinator.py`
+- `test_core_primitives.py`
 - `test_dbeaver.py`
 - `test_debate_loop.py`
 - `test_fix_loop.py`
