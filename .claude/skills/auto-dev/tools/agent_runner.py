@@ -425,6 +425,9 @@ def _account_env(cfg: dict, backend: str, account: str) -> dict:
     return {k: os.path.expanduser(str(v)) for k, v in (acct.get("env") or {}).items()}
 
 
+SLOT_STALE_S = CLI_TIMEOUT * 3            # a slot file older than this is a crashed run (reclaimed)
+
+
 def slots_dir() -> str:
     return os.path.normpath(os.path.join(os.path.dirname(_SKILLS.rstrip(os.sep)), "..", "temp", "agent_slots"))
 
@@ -441,7 +444,7 @@ class _Slot:
         for i in range(self.limit):
             p = os.path.join(d, f"{self.key.replace('/', '_')}.{i}.lock")
             try:
-                if os.path.exists(p) and time.time() - os.path.getmtime(p) > CLI_TIMEOUT * 3:
+                if os.path.exists(p) and time.time() - os.path.getmtime(p) > SLOT_STALE_S:
                     os.remove(p)                      # stale slot from a crashed run
                 fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 # what this slot is doing, for `accounts.py` (who runs what right now)
@@ -455,10 +458,16 @@ class _Slot:
 
     def __exit__(self, *exc):
         if self.path:
-            try:
-                os.remove(self.path)
-            except OSError:
-                pass
+            # a reader (accounts.py) may hold the file open for a moment; Windows then refuses the
+            # delete — retry briefly instead of leaking the slot until it goes stale (Codex accounts #1)
+            for i in range(10):
+                try:
+                    os.remove(self.path)
+                    return
+                except FileNotFoundError:
+                    return
+                except OSError:
+                    time.sleep(0.05 * (i + 1))
 
 
 def usage_tier() -> str:

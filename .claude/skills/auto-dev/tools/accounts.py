@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import runpy
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -57,13 +58,25 @@ def read_slots(d: str) -> list:
     return out
 
 
-def read_turns() -> list:
-    if not os.path.exists(store_mod.default_path()):
+def read_turns(path: str = None) -> list:
+    """Today's agent turns, read through a READ-ONLY connection: no Store() (it migrates the schema,
+    takes write locks and would contend with agent reservations — Codex accounts #3)."""
+    path = path or store_mod.default_path()
+    if not os.path.exists(path):
         return []
-    with store_mod.Store() as st:
-        rows = st.db.execute("select task_id, step, model, seconds, ts from usage where backend=? and ts>=?",
-                             (usage_mod.AGENT_BACKEND, usage_mod.local_midnight())).fetchall()
-    return [dict(r) for r in rows]
+    try:
+        db = sqlite3.connect(Path(os.path.abspath(path)).as_uri() + "?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error:
+        return []
+    try:
+        db.row_factory = sqlite3.Row
+        rows = db.execute("select task_id, step, model, seconds, ts from usage where backend=? and ts>=?",
+                          (usage_mod.AGENT_BACKEND, usage_mod.local_midnight())).fetchall()
+        return [dict(r) for r in rows]
+    except sqlite3.Error:
+        return []                                       # no usage table yet / locked: nothing to show
+    finally:
+        db.close()
 
 
 def gather() -> dict:
@@ -71,7 +84,8 @@ def gather() -> dict:
         orca, err = orca_adapter.account_list(), None
     except (orca_adapter.OrcaError, OSError) as e:
         orca, err = None, getattr(e, "message", str(e))
-    out = A.report(agent_runner._agents_config(), orca, read_slots(agent_runner.slots_dir()), read_turns())
+    out = A.report(agent_runner._agents_config(), orca, read_slots(agent_runner.slots_dir()), read_turns(),
+                   stale_s=agent_runner.SLOT_STALE_S)
     if err:
         out["orca_error"] = err
     return out

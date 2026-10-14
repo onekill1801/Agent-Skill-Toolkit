@@ -85,6 +85,13 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(self.rows(rep)["claude@b"]["running"], [])
         self.assertEqual((rep["unattributed"]["today"]["runs"], len(rep["unattributed"]["running"])), (1, 1))
 
+    def test_stale_cutoff_matches_agent_runner(self):
+        slots = [{"key": "claude@a", "info": {"started": NOW - 60}, "mtime": NOW - 3600},   # 1 h: crashed
+                 {"key": "claude@a", "info": {}, "mtime": NOW - 600}]                       # 10 min: live
+        a = self.rows(A.report(CFG, orca(), slots, [], NOW, stale_s=AR.SLOT_STALE_S))["claude@a"]
+        self.assertEqual([x["minutes"] for x in a["running"]], [10.0])
+        self.assertEqual(AR.SLOT_STALE_S, AR.CLI_TIMEOUT * 3)
+
     def test_orca_unavailable_and_removed_account(self):
         rep = A.report(CFG, None, [], [], NOW)
         self.assertEqual(rep["orca"], "unavailable")
@@ -143,6 +150,39 @@ class AttributionTest(unittest.TestCase):
         self.assertEqual(after, [])                                      # released after the turn
         with S.Store() as st:
             self.assertEqual([r["model"] for r in st.db.execute("select model from usage")], ["claude:sonnet@a"])
+
+    def test_read_turns_is_read_only(self):
+        path = os.environ["TOOLKIT_STORE"]
+        with S.Store() as st:
+            U.reserve(st, "", "", "claude", "sonnet", 60, account="a")
+        before = (os.path.getsize(path), os.path.getmtime(path))
+        with mock.patch.object(S, "Store", side_effect=AssertionError("no Store() in a read-only view")):
+            rows = ACC.read_turns()
+        self.assertEqual([r["model"] for r in rows], ["claude:sonnet@a"])
+        self.assertEqual((os.path.getsize(path), os.path.getmtime(path)), before)
+        self.assertEqual(ACC.read_turns(os.path.join(self.tmp, "missing.db")), [])
+        import sqlite3
+        empty = os.path.join(self.tmp, "empty.db")
+        sqlite3.connect(empty).close()
+        self.assertEqual(ACC.read_turns(empty), [])                     # no usage table yet
+
+    def test_slot_release_retries_while_a_reader_holds_it(self):
+        d = os.path.join(self.tmp, "slots")
+        real = os.remove
+        calls = []
+
+        def flaky(p):
+            calls.append(p)
+            if len(calls) == 1:
+                raise PermissionError(32, "in use")                   # Windows: a reader has it open
+            real(p)
+        with mock.patch.object(AR, "slots_dir", return_value=d):
+            slot = AR._Slot("claude@a", 1)
+            self.assertIsNotNone(slot.__enter__())
+            with mock.patch.object(AR.os, "remove", side_effect=flaky), mock.patch.object(AR.time, "sleep"):
+                slot.__exit__()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(os.listdir(d), [])
 
     def test_read_slots_accepts_old_pid_only_files(self):
         d = os.path.join(self.tmp, "s")

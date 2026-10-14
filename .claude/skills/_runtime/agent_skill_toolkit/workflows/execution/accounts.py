@@ -14,7 +14,6 @@ reading (`age_min` says how old). The toolkit never calls the provider's usage A
 import time
 
 SYSTEM_DEFAULT = "system-default"   # agents.json orca_id of the codex account Orca reads (~/.codex)
-STALE_SLOT_S = 3 * 3600          # same as agent_runner: a slot older than this is a crashed run
 
 
 def _pct_left(bucket, now):
@@ -75,7 +74,9 @@ def _split_model(model: str):
     return backend, m, account or None
 
 
-def report(cfg: dict, orca: dict, slots: list, turns: list, now: float = None) -> dict:
+def report(cfg: dict, orca: dict, slots: list, turns: list, now: float = None, stale_s: float = 1800) -> dict:
+    """`stale_s` = agent_runner.SLOT_STALE_S: a slot file older than that (by mtime, the same basis
+    agent_runner reclaims on) is a crashed run, not work in progress."""
     now = now or time.time()
     by_orca = orca_usage(orca, now)
     rows, index = [], {}
@@ -96,8 +97,8 @@ def report(cfg: dict, orca: dict, slots: list, turns: list, now: float = None) -
 
     for s in slots or []:
         info = s.get("info") or {}
-        started = info.get("started") or s.get("mtime") or now
-        if now - started > STALE_SLOT_S:
+        started = s.get("mtime") or info.get("started") or now
+        if now - started > stale_s:
             continue
         backend, _, name = (s.get("key") or "").partition("@")
         target = index.get(f"{backend}@{name}") or other
