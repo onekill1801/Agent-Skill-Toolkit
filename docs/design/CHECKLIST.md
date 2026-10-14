@@ -36,7 +36,7 @@ Ký hiệu: ✅ xong + Codex đồng thuận · 🔁 đã code, đang review/s�
 |---|---|---|---|---|---|
 | R.M1 | Kiểm kê: đồ thị import + cạnh runtime, API công khai, baseline test | ✅ | `b889d86` → `7548c6d` | GO (vòng 4, cùng R.M6) | `_runtime/inventory.py` → `docs/design/INVENTORY.md` (module, đồ thị vùng, ngoại lệ, cạnh runtime, mọi tool + CLI kể cả lệnh con đăng ký trong vòng lặp, test) |
 | R.M2 | `_runtime` + bootstrap; kiểm cài plugin | 🟡 | `8520548` | GO (cùng F.4a) | bootstrap + package chạy từ mọi cwd/agentkit; **chưa thử cài marketplace / Orca / Codex** |
-| R.M3 | Tách primitive chung vào `core` (env, UTF-8, lock), giữ wrapper | 🟡 | `b889d86` | GO (bước 1) | bước 1 xong: `core/text.py` (clean/literal/quoted/one_line), `intake.lanes` re-export; còn env, UTF-8, lock |
+| R.M3 | Tách primitive chung vào `core` (env, UTF-8, lock), giữ wrapper | ✅ | `b889d86` → `f8c2c15` → `4c7befb` | GO (vòng 2) | `core/text.py` (clean/literal/quoted), `core/env.py` (luật .env giống dev-automation + `TOOLKIT_ENV_FILE`), `core/console.py` (UTF-8), `core/locks.py` (khoá của HĐH, tự nhả khi tiến trình chết — sửa luôn race của khoá cũ); `review_common.file_lock` dùng nó. `config.py` các skill giữ nguyên (wrapper; một file có thay đổi chưa commit của bạn) |
 | R.M4 | Chuyển `mr-review` sang `workflows/mr_review` + `integrations/gitlab` | ⬜ | | | |
 | R.M6 | Mở rộng dần + test layering (bánh cóc) | ✅ | `b889d86` → `7548c6d` → `a4b2ecd` → `cbb8275` | GO (vòng 4) | `tests/test_layering.py`: luật §B.2 bằng AST (kể cả import tương đối + alias), loader động / `sys.path` / script path / module chạy tiến trình đều phải khai báo; ngoại lệ theo cặp module, có hợp đồng, chỉ giảm so với `main` (bật khi nhánh merge); 6 → 4 ngoại lệ |
 
@@ -130,3 +130,5 @@ Ký hiệu: ✅ xong + Codex đồng thuận · 🔁 đã code, đang review/s�
 | 2026-10-14 | R.M1/R.M6 (`7548c6d`) | 2 | **NO-GO**: FIXED 3/6; alias loader, định danh script, mốc độc lập — sửa ở `a4b2ecd` |
 | 2026-10-14 | R.M1/R.M6 (`a4b2ecd`) | 3 | **NO-GO**: `proc.run` qua import đầy đủ; mốc rỗng không kiểm — sửa ở `cbb8275` |
 | 2026-10-14 | R.M1/R.M6 (`cbb8275`) | 4 | **GO** |
+| 2026-10-14 | R.M3 (`f8c2c15`) | 1 | **NO-GO**: HIGH race phá khoá cũ (thừa hưởng từ code gốc) + MED chỗ dò .env, khoá trùng — sửa ở `4c7befb` |
+| 2026-10-14 | R.M3 (`4c7befb`) | 2 | **GO** |
