@@ -93,7 +93,7 @@ def accept(task_id: str, lane: str = "") -> dict:
 def worker_threads(explicit=None) -> int:
     """--parallel, else TOOLKIT_MAX_PARALLEL, else the SHARED `capacity` of the store (so `capacity 10`
     is the one knob: more threads than that could never get work; capacity 0 = no cap -> 2)."""
-    if explicit:
+    if explicit is not None:                       # --parallel 0 -> 1 thread, as before
         return max(1, int(explicit))
     try:
         env_n = int(os.environ.get("TOOLKIT_MAX_PARALLEL") or 0)

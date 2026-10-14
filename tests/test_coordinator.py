@@ -375,6 +375,7 @@ class WorkerThreadsTest(Base):
             st.set_capacity(10)
         self.assertEqual(CO.worker_threads(), 10)
         self.assertEqual(CO.worker_threads(3), 3)                         # --parallel wins
+        self.assertEqual(CO.worker_threads(0), 1)                         # explicit 0 is not 'unset'
         with mock.patch.dict(os.environ, {"TOOLKIT_MAX_PARALLEL": "4"}):
             self.assertEqual(CO.worker_threads(), 4)
         with mock.patch.dict(os.environ, {"TOOLKIT_MAX_PARALLEL": "junk"}):
