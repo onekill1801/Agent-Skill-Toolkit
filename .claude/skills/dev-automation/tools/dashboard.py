@@ -1,28 +1,32 @@
 #!/usr/bin/env python3
-"""Toolkit web dashboard — ONE page to watch everything the repo runs (read-only).
+"""Toolkit web dashboard — ONE page to watch everything the repo runs, plus the settings form.
 
-    python dashboard.py serve [--port 8765]     # then open http://127.0.0.1:8765 (e.g. in Orca's browser)
+    python dashboard.py serve [--port 8765]     # prints the URL to open (with its edit key), e.g. in Orca's browser
     python dashboard.py snapshot                # the same data once, as JSON (scripts / debugging)
 
 Sections: overview (usage tier, capacity, daily cap) · tasks of the durable store (review_mr / verify /
 proposal / refactor / atask, as `coordinator.py board`) · agent accounts (`accounts.py`: who runs what,
 usage left from Orca) · MR review jobs · pending approvals · daemons · pipeline runs · intake queue ·
-port-forwards · feedback.
+port-forwards · feedback · settings (workflows.settings: non-secret switches only) · a command help per section.
 
-Safety: listens on 127.0.0.1 only, answers GET only, refuses a foreign Host header (DNS rebinding),
-never writes (store opened with Store.reader = sqlite mode=ro; no reader creates a directory). It has
-NO action buttons — every action stays a terminal command (approvals need a human at a TTY); the page
-shows the command. Free text (errors, notes, titles) is passed through the secret redactor before it
-leaves the process; no traceback is sent. Accounts come from `orca account list` (emails / usage only).
+Safety: listens on 127.0.0.1 only, refuses a foreign Host header (DNS rebinding). Monitoring is read-only
+(store opened with Store.reader = sqlite mode=ro; no reader creates a directory); approvals and every
+other action stay terminal commands (shown on the page). The ONE write is POST /api/settings, which needs
+the per-run edit key printed by `serve` (only in that terminal — the page receives it through the URL
+fragment, never from the server), a same-origin JSON request, and passes the catalog's validation.
+Secrets are never read out: the page only learns whether a secret key is set. Free text from state files
+is passed through the secret redactor before it leaves the process; no traceback is sent.
 
 Snapshots are built by ONE background worker (never per request): a request gets the latest snapshot
 at once; `?fresh=1` asks the worker for a new one and waits a few seconds at most.
 """
 
 import argparse
+import hmac
 import json
 import os
 import runpy
+import secrets
 import socket
 import sys
 import threading
@@ -34,6 +38,7 @@ _SKILLS = os.path.dirname(os.path.dirname(_HERE))
 runpy.run_path(os.path.join(_SKILLS, "_runtime", "bootstrap.py"))["activate"]()
 from agent_skill_toolkit.core import store as store_mod  # noqa: E402
 from agent_skill_toolkit.workflows import coordinator as coord  # noqa: E402
+from agent_skill_toolkit.workflows import settings as settings_mod  # noqa: E402
 from agent_skill_toolkit.workflows.execution import usage as usage_mod  # noqa: E402
 from agent_skill_toolkit.workflows.verify.safety import redact  # noqa: E402
 
@@ -205,6 +210,21 @@ def read_forwards() -> dict:
     return {"count": len(rows), "forwards": rows}
 
 
+def read_settings() -> dict:
+    """Editable settings (values of NON-secret keys only) + which secret keys are set — no redaction:
+    the catalog holds no secret, and a redacted value (a 24-hex group id looks like a token) would be
+    saved back wrong."""
+    try:
+        st = store_mod.Store.reader()
+    except FileNotFoundError:
+        st = None
+    try:
+        return settings_mod.snapshot(st)
+    finally:
+        if st is not None:
+            st.close()
+
+
 READERS = {"store": "read_store", "accounts": "read_accounts", "reviews": "read_reviews",
            "approvals": "read_approvals", "daemons": None, "runs": None, "queue": None,
            "forwards": "read_forwards", "feedback": None}
@@ -262,9 +282,13 @@ class Snapshots:
 SNAPSHOTS = Snapshots()
 
 
+MAX_BODY = 16 * 1024
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "toolkit-dashboard"
     snapshots = SNAPSHOTS
+    edit_key = ""               # set by serve(): random per run, printed only to its terminal
 
     def log_message(self, fmt, *args):                    # quiet: only 4xx / 5xx
         if len(args) > 1 and str(args[1]).startswith(("4", "5")):
@@ -303,21 +327,76 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(500, b"dashboard.html missing", "text/plain; charset=utf-8")
         if path == "/api/state":
             data = self.snapshots.get(fresh="fresh=1" in query.split("&"))
-            return self._send(200, json.dumps(data, ensure_ascii=False, default=str).encode("utf-8"),
-                              "application/json; charset=utf-8")
+            return self._json(200, data)
+        if path == "/api/settings":
+            try:                                               # NOT through _clean: see read_settings
+                return self._json(200, {"ok": True, "data": read_settings(), "editable": bool(self.edit_key)})
+            except Exception as e:  # noqa: BLE001
+                return self._json(200, {"ok": False, "error": redact(f"{type(e).__name__}: {e}")[:300]})
         return self._send(404, b"not found", "text/plain; charset=utf-8")
 
-    def do_POST(self):  # noqa: N802 — read-only dashboard
-        self._send(405, b"read-only", "text/plain; charset=utf-8")
+    def _json(self, code: int, obj):
+        return self._send(code, json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8"),
+                          "application/json; charset=utf-8")
 
-    do_PUT = do_DELETE = do_PATCH = do_POST
+    def _write_allowed(self) -> str:
+        """'' when this request may change settings, else why not. A browser page of another site can not
+        pass: it has no edit key (never served by GET), a JSON body forces a CORS preflight we never
+        answer, and Origin / Sec-Fetch-Site must be this dashboard."""
+        if not self._host_ok():
+            return "forbidden host"
+        port = self.server.server_address[1]
+        origin = self.headers.get("Origin")
+        if origin is not None and origin not in (f"http://127.0.0.1:{port}", f"http://localhost:{port}"):
+            return "foreign origin"
+        if (self.headers.get("Sec-Fetch-Site") or "same-origin") != "same-origin":
+            return "cross-site request"
+        if (self.headers.get("Content-Type") or "").split(";")[0].strip().lower() != "application/json":
+            return "JSON only"
+        key = self.headers.get("X-Dashboard-Key") or ""
+        if not self.edit_key or not hmac.compare_digest(key.encode(), self.edit_key.encode()):
+            return "missing or wrong edit key — open the URL printed by `dashboard.py serve`"
+        return ""
+
+    def do_POST(self):  # noqa: N802
+        path = self.path.partition("?")[0]
+        if path != "/api/settings":
+            return self._send(405, b"read-only", "text/plain; charset=utf-8")
+        why = self._write_allowed()
+        if why:
+            return self._json(403, {"ok": False, "error": why})
+        try:
+            n = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            n = -1
+        if not 0 < n <= MAX_BODY:
+            return self._json(413, {"ok": False, "error": "body missing or too large"})
+        try:
+            body = json.loads(self.rfile.read(n).decode("utf-8"))
+            changes, expected = body.get("changes"), body.get("expected") or {}
+            if not isinstance(changes, dict) or not isinstance(expected, dict):
+                raise ValueError("changes / expected must be objects")
+            out = settings_mod.apply(changes, by="dashboard", expected=expected)
+        except (ValueError, RuntimeError, FileNotFoundError, TimeoutError, UnicodeDecodeError) as e:
+            return self._json(400, {"ok": False, "error": redact(str(e))[:400]})
+        self.snapshots.wanted.set()                            # capacity / caps show at once
+        return self._json(200, {"ok": True, **out})
+
+    do_PUT = do_DELETE = do_PATCH = lambda self: self._send(405, b"read-only", "text/plain; charset=utf-8")
 
 
-def serve(port: int) -> None:
+def serve(port: int, read_only: bool = False) -> None:
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     httpd.daemon_threads = True
     Handler.snapshots.start()
-    print(f"Dashboard: http://127.0.0.1:{port}   (Ctrl+C để dừng)", flush=True)
+    Handler.edit_key = "" if read_only else secrets.token_urlsafe(24)
+    if read_only:
+        print(f"Dashboard (chỉ xem): http://127.0.0.1:{port}   (Ctrl+C để dừng)", flush=True)
+    else:
+        # the key travels in the URL FRAGMENT: browsers never send it to a server or put it in logs
+        print(f"Dashboard: http://127.0.0.1:{port}/#key={Handler.edit_key}\n"
+              f"  mở ĐÚNG link này để sửa được cài đặt (key đổi mỗi lần chạy; mở không có key = chỉ xem)\n"
+              f"  Ctrl+C để dừng", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -331,10 +410,11 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("serve")
     p.add_argument("--port", type=int, default=int(os.environ.get("TOOLKIT_DASHBOARD_PORT") or 8765))
+    p.add_argument("--read-only", action="store_true", help="no settings form (no edit key)")
     sub.add_parser("snapshot")
     a = ap.parse_args(argv)
     if a.cmd == "serve":
-        serve(a.port)
+        serve(a.port, read_only=a.read_only)
     else:
         print(json.dumps(collect(), ensure_ascii=False, indent=2, default=str))
     return 0

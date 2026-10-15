@@ -76,3 +76,86 @@ def load(force: bool = False) -> str:
 def get(key: str, default: str = "") -> str:
     load()
     return os.environ.get(key, default).strip()
+
+
+# ----------------------------------------------------------------------------- writing (settings UI)
+
+# chars every .env reader of the toolkit would mis-read: line breaks of any kind (str.splitlines()
+# splits on these), "#" (inline comment), quotes (stripped), control chars
+_BAD_VALUE = re.compile(r"[\x00-\x1f\x7f\x85  #\"']")
+MAX_VALUE = 500
+
+
+def check_value(value) -> str:
+    """'' when `value` survives a write/parse round trip unchanged in every toolkit .env reader, else why not."""
+    if not isinstance(value, str):
+        return "value must be text"
+    if len(value) > MAX_VALUE:
+        return f"value longer than {MAX_VALUE} characters"
+    if value != value.strip():
+        return "value starts or ends with a space"
+    if _BAD_VALUE.search(value):
+        return "value contains a line break, #, a quote or a control character"
+    return ""
+
+
+def _set_line(line: str, key: str, value: str) -> str:
+    """`line` (an active `KEY=...` line) with its value replaced; indentation, an inline `# comment`
+    and the line ending are kept."""
+    body = line.rstrip("\r\n")
+    eol = line[len(body):]
+    indent = body[:len(body) - len(body.lstrip())]
+    raw = _LINE.match(body.strip()).group(2)
+    comment = ""
+    if raw.strip() and raw.strip()[0] not in "\"'":
+        h = raw.find("#")
+        if h >= 0:
+            pre = raw[:h]
+            comment = (pre[len(pre.rstrip()):] or " ") + raw[h:].rstrip()
+    return f"{indent}{key}={value}{comment}{eol}"
+
+
+def set_values(path: str, updates: dict) -> dict:
+    """Write `updates` {KEY: value} into the .env file at `path` — the FIRST active `KEY=` line (the one
+    every reader uses) is changed in place, a missing key is appended; every other byte is kept. Atomic
+    (temp file + replace) under a lock; the result is re-parsed and must give exactly the new values with
+    every other key unchanged, or nothing is written. Returns the previous values ({KEY: str|None})."""
+    from . import locks
+    for k, v in updates.items():
+        if not _LINE.match(f"{k}=x"):
+            raise ValueError(f"invalid key: {k!r}")
+        why = check_value(v)
+        if why:
+            raise ValueError(f"{k}: {why}")
+    with locks.file_lock(paths.state_path("locks", "env-file.lock"), timeout=10):
+        with open(path, encoding="utf-8", newline="") as f:
+            text = f.read()
+        before = parse(text)
+        lines = text.splitlines(keepends=True)
+        nl = "\r\n" if "\r\n" in text else "\n"
+        for k, v in updates.items():
+            for i, line in enumerate(lines):
+                s = line.strip()
+                m = _LINE.match(s) if s and not s.startswith("#") else None
+                if m and m.group(1) == k:
+                    lines[i] = _set_line(line, k, v)
+                    break
+            else:
+                if lines and not lines[-1].endswith(("\n", "\r")):
+                    lines[-1] += nl
+                lines.append(f"{k}={v}{nl}")
+        new = "".join(lines)
+        after = parse(new)
+        if {k: after.get(k) for k in updates} != dict(updates) or \
+                {k: v for k, v in after.items() if k not in updates} != {k: v for k, v in before.items() if k not in updates}:
+            raise RuntimeError("the edited .env would not read back as intended — nothing written")
+        tmp = f"{path}.tmp-{os.getpid()}"
+        try:
+            with open(tmp, "w", encoding="utf-8", newline="") as f:
+                f.write(new)
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+    # running processes keep what they loaded at start (os.environ): the caller tells which to restart
+    return {k: before.get(k) for k in updates}

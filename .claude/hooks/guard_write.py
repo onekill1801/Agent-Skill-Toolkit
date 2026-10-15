@@ -46,6 +46,8 @@ WRITE_RULES = [
     (tool("proposals") + r"\s+(go|decide)\b", "proposal decision"),
     (tool("refactor") + r"\s+program\s+approve\b", "refactor plan approval"),
     (tool("coordinator") + r"\s+(accept|capacity|usage|budget)\b", "coordinator decision / policy"),
+    (tool("toolkit_settings") + r"\s+set\b", "toolkit settings change (.env / policy)"),
+    (r"/api/settings\b", "dashboard settings endpoint (only the human's browser edits settings)"),
 ]
 ALWAYS_DENY = [
     (tool("review_post") + r"\s+(approve|reject)\b", "only a human may approve/reject a review"),
@@ -100,6 +102,10 @@ def main() -> int:
     # Under the Telegram bridge, telegram_approve.py (same PreToolUse event) shows the
     # approve/deny buttons; keep only the hard denies here so the two hooks don't fight.
     if os.environ.get("CLAUDE_TG_BRIDGE") == "1" and decision == "ask":
+        decision = None
+    # Personal opt-out of the "ask" popups (set in .claude/settings.local.json `env`);
+    # hard denies and headless denies still apply.
+    if os.environ.get("TOOLKIT_GUARD_ASK", "").lower() == "off" and decision == "ask":
         decision = None
     if decision:
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
