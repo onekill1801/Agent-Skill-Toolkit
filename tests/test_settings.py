@@ -211,7 +211,8 @@ class HttpTest(Base):
             with urllib.request.urlopen(r, timeout=10) as resp:
                 return resp.status, json.loads(resp.read() or b"null")
         except urllib.error.HTTPError as e:
-            raw = e.read()
+            with e:
+                raw = e.read()
             try:
                 return e.code, json.loads(raw)
             except ValueError:

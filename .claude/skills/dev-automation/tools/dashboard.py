@@ -283,6 +283,7 @@ SNAPSHOTS = Snapshots()
 
 
 MAX_BODY = 16 * 1024
+DISCARD_MAX = 1024 * 1024    # an oversized body up to this is read and dropped before the 413
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -358,21 +359,34 @@ class Handler(BaseHTTPRequestHandler):
             return "missing or wrong edit key — open the URL printed by `dashboard.py serve`"
         return ""
 
+    def _drain(self) -> bytes:
+        """Read the request body BEFORE answering (bounded): replying with unread bytes in the socket
+        makes Windows reset the connection, and the client sees an error instead of the answer. An
+        oversized / unknown-length body is not read: the connection is closed after the reply."""
+        try:
+            n = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            n = -1
+        if 0 <= n <= MAX_BODY:
+            return self.rfile.read(n) if n else b""
+        self.close_connection = True
+        if 0 < n <= DISCARD_MAX:                               # read and drop: a clean 413, not a reset
+            while n > 0:
+                n -= len(self.rfile.read(min(n, 65536)) or b"x" * n)
+        return None
+
     def do_POST(self):  # noqa: N802
+        raw = self._drain()
         path = self.path.partition("?")[0]
         if path != "/api/settings":
             return self._send(405, b"read-only", "text/plain; charset=utf-8")
         why = self._write_allowed()
         if why:
             return self._json(403, {"ok": False, "error": why})
-        try:
-            n = int(self.headers.get("Content-Length") or "0")
-        except ValueError:
-            n = -1
-        if not 0 < n <= MAX_BODY:
+        if not raw:
             return self._json(413, {"ok": False, "error": "body missing or too large"})
         try:
-            body = json.loads(self.rfile.read(n).decode("utf-8"))
+            body = json.loads(raw.decode("utf-8"))
             if not isinstance(body, dict):                     # null / [] / "x" (Codex settings R1 #5)
                 raise ValueError("body must be a JSON object")
             changes, expected = body.get("changes"), body.get("expected") or {}
@@ -386,7 +400,11 @@ class Handler(BaseHTTPRequestHandler):
         self.snapshots.wanted.set()                            # capacity / caps show at once
         return self._json(200, {"ok": True, **out})
 
-    do_PUT = do_DELETE = do_PATCH = lambda self: self._send(405, b"read-only", "text/plain; charset=utf-8")
+    def _refuse(self):
+        self._drain()
+        self._send(405, b"read-only", "text/plain; charset=utf-8")
+
+    do_PUT = do_DELETE = do_PATCH = _refuse
 
 
 def serve(port: int, read_only: bool = False) -> None:
