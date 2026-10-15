@@ -40,6 +40,7 @@
 | `agent_skill_toolkit.workflows.refactor.program` | workflows.refactor |
 | `agent_skill_toolkit.workflows.refactor.ratchet` | workflows.refactor |
 | `agent_skill_toolkit.workflows.refactor.survey` | workflows.refactor |
+| `agent_skill_toolkit.workflows.settings` | workflows.settings |
 | `agent_skill_toolkit.workflows.verify` | workflows.verify |
 | `agent_skill_toolkit.workflows.verify.ladder` | workflows.verify |
 | `agent_skill_toolkit.workflows.verify.safety` | workflows.verify |
@@ -60,6 +61,7 @@
 | workflows.refactor | workflows.intake | 1 |
 | workflows.refactor | workflows.proposal | 1 |
 | workflows.refactor | workflows.verify | 1 |
+| workflows.settings | core | 4 |
 | workflows.verify | core | 4 |
 | workflows.verify | workflows | 1 |
 | workflows.verify | workflows.refactor | 1 |
@@ -84,7 +86,7 @@
 - `('agent_skill_toolkit.workflows.verify.ladder', 'refactor.py')` → `tells the human how to (re)record a snapshot`
 - `('agent_skill_toolkit.workflows.verify.unittest_junit', 'unittest_junit.py')` → `its own argparse prog name`
 
-## Tool của skill (109 file; 14 là vỏ dùng runtime)
+## Tool của skill (110 file; 15 là vỏ dùng runtime)
 
 | Skill | Tool | Vỏ runtime | Lệnh con | Dòng |
 |---|---|---|---|---|
@@ -100,13 +102,13 @@
 | atask-automation | `task_resolver.py` |  |  | 746 |
 | atask-automation | `tasks.py` |  |  | 328 |
 | atask-automation | `view.py` |  |  | 167 |
-| auto-dev | `accounts.py` | ✅ |  | 187 |
+| auto-dev | `accounts.py` | ✅ |  | 220 |
 | auto-dev | `agent_init.py` |  | add, apply, check, docs, draft, scan | 1586 |
 | auto-dev | `agent_runner.py` | ✅ |  | 588 |
 | auto-dev | `autopilot.py` |  | run, watch | 197 |
 | auto-dev | `clarify.py` |  | analyze, brief, bundle | 392 |
 | auto-dev | `context_pack.py` |  | build | 346 |
-| auto-dev | `coordinator.py` | ✅ | accept, board, budget, capacity, usage, work | 160 |
+| auto-dev | `coordinator.py` | ✅ | accept, board, budget, capacity, usage, work | 178 |
 | auto-dev | `debate_engine.py` |  | run | 725 |
 | auto-dev | `fix_loop.py` |  | reset, run | 407 |
 | auto-dev | `grounding.py` |  | run, scout | 436 |
@@ -126,7 +128,7 @@
 | dev-automation | `code_context.py` |  | affected, callers, impact, locate, status, trace | 423 |
 | dev-automation | `config.py` |  |  | 122 |
 | dev-automation | `daemon_common.py` |  | status | 236 |
-| dev-automation | `dashboard.py` | ✅ | serve, snapshot | 345 |
+| dev-automation | `dashboard.py` | ✅ | serve, snapshot | 447 |
 | dev-automation | `dbeaver.py` |  | forwards, list, probe, show | 226 |
 | dev-automation | `doctor.py` |  |  | 142 |
 | dev-automation | `feedback.py` |  | add, recall, stats | 280 |
@@ -154,6 +156,7 @@
 | dev-automation | `status.py` | ✅ |  | 366 |
 | dev-automation | `taskstore.py` | ✅ | add, cancel, events, list, show, summary, unblock | 77 |
 | dev-automation | `test_runner.py` |  | detect, run | 344 |
+| dev-automation | `toolkit_settings.py` | ✅ | list, set | 80 |
 | dev-automation | `vpn.py` |  | down, ensure, fingerprint, set-password, status, up, watch | 331 |
 | fork-terminal | `agent_parser.py` |  | all, list, tag, wrap | 155 |
 | fork-terminal | `fork_terminal.py` |  |  | 83 |
@@ -162,9 +165,9 @@
 | fork-terminal | `worktree_manager.py` |  | create, remove | 174 |
 | mr-review | `review_common.py` | ✅ |  | 334 |
 | mr-review | `review_flow.py` | ✅ | enqueue, enqueue-text, reconcile, release-quarantine, status, work | 449 |
-| mr-review | `review_post.py` |  | approval-status, approve, post, reject, render, request-approval, sweep, validate | 552 |
+| mr-review | `review_post.py` |  | approval-status, approve, post, reject, render, request-approval, sweep, validate | 677 |
 | mr-review | `review_queue.py` | ✅ | add, add-text, cancel, list, next, pending, set, show | 229 |
-| mr-review | `review_rules.py` |  |  | 165 |
+| mr-review | `review_rules.py` |  |  | 250 |
 | mr-review | `review_ws.py` |  | check-stale, cleanup, diff, gc, prepare | 394 |
 | new-product | `intake.py` |  | build | 189 |
 | new-product | `registry.py` |  | add, get, list, remove | 169 |
@@ -183,7 +186,7 @@
 | tchat-automation | `common.py` |  |  | 63 |
 | tchat-automation | `config.py` |  |  | 145 |
 | tchat-automation | `crypto.py` |  | conv, decrypt, unwrap-indexeddb, unwrap-qr | 254 |
-| tchat-automation | `group_watch.py` | ✅ |  | 600 |
+| tchat-automation | `group_watch.py` | ✅ |  | 603 |
 | tchat-automation | `groups.py` |  |  | 111 |
 | tchat-automation | `listen.py` |  |  | 251 |
 | tchat-automation | `messages.py` |  |  | 122 |
@@ -198,7 +201,7 @@
 | tchat-automation | `ws_client.py` |  |  | 147 |
 | team-registry | `team.py` |  | bootstrap, get, list, match, remove, set | 223 |
 
-## Test: 37 file, 671 hàm test
+## Test: 38 file, 713 hàm test
 
 - `test_accounts.py`
 - `test_agent_init.py`
@@ -229,6 +232,7 @@
 - `test_review_flow.py`
 - `test_run_log.py`
 - `test_safety_net.py`
+- `test_settings.py`
 - `test_store_engine.py`
 - `test_task_queue.py`
 - `test_triage.py`

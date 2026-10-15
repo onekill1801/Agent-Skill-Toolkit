@@ -76,9 +76,10 @@ python $T/dev-automation/tools/config.py     # token GitLab/Azure đã đủ ch�
 | TG bot OPS | `python -u $T/remote-control/tools/telegram_bridge.py --bot ops --mode approvals-only` | nhận nút **Duyệt/Từ chối** trên Telegram |
 | TG bot CODE | `python -u $T/remote-control/tools/telegram_bridge.py` | nhắn Telegram → Claude chạy lệnh (tuỳ chọn) |
 | MR watch (tuỳ chọn) | `python -u $T/dev-automation/tools/mr_watch.py --interval 300` | 5 phút/lần tìm MR gắn tên bạn → xếp review |
+| Dashboard | `python $T/dev-automation/tools/dashboard.py serve` | trang theo dõi + form cài đặt (§4.0) |
 
 Kiểm đúng chưa: dòng khởi động bot Telegram phải in `Hub repo: D:\Claude-cli\Agent-Skill-Toolkit`.
-Mỗi daemon chỉ chạy **một bản** (hai bản group_watch = trả lời/đăng trùng). Sửa `.env` → restart tab liên quan.
+Mỗi daemon chỉ chạy **một bản** (hai bản group_watch = trả lời/đăng trùng). Sửa `.env` (tay hoặc qua thẻ Cài đặt) → restart tab liên quan.
 Tình trạng: `python $T/dev-automation/tools/daemon_common.py status`.
 
 ## 4. Các tình huống dùng hằng ngày
@@ -86,12 +87,21 @@ Tình trạng: `python $T/dev-automation/tools/daemon_common.py status`.
 ### 4.0 Giao diện web theo dõi (mở trong trình duyệt Orca)
 
 ```bash
-python $T/dev-automation/tools/dashboard.py serve        # rồi mở http://127.0.0.1:8765
+python $T/dev-automation/tools/dashboard.py serve        # mở một tab Orca; lệnh in ra link http://127.0.0.1:8765/#key=…
 ```
+Mở **đúng link có `#key=…`** (key đổi mỗi lần chạy, chỉ in ở tab này). Mở không có key = chỉ xem.
 Một trang tự làm mới (5/10/30 giây): ô số tổng quan, **"Cần bạn xử lý"** (việc bị chặn, yêu cầu duyệt — kèm lệnh, bấm để copy),
 toàn bộ việc trong hàng đợi (lọc theo loại), tài khoản agent + dung lượng, review MR, daemon, pipeline run, port-forward, feedback.
-Chỉ đọc: không có nút hành động — mọi thao tác vẫn là lệnh ở terminal. Chỉ nghe `127.0.0.1` (máy khác không vào được).
-Đổi cổng: `--port 9000`. Dừng: Ctrl+C.
+- Mỗi thẻ có mục **"Lệnh & cách dùng"** (bấm để mở): các lệnh của chức năng đó + giải thích; bấm vào lệnh để copy.
+- Thẻ **Khởi động**: lệnh của từng daemon (mỗi lệnh một tab Orca).
+- Thẻ **Cài đặt**: đổi các công tắc hay dùng mà không phải nhớ tên khoá — chế độ đăng review, project được tự đăng,
+  ai được gửi yêu cầu từ TChat, từ khoá, tự duyệt, timeout, số việc song song, trần lượt agent/ngày… Đổi rồi bấm
+  **Lưu thay đổi**; mục "nhạy cảm" hỏi xác nhận. Sau khi lưu, trang ghi **tab nào cần restart** (cài đặt .env) —
+  cài đặt "Điều phối" áp dụng ngay. Token/mật khẩu **không** sửa ở đây (trang chỉ cho biết đã đặt hay chưa) — sửa tay trong `.env`.
+  Cùng danh mục ở terminal: `python $T/dev-automation/tools/toolkit_settings.py list` / `set KEY VALUE`.
+  Mỗi thay đổi được ghi vào `temp/settings_audit.jsonl`.
+- Thao tác khác (duyệt, huỷ việc…) vẫn là lệnh ở terminal. Chỉ nghe `127.0.0.1` (máy khác không vào được).
+  Đổi cổng: `--port 9000`. Chỉ xem, không có form: `--read-only`. Dừng: Ctrl+C.
 
 ### 4.1 Xem đang có việc gì — lệnh dùng nhiều nhất
 

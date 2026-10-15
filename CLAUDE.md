@@ -78,7 +78,8 @@ python ../auto-dev/tools/proposals.py scan --repo DIR [--enqueue] | new --repo D
 python ../auto-dev/tools/accounts.py [--json]   # TÀI KHOẢN agent (work/agents.json, gồm tài khoản Orca): đang làm gì + dung lượng còn lại (đọc thẳng Anthropic bằng access token của từng tài khoản, 5 phút/lần, KHÔNG gia hạn token; không được thì số của Orca · `--orca-only`)
 python ../auto-dev/tools/coordinator.py work [--parallel N] [--once] | board | accept <id> [--lane L] | capacity [N] | usage [PCT] | budget [--daily-agent-runs N]   # ĐIỀU PHỐI mọi loại việc trong store (giới hạn song song toàn cục, phụ thuộc, khoá repo) + bảng tiến độ
 python taskstore.py summary | list [--status ...] | show <id> | events [<id>] | add <kind> <ref> | unblock|cancel <id>   # store bền (temp/toolkit.db): task, lease, checkpoint, dừng khi hết quota → chạy tiếp
-python dashboard.py serve [--port 8765]   # GIAO DIỆN WEB chỉ đọc (127.0.0.1): việc, tài khoản, review MR, duyệt chờ, daemon… — mở http://127.0.0.1:8765 trong trình duyệt Orca
+python dashboard.py serve [--port 8765] [--read-only]   # GIAO DIỆN WEB (127.0.0.1): việc, tài khoản, review MR, duyệt chờ, daemon, lệnh từng chức năng + FORM CÀI ĐẶT — mở link có #key=… mà lệnh in ra (không key = chỉ xem)
+python toolkit_settings.py list | set KEY VALUE   # cùng danh mục cài đặt ở terminal (chỉ khoá KHÔNG bí mật; set = [WRITE], báo tab cần restart)
 python status.py [--json] [--section daemons,runs,queue,approvals,feedback]   # BẢNG TRẠNG THÁI tổng hợp: daemon + pipeline run đang mở + queue + approval chờ + feedback stats
 python k8s.py doctor|contexts                       # kubectl (PATH/Lens) + kubeconfig có trên máy — không gọi mạng
 python k8s.py access|pods|deploys|events|describe|logs|get --project P --env E   # READ-ONLY; hoặc --context C --kubeconfig F [-n NS]
