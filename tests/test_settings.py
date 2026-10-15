@@ -81,6 +81,26 @@ class EnvWriteTest(Base):
         E.set_values(self.env, {"REVIEW_AUTO_POST": ""})
         self.assertEqual(E.parse(self.text())["REVIEW_AUTO_POST"], "")
 
+    def test_expected_is_checked_under_the_lock(self):                         # Codex settings R1 #1
+        with self.assertRaises(E.StaleValue):
+            E.set_values(self.env, {"REVIEW_AUTO_POST": "auto"}, expected={"REVIEW_AUTO_POST": "off"})
+        E.set_values(self.env, {"REVIEW_AUTO_POST_PROJECTS": "x"}, expected={"REVIEW_AUTO_POST_PROJECTS": ""})
+        self.assertEqual(E.parse(self.text())["REVIEW_AUTO_POST_PROJECTS"], "x")
+
+    def test_replace_retries_while_a_reader_holds_the_file(self):              # Codex settings R1 #2
+        real, calls = os.replace, []
+
+        def flaky(a, b):
+            calls.append(1)
+            if len(calls) < 3:
+                raise PermissionError("in use")
+            return real(a, b)
+        with mock.patch.object(E.os, "replace", side_effect=flaky), mock.patch.object(E.time, "sleep"):
+            E.set_values(self.env, {"REVIEW_AUTO_POST": "off"})
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(E.parse(self.text())["REVIEW_AUTO_POST"], "off")
+        self.assertEqual([f for f in os.listdir(self.tmp) if ".tmp-" in f], [])
+
     def test_file_without_trailing_newline(self):
         with open(self.env, "w", encoding="utf-8", newline="") as f:
             f.write("A=1")
@@ -123,6 +143,14 @@ class CatalogTest(Base):
         with open(os.path.join(self.tmp, "settings_audit.jsonl"), encoding="utf-8") as f:
             rec = json.loads(f.readlines()[-1])
         self.assertEqual(rec["by"], "test")
+
+    def test_first_store_edit_without_a_store_is_not_stale(self):              # Codex settings R1 #3
+        self.assertFalse(os.path.exists(os.environ["TOOLKIT_STORE"]))
+        it = next(i for i in S.snapshot()["items"] if i["key"] == "capacity")
+        self.assertEqual((it["value"], it["set"]), (str(St.max_running_default()), True))
+        S.apply({"capacity": "4"}, by="t", expected={"capacity": it["value"]})
+        with St.Store() as st:
+            self.assertEqual(st.capacity(), 4)
 
     def test_stale_or_invalid_change_writes_nothing(self):
         with self.assertRaises(RuntimeError):
@@ -198,6 +226,9 @@ class HttpTest(Base):
         self.assertEqual((code, out["ok"]), (400, False))
         code, _ = self.req("/api/settings", b"{" * 20000, self.GOOD)
         self.assertEqual(code, 413)
+        for root in (b"null", b"[]", b'"x"', b"{bad"):                       # Codex settings R1 #5
+            code, out = self.req("/api/settings", root, self.GOOD)
+            self.assertEqual((code, out["ok"]), (400, False), root)
 
     def test_read_only_server_has_no_key(self):
         with mock.patch.object(D.Handler, "edit_key", ""):

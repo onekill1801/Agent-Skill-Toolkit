@@ -373,12 +373,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(413, {"ok": False, "error": "body missing or too large"})
         try:
             body = json.loads(self.rfile.read(n).decode("utf-8"))
+            if not isinstance(body, dict):                     # null / [] / "x" (Codex settings R1 #5)
+                raise ValueError("body must be a JSON object")
             changes, expected = body.get("changes"), body.get("expected") or {}
             if not isinstance(changes, dict) or not isinstance(expected, dict):
                 raise ValueError("changes / expected must be objects")
             out = settings_mod.apply(changes, by="dashboard", expected=expected)
         except (ValueError, RuntimeError, FileNotFoundError, TimeoutError, UnicodeDecodeError) as e:
             return self._json(400, {"ok": False, "error": redact(str(e))[:400]})
+        except OSError as e:                                   # e.g. .env locked by another program (R1 #2)
+            return self._json(503, {"ok": False, "error": redact(f"không ghi được: {type(e).__name__}: {e}")[:400]})
         self.snapshots.wanted.set()                            # capacity / caps show at once
         return self._json(200, {"ok": True, **out})
 

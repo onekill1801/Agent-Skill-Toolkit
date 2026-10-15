@@ -20,7 +20,8 @@ import os
 import re
 import time
 
-from agent_skill_toolkit.core import env, paths
+from agent_skill_toolkit.core import env, locks, paths
+from agent_skill_toolkit.core import store as store_mod
 
 COORD = "Coordinator"
 GROUP_WATCH = "TChat group_watch"
@@ -83,8 +84,8 @@ CATALOG = [
        choices=("read", "file", "bash"), restart=(TG_CODE,), sensitive=True),
     # ---------------------------------------------------------------- coordinator (store, live)
     _s("capacity", "Điều phối", "Số việc chạy song song",
-       "giới hạn toàn cục cho worker (tab Coordinator; 0 = mặc định 2); áp dụng ngay", "int", "0",
-       lo=0, hi=50, store=True),
+       "giới hạn toàn cục cho worker (tab Coordinator); 0 = không giới hạn (worker chạy 2 luồng); áp dụng ngay",
+       "int", str(store_mod.max_running_default()), lo=0, hi=50, store=True),
     _s("daily_agent_runs", "Điều phối", "Trần lượt agent / ngày",
        "0 = không giới hạn; chạm trần thì dừng tới 0 giờ; áp dụng ngay", "int", "0", lo=0, hi=100000, store=True),
 ]
@@ -155,8 +156,11 @@ def snapshot(store=None) -> dict:
     for s in CATALOG:
         it = {k: v for k, v in s.items() if k != "item"}
         if s["store"]:
-            it["value"] = _store_value(store, s["key"]) if store is not None else None
-            it["set"] = it["value"] is not None
+            # no store yet = the value a new store starts with (capacity = max_running_default(), caps 0),
+            # exactly what apply() reads back once it creates the store — a first edit is not refused as
+            # stale (Codex settings R1 #3)
+            it["value"] = _store_value(store, s["key"]) if store is not None else s["default"]
+            it["set"] = True
         else:
             it["set"] = s["key"] in vals
             it["value"] = vals.get(s["key"], "")
@@ -212,33 +216,32 @@ def apply(changes: dict, by: str, expected: dict = None, store_factory=None) -> 
     if env_changes and not os.path.isfile(path):
         raise FileNotFoundError(f"không có file .env ở {path}")
     expected = expected or {}
-    current = _read_env(path)
-    st = None
-    try:
-        if store_changes:
-            if store_factory is None:
-                from agent_skill_toolkit.core import store as store_mod
-                store_factory = store_mod.Store
-            st = store_factory()
-        stale = []
-        for k in changes:
-            if k not in expected:
-                continue
-            now = _store_value(st, k) if BY_KEY[k]["store"] else current.get(k, "")
-            if now != expected[k]:
-                stale.append(k)
-        if stale:
-            raise RuntimeError(f"đã bị đổi ở nơi khác kể từ lúc bạn mở trang: {', '.join(stale)} — tải lại rồi sửa")
-        old = env.set_values(path, env_changes) if env_changes else {}
-        for k, v in store_changes.items():
-            old[k] = _store_value(st, k)
-            if k == "capacity":
-                st.set_capacity(int(v), by=by)
-            else:
-                st.set_setting(k, str(int(v)), by=by)
-    finally:
-        if st is not None:
-            st.close()
+    stale_msg = "đã bị đổi ở nơi khác kể từ lúc bạn mở trang: {} — tải lại rồi sửa"
+    old, st = {}, None
+    # check + write under ONE lock: two concurrent saves based on the same page can not both pass
+    # (Codex settings R1 #1). The .env part is checked inside set_values, under the file's own lock.
+    with locks.file_lock(paths.state_path("locks", "settings-apply.lock"), timeout=10):
+        try:
+            if store_changes:
+                st = (store_factory or store_mod.Store)()
+                stale = [k for k in store_changes if k in expected and _store_value(st, k) != expected[k]]
+                if stale:
+                    raise RuntimeError(stale_msg.format(", ".join(stale)))
+            if env_changes:
+                try:
+                    old = env.set_values(path, env_changes,
+                                         expected={k: expected[k] for k in env_changes if k in expected})
+                except env.StaleValue as e:
+                    raise RuntimeError(stale_msg.format(", ".join(e.keys))) from None
+            for k, v in store_changes.items():
+                old[k] = _store_value(st, k)
+                if k == "capacity":
+                    st.set_capacity(int(v), by=by)
+                else:
+                    st.set_setting(k, str(int(v)), by=by)
+        finally:
+            if st is not None:
+                st.close()
     changed = {k: {"old": old.get(k), "new": v} for k, v in changes.items() if (old.get(k) or "") != v}
     restart = sorted({r for k in changed for r in BY_KEY[k]["restart"]})
     rec = {"at": time.time(), "by": by, "changed": changed, "restart": restart}

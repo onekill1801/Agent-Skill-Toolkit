@@ -506,7 +506,10 @@ function pendingChanges() {
     const it = settings.items.find((x) => x.key === el.dataset.set);
     const v = readControl(el);
     const row = el.closest("tr");
-    const changed = it && v !== shown(it);
+    const same = (a, b) => (el.dataset.multi                   // a selection: order does not matter (R1 #4)
+      ? [...new Set(a.split(",").filter(Boolean))].sort().join() === [...new Set(b.split(",").filter(Boolean))].sort().join()
+      : a === b);
+    const changed = it && !same(v, shown(it));
     if (row) row.classList.toggle("changed", !!changed);
     if (changed) out[it.key] = v;
   });

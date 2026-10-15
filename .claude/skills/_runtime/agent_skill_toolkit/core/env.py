@@ -14,6 +14,7 @@ runtime module never has to import a skill's config facade:
 
 import os
 import re
+import time
 
 from . import paths
 
@@ -82,6 +83,14 @@ def get(key: str, default: str = "") -> str:
 
 # chars every .env reader of the toolkit would mis-read: line breaks of any kind (str.splitlines()
 # splits on these), "#" (inline comment), quotes (stripped), control chars
+class StaleValue(RuntimeError):
+    """A key's current value is not the one the caller based its change on."""
+
+    def __init__(self, keys):
+        super().__init__(", ".join(keys))
+        self.keys = list(keys)
+
+
 _BAD_VALUE = re.compile(r"[\x00-\x1f\x7f\x85  #\"']")
 MAX_VALUE = 500
 
@@ -115,11 +124,12 @@ def _set_line(line: str, key: str, value: str) -> str:
     return f"{indent}{key}={value}{comment}{eol}"
 
 
-def set_values(path: str, updates: dict) -> dict:
+def set_values(path: str, updates: dict, expected: dict = None) -> dict:
     """Write `updates` {KEY: value} into the .env file at `path` — the FIRST active `KEY=` line (the one
     every reader uses) is changed in place, a missing key is appended; every other byte is kept. Atomic
     (temp file + replace) under a lock; the result is re-parsed and must give exactly the new values with
-    every other key unchanged, or nothing is written. Returns the previous values ({KEY: str|None})."""
+    every other key unchanged, or nothing is written. `expected` {KEY: value-or-""}: checked UNDER the lock
+    (Codex settings R1 #1) — a differing current value raises StaleValue. Returns the previous values."""
     from . import locks
     for k, v in updates.items():
         if not _LINE.match(f"{k}=x"):
@@ -131,6 +141,9 @@ def set_values(path: str, updates: dict) -> dict:
         with open(path, encoding="utf-8", newline="") as f:
             text = f.read()
         before = parse(text)
+        stale = [k for k, v in (expected or {}).items() if before.get(k, "") != v]
+        if stale:
+            raise StaleValue(stale)
         lines = text.splitlines(keepends=True)
         nl = "\r\n" if "\r\n" in text else "\n"
         for k, v in updates.items():
@@ -153,7 +166,16 @@ def set_values(path: str, updates: dict) -> dict:
         try:
             with open(tmp, "w", encoding="utf-8", newline="") as f:
                 f.write(new)
-            os.replace(tmp, path)
+            for attempt in range(20):
+                try:
+                    os.replace(tmp, path)
+                    break
+                except PermissionError:
+                    # Windows: a reader holds the file open without delete sharing — readers keep it
+                    # open for milliseconds, so retry briefly (Codex settings R1 #2)
+                    if attempt == 19:
+                        raise
+                    time.sleep(0.1)
         finally:
             if os.path.exists(tmp):
                 os.remove(tmp)
