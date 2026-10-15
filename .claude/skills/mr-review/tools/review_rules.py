@@ -33,6 +33,7 @@ MARKER_RE = re.compile(r"<!-- ai-review:(\d+):([0-9a-f]{7,40}) -->")
 
 _URL = re.compile(r"https?://[^\s)>\]]+", re.I)
 _MENTION = re.compile(r"(?<![\w`])@([A-Za-z0-9_.-]+)")
+_CODE = re.compile(r"```.*?(?:```|\Z)|`[^`\n]*`", re.S)
 _SECRET = re.compile(
     r"glpat-[A-Za-z0-9_-]{10,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}"
     r"|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----"
@@ -84,7 +85,7 @@ def content_problems(job: dict, texts: list) -> list:
             h = (urlparse(u).hostname or "").lower()
             if not host or h != host:
                 probs.append(f"link outside GitLab host: {h or u[:40]}")
-        for m in _MENTION.findall(t):
+        for m in _MENTION.findall(_CODE.sub(" ", t)):       # GitLab does not ping from code spans/blocks
             if m.lower() not in allowed_mentions:
                 probs.append(f"@mention of someone other than the MR author: @{m}")
         if _SECRET.search(t):

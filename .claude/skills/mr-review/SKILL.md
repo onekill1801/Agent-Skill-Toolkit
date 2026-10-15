@@ -75,6 +75,9 @@ Review against:
      "file": "path/in/repo", "line": 42, "side": "new", "suggestion": "cách sửa"}
   ],
   "tests": [{"cmd": "mvn -q test -Dtest=X", "result": "pass|fail|skipped", "note": ""}],
+  "compliance": {"Correctness": {"status": "ok|warn|fail", "note": "ngắn"}, "Code Quality": {...},
+                 "Architecture": {...}, "Security": {...}, "Performance": {...}, "Testing": {...}},
+  "positives": ["điểm làm tốt, cụ thể"],
   "reviewed_commits": "new_only",
   "model": "<provider:model>"
 }
@@ -85,6 +88,12 @@ Review against:
 - `blocker` = must fix before merge (bug, security, data loss, broken contract).
   APPROVE with a blocker is rejected by the validator.
 - Prefer few, concrete, verified findings over many speculative ones.
+- The posted note follows the "Code Review Summary" layout (`dev-automation/prompts/code_review_prompt.md`):
+  Overview = `summary`; 🔴 Critical = `blocker`, 🟡 Major = `major`, 🟢 Minor/Nitpicks = `minor`+`nit`
+  (`body` → **Why**, `suggestion` → **Suggestion**); Standards Compliance = `compliance` (fill all
+  6 categories); Positive Observations = `positives`; Files Reviewed is filled from ws.json.
+- Put code identifiers in backticks (`` `@Test` ``, `` `findById` ``); any bare `@word` other than
+  the MR author is wrapped automatically so it never pings a GitLab user.
 
 ```
 python3 $T/review_post.py validate <job_id>          # fix until "valid": true

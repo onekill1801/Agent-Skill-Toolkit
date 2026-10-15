@@ -147,8 +147,54 @@ class PostGateTest(unittest.TestCase):
     def test_render_note_folds_non_inline_findings(self):
         with mock.patch.object(rp, "_ws", return_value={}):
             note = rp.render_note(self.job(), self.review(), set())
-        self.assertIn("🟢 **t**", note)
-        self.assertIn("`a.py:3`", note)
+        self.assertIn("**1. [`a.py`:3] t**", note)
+        self.assertIn("No critical issues found.", note)
+
+    def test_render_note_uses_code_review_summary_layout(self):
+        review = self.review(verdict="REQUEST_CHANGES", date="2026-10-15", positives=["gọn"],
+                             compliance={"Correctness": {"status": "fail", "note": "a|b"}},
+                             findings=[{"severity": "nit", "title": "n"},
+                                       {"severity": "blocker", "title": "b", "body": "why", "suggestion": "fix",
+                                        "file": "x.java", "line": 9},
+                                       {"severity": "major", "title": "m"}])
+        ws = {"files": [{"path": "x.java", "added": 3, "removed": 1}, {"path": "img.png", "added": None}]}
+        job = self.job(title="T", source_branch="f", target_branch="dev")
+        with mock.patch.object(rp, "_ws", return_value=ws):
+            note = rp.render_note(job, review, set())
+        self.assertTrue(note.startswith(rr.marker(job)))
+        order = [note.index(s) for s in ("## Code Review Summary", "**Overall Verdict:** 🔴 REQUEST_CHANGES",
+                                         "### Overview", "### 🔴 Critical", "**1. [`x.java`:9] b**",
+                                         "- **Why:** why", "- **Suggestion:** fix", "### 🟡 Major", "**2. m**",
+                                         "### 🟢 Minor / Nitpicks", "**3. n**", "### Standards Compliance",
+                                         "### Positive Observations", "### Files Reviewed")]
+        self.assertEqual(order, sorted(order))
+        self.assertIn("**Date:** 2026-10-15", note)
+        self.assertIn("| Correctness | ❌ | a\\|b |", note)
+        self.assertIn("| Security | — |  |", note)
+        self.assertIn("| `x.java` | +3 / -1 | 1 |", note)
+        self.assertIn("| `img.png` | binary | 0 |", note)
+        self.assertIn("(`f` -> `dev`)", note)
+
+    def test_inline_finding_is_listed_once_in_note(self):
+        review = self.review(findings=[{"severity": "major", "title": "t", "body": "secret why", "file": "a.py",
+                                        "line": 3}])
+        with mock.patch.object(rp, "_ws", return_value={}):
+            note = rp.render_note(self.job(), review, {0})
+        self.assertIn("Chi tiết ở comment inline", note)
+        self.assertNotIn("secret why", note)
+
+    def test_defang_wraps_bare_mentions_but_not_code_or_author(self):
+        self.assertEqual(rp.defang("thiếu dòng trước @Test và @dev", "dev"), "thiếu dòng trước `@Test` và @dev")
+        self.assertEqual(rp.defang("x `@Override` y"), "x `@Override` y")
+        self.assertEqual(rp.defang("```java\n@Test\nvoid a(){}\n```"), "```java\n@Test\nvoid a(){}\n```")
+        self.assertEqual(rp.defang("mail a@b.com"), "mail a@b.com")
+
+    def test_validate_new_optional_fields(self):
+        self.assertEqual(rp.validate(self.job(), self.review(compliance={"Testing": {"status": "ok"}},
+                                                             positives=["x"])), [])
+        errs = rp.validate(self.job(), self.review(compliance={"Speed": {"status": "ok"},
+                                                               "Testing": {"status": "good"}}, positives="x"))
+        self.assertEqual(len(errs), 3)
 
 
 import review_rules as rr  # noqa: E402
@@ -193,6 +239,11 @@ class AutoPostRulesTest(unittest.TestCase):
         self.assertTrue(self.ok(self.job(), note="cc @dev — https://gitlab.example.vn/grp/proj/-/merge_requests/5")
                         ["auto_post"])
 
+    def test_mentions_inside_code_do_not_block(self):
+        self.assertTrue(self.ok(self.job(), note="thiếu dòng trống trước `@Test`\n```java\n@Override\n```")
+                        ["auto_post"])
+        self.assertFalse(self.ok(self.job(), note="`code` then @someone")["auto_post"])
+
     def test_scope_mode_and_source(self):
         self.assertFalse(self.ok(self.job(project_path="other/repo", project_id="9"))["auto_post"])
         self.assertFalse(self.ok(self.job(requests=[{"source": "unknown_bot"}]))["auto_post"])
@@ -220,8 +271,10 @@ class AutoPostRulesTest(unittest.TestCase):
         job = self.job(approval={"via": "rules"})
         with mock.patch.object(rp, "load_review", return_value=self._review()):
             self.assertEqual(rp.approval_status(job), "approved")
-        with mock.patch.object(rp, "load_review", return_value=self._review(summary="ping @all")):
+        with mock.patch.object(rp, "load_review", return_value=self._review(summary="see https://evil.example.com/x")):
             self.assertEqual(rp.approval_status(job), "pending")
+        with mock.patch.object(rp, "load_review", return_value=self._review(summary="ping @all")):
+            self.assertEqual(rp.approval_status(job), "approved")      # rendered as `@all`: pings nobody
 
     def _post_with(self, gl, job):
         import contextlib

@@ -30,9 +30,14 @@ review.json (default: <worktree>.review.json):
   "findings": [{"severity": "blocker|major|minor|nit", "title": "...", "body": "...",
                 "file": "path/in/repo", "line": 42, "side": "new|old", "suggestion": "..."}],
   "tests": [{"cmd": "...", "result": "pass|fail|skipped", "note": "..."}],
+  "compliance": {"Correctness": {"status": "ok|warn|fail", "note": "..."}, ...},   # optional:
+                 # Correctness · Code Quality · Architecture · Security · Performance · Testing
+  "positives": ["điểm làm tốt", ...],                                              # optional
   "reviewed_commits": "all | new_only",
   "model": "provider:model"
 }
+The note uses the "Code Review Summary" layout of dev-automation/prompts/code_review_prompt.md
+(Critical = blocker, Major = major, Minor/Nitpicks = minor+nit; Files Reviewed from ws.json).
 """
 
 import argparse
@@ -42,6 +47,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 import review_common as rc
 import review_rules as rr
@@ -92,6 +98,23 @@ def validate(job: dict, review: dict) -> list:
             errs.append(f"findings[{i}].line must be an integer")
         if f.get("side", "new") not in ("new", "old"):
             errs.append(f"findings[{i}].side must be new|old")
+    comp = review.get("compliance")
+    if comp is not None:
+        if not isinstance(comp, dict):
+            errs.append("compliance must be an object {Category: {status, note}}")
+        else:
+            for cat, c in comp.items():
+                if cat not in COMPLIANCE:
+                    errs.append(f"compliance.{cat}: category must be one of {COMPLIANCE}")
+                elif not isinstance(c, dict) or c.get("status") not in STATUS_ICON:
+                    errs.append(f"compliance.{cat}.status must be one of {tuple(STATUS_ICON)}")
+                elif c.get("note") is not None and not isinstance(c.get("note"), str):
+                    errs.append(f"compliance.{cat}.note must be a string")
+    pos = review.get("positives")
+    if pos is not None and not (isinstance(pos, list) and all(isinstance(p, str) for p in pos)):
+        errs.append("positives must be a list of strings")
+    if review.get("date") is not None and not isinstance(review.get("date"), str):
+        errs.append("date must be a string (YYYY-MM-DD)")
     if review.get("verdict") == "APPROVE" and any(isinstance(f, dict) and f.get("severity") == "blocker"
                                                  for f in findings):
         errs.append("verdict APPROVE with a blocker finding is contradictory")
@@ -103,39 +126,124 @@ def _counts(findings: list) -> str:
     return " · ".join(p for p in parts if not p.startswith("0 ")) or "không có finding"
 
 
+# Same layout as dev-automation/prompts/code_review_prompt.md (the format reviewers already know).
+SECTIONS = (("🔴 Critical Issues (must fix before merge)", ("blocker",), "No critical issues found."),
+            ("🟡 Major Suggestions (strongly recommended)", ("major",), "No major suggestions."),
+            ("🟢 Minor / Nitpicks", ("minor", "nit"), "Code looks clean."))
+COMPLIANCE = ("Correctness", "Code Quality", "Architecture", "Security", "Performance", "Testing")
+STATUS_ICON = {"ok": "✅", "warn": "⚠️", "fail": "❌"}
+
+_CODE = re.compile(r"```.*?(?:```|\Z)|`[^`\n]*`", re.S)
+_AT = re.compile(r"(?<![\w`])@([A-Za-z0-9_.-]+)")
+
+
+def defang(text: str, author: str = "") -> str:
+    """`@Test`, `@Override`… outside code would ping a GitLab user of that name: wrap every @word
+    that is not the MR author in backticks (code spans/fences are left untouched)."""
+    keep = (author or "").lower()
+
+    def fix(seg):
+        return _AT.sub(lambda m: m.group(0) if keep and m.group(1).lower() == keep else f"`{m.group(0)}`", seg)
+    out, pos = [], 0
+    for m in _CODE.finditer(text or ""):
+        out += [fix(text[pos:m.start()]), m.group(0)]
+        pos = m.end()
+    return "".join(out) + fix((text or "")[pos:])
+
+
+def _loc(f: dict) -> str:
+    if not f.get("file"):
+        return ""
+    return f"[`{f['file']}`" + (f":{f['line']}" if f.get("line") else "") + "] "
+
+
+def _review_date(job: dict, review: dict) -> str:
+    """Stable for one review file (the approval hash covers the rendered text)."""
+    if isinstance(review.get("date"), str) and review["date"]:
+        return review["date"]
+    try:
+        return time.strftime("%Y-%m-%d", time.localtime(os.path.getmtime(review_path(job))))
+    except OSError:
+        return ""
+
+
 def render_note(job: dict, review: dict, inline_ok: set, approver: str = "") -> str:
+    lines = []
+
+    def _section():
+        while lines and lines[-1] == "":
+            lines.pop()
+        return ["", "---", ""]
+
     findings = review.get("findings", [])
-    lines = [rr.marker(job), f"### 🤖 AI review — {VERDICT_ICON[review['verdict']]}", "", review["summary"].strip(), "",
-             f"**Findings:** {_counts(findings)}" + (f" ({len(inline_ok)} comment inline)" if inline_ok else "")]
-    rest = [(i, f) for i, f in enumerate(findings) if i not in inline_ok]
-    if rest:
-        lines.append("")
-        for _, f in rest:
-            loc = f" — `{f['file']}" + (f":{f['line']}`" if f.get("line") else "`") if f.get("file") else ""
-            lines.append(f"- {SEV_ICON[f['severity']]} **{f['title']}**{loc}")
-            if f.get("body"):
-                lines.append(f"  {f['body'].strip()}")
+    au = job.get("author") or ""
+    head = ((job.get("diff_refs") or {}).get("head_sha") or "")[:8]
+    branches = f" (`{job['source_branch']}` -> `{job['target_branch']}`)" if job.get("source_branch") else ""
+    lines += [rr.marker(job), "## Code Review Summary", "",
+             f"**MR:** !{job['iid']} - {defang(job.get('title') or '', au)}".rstrip(" -"),
+             "**Reviewer:** AI Agent"]
+    date = _review_date(job, review)
+    if date:
+        lines.append(f"**Date:** {date}")
+    lines += [f"**Commit:** {head}{branches}", f"**Overall Verdict:** {VERDICT_ICON[review['verdict']]}",
+              "", "---", "", "### Overview", "", defang(review["summary"].strip(), au)]
+    n = 0
+    for title, sevs, empty in SECTIONS:
+        lines += _section() + [f"### {title}", ""]
+        items = [(i, f) for i, f in enumerate(findings) if f.get("severity") in sevs]
+        if not items:
+            lines.append(empty)
+        for i, f in items:
+            n += 1
+            lines.append(f"**{n}. {_loc(f)}{defang(f['title'], au)}**")
+            if i in inline_ok:
+                lines += ["", "- _Chi tiết ở comment inline._", ""]
+                continue
+            sub = [f"- **Why:** {defang(f['body'].strip(), au)}"] if f.get("body") else []
             if f.get("suggestion"):
-                lines.append(f"  _Đề xuất:_ {f['suggestion'].strip()}")
+                sub.append(f"- **Suggestion:** {defang(f['suggestion'].strip(), au)}")
+            lines += ([""] + sub + [""]) if sub else [""]
+    comp = review.get("compliance") or {}
+    if comp:
+        lines += _section() + ["### Standards Compliance", "", "| Category | Status | Notes |",
+                  "|----------|--------|-------|"]
+        for cat in COMPLIANCE:
+            c = comp.get(cat) or {}
+            note = defang(str(c.get("note") or ""), au).replace("|", "\\|").replace("\n", " ")
+            lines.append(f"| {cat} | {STATUS_ICON.get(c.get('status'), '—')} | {note} |")
+    pos = [p for p in (review.get("positives") or []) if isinstance(p, str) and p.strip()]
+    if pos:
+        lines += _section() + ["### Positive Observations", ""] + [f"- {defang(p.strip(), au)}" for p in pos]
+    ws = _ws(job)
+    files = ws.get("files") or []
+    if files:
+        per = {}
+        for f in findings:
+            if f.get("file"):
+                per[f["file"]] = per.get(f["file"], 0) + 1
+        lines += _section() + ["### Files Reviewed", "", "| File | Lines Changed | Issues Found |",
+                  "|------|--------------|--------------|"]
+        for f in files:
+            add, rem = f.get("added"), f.get("removed")
+            size = "binary" if add is None else f"+{add} / -{rem}"
+            lines.append(f"| `{f.get('path', '?')}` | {size} | {per.get(f.get('path'), 0)} |")
     tests = review.get("tests") or []
     if tests:
         lines += ["", "**Kiểm thử:** " + " · ".join(f"`{t.get('cmd', '?')}` → {t.get('result', '?')}" for t in tests)]
-    ws = _ws(job)
     c = (ws.get("commits") or {})
     scope = f"{c.get('new', '?')}/{c.get('total', '?')} commit mới" if c else ""
-    head = ((job.get("diff_refs") or {}).get("head_sha") or "")[:8]
-    meta = [x for x in (review.get("model") and f"model {review['model']}", approver and f"duyệt bởi {approver}",
-                        f"head {head}", scope) if x]
+    meta = [x for x in ("🤖 AI review", review.get("model") and f"model {review['model']}",
+                        approver and f"duyệt bởi {approver}", f"head {head}", scope) if x]
     lines += ["", "---", "_" + " · ".join(meta) + "_"]
     return "\n".join(lines)
 
 
-def render_inline(f: dict) -> str:
-    body = f"{SEV_ICON[f['severity']]} **{f['title']}**"
+def render_inline(f: dict, author: str = "") -> str:
+    body = f"{SEV_ICON[f['severity']]} **{defang(f['title'], author)}**"
     if f.get("body"):
-        body += f"\n\n{f['body'].strip()}"
+        body += f"\n\n**Why:** {defang(f['body'].strip(), author)}"
     if f.get("suggestion"):
-        body += f"\n\n_Đề xuất:_ {f['suggestion'].strip()}"
+        body += f"\n\n**Suggestion:** {defang(f['suggestion'].strip(), author)}"
     return body
 
 
@@ -147,7 +255,7 @@ def inline_candidates(review: dict) -> list:
 def payload(job: dict, review: dict) -> tuple:
     """(note, inline bodies) — the superset of text that can reach GitLab for this review."""
     findings = review.get("findings", [])
-    return render_note(job, review, set()), [render_inline(findings[i]) for i in inline_candidates(review)]
+    return render_note(job, review, set()), [render_inline(findings[i], job.get("author") or "") for i in inline_candidates(review)]
 
 
 def payload_hash(job: dict, review: dict) -> str:
@@ -332,7 +440,7 @@ def _inline(gl, job: dict, f: dict, i: int = 0) -> bool:
            "head_sha": refs["head_sha"], "new_path": f["file"], "old_path": f.get("old_file") or f["file"]}
     pos["new_line" if side_new else "old_line"] = f["line"]
     url = gl._api(f"/merge_requests/{job['iid']}/discussions")
-    res = gl._request(url, method="POST", data={"body": render_inline(f) + "\n\n" + inline_marker(job, i),
+    res = gl._request(url, method="POST", data={"body": render_inline(f, job.get("author") or "") +"\n\n" + inline_marker(job, i),
                                                   "position": pos})
     if isinstance(res, dict) and res.get("uncertain"):
         # it may exist: stop, the next attempt reconciles by marker before posting anything (Codex R.M4 #2)
