@@ -61,7 +61,9 @@ _HTML_LINE = re.compile(r"(?m)^ {0,3}<" + _MARKER_OK + r"[A-Za-z/!?]")
 _FENCE_UNSAFE = re.compile(r"(?m)\r|^ {0,3}(?:>>>|\$\$|\[|<" + _MARKER_OK + r"[A-Za-z/!?])"
                            # a fence run anywhere but column 0 (indented / list / quote openers that we
                            # do not track would pair differently in GitLab — Codex fmt R11 #1)
-                           r"|[^\n`]```|[^\n~]~~~")
+                           r"|[^\n`]```|[^\n~]~~~"
+                           # very long runs: cmark-gfm caps fence length (255) -> different pairing (R12 #1)
+                           r"|`{11,}|~{11,}")
 
 
 # fences GitLab only highlights. Anything else (json:table renders its cells as markdown BEFORE the
