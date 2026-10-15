@@ -159,7 +159,7 @@ Ký hiệu: ✅ xong + Codex đồng thuận · 🔁 đã code, đang review/s�
 | 2026-10-15 | F.15 (`30eb98b`) | 3 | **NO-GO**: MED request bị bỏ ghi đè kết quả mới hơn — sửa ở `9fae379` |
 | 2026-10-15 | F.15 (`9fae379`) | 4 | **GO** |
 | 2026-10-15 | F.16 (`e502f29`) | 1 | **NO-GO**: HIGH backtick escape lách bọc mention; MED status lạ làm validate crash; LOW `|` trong đường dẫn — sửa ở `9728544` |
-| 2026-10-15 | F.16 (`9728544`) | 2 | **NO-GO**: HIGH ``/fence trong list lệch với markdown — sửa ở `08c0e90` |
+| 2026-10-15 | F.16 (`9728544`) | 2 | **NO-GO**: HIGH `\v`/fence trong list lệch với markdown — sửa ở `08c0e90` |
 | 2026-10-15 | F.16 (`08c0e90`) | 3 | **NO-GO**: HIGH nhãn link-ref có `\]`/xuống dòng — sửa ở `bd684f9` |
 | 2026-10-15 | F.16 (`bd684f9`) | 4 | **NO-GO**: HIGH HTML entity (`&#64;`) — sửa ở `3baa9c5` |
 | 2026-10-15 | F.16 (`3baa9c5`) | 5 | **NO-GO**: HIGH `_@all_` (gạch dưới đứng trước) — sửa ở `3828852` |
