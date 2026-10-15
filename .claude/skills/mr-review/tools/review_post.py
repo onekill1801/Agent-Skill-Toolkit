@@ -157,6 +157,13 @@ def defang(text: str) -> str:
     return "".join(out) + fix(text[pos:])
 
 
+def _labelled(label: str, text: str) -> str:
+    """One-line text follows the label; multi-line text (code fences, lists) starts on its own line at
+    column 0, so a fence opens a real code block (Codex fmt R13 #1)."""
+    text = text.strip()
+    return f"{label}\n\n{text}" if "\n" in text else f"{label} {text}"
+
+
 def _loc(f: dict) -> str:
     if not f.get("file"):
         return ""
@@ -204,9 +211,9 @@ def render_note(job: dict, review: dict, inline_ok: set, approver: str = "") -> 
             if i in inline_ok:
                 lines += ["", "- _Chi tiết ở comment inline._", ""]
                 continue
-            sub = [f"- **Why:** {f['body'].strip()}"] if f.get("body") else []
+            sub = [_labelled("- **Why:**", f["body"])] if f.get("body") else []
             if f.get("suggestion"):
-                sub.append(f"- **Suggestion:** {f['suggestion'].strip()}")
+                sub.append(_labelled("- **Suggestion:**", f["suggestion"]))
             lines += ([""] + sub + [""]) if sub else [""]
     comp = review.get("compliance") or {}
     if comp:
@@ -249,9 +256,9 @@ def render_note(job: dict, review: dict, inline_ok: set, approver: str = "") -> 
 def render_inline(f: dict) -> str:
     body = f"{SEV_ICON[f['severity']]} **{f['title']}**"
     if f.get("body"):
-        body += f"\n\n**Why:** {f['body'].strip()}"
+        body += "\n\n" + _labelled("**Why:**", f["body"])
     if f.get("suggestion"):
-        body += f"\n\n**Suggestion:** {f['suggestion'].strip()}"
+        body += "\n\n" + _labelled("**Suggestion:**", f["suggestion"])
     return defang(body)
 
 

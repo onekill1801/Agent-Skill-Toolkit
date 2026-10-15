@@ -313,6 +313,16 @@ class AutoPostRulesTest(unittest.TestCase):
         for unsafe in ("<!-- ai-review\n```\n@x\n```", "a\r\n```\n@x\n```", "[r]: /x\n```\n@x\n```"):
             self.assertEqual(rr.fence_spans(unsafe), [], unsafe)
 
+    def test_code_only_suggestion_starts_a_real_fence(self):                  # Codex fmt R13 #1
+        f = {"severity": "minor", "title": "t", "file": "a.py", "line": 3,
+             "suggestion": "```java\n@Override\nvoid f() {}\n```"}
+        review = {"head_sha": HEAD, "verdict": "COMMENT", "summary": "ok", "findings": [f]}
+        with mock.patch.object(rp, "_ws", return_value={}):
+            note, inline = rp.payload(self.job(), review)
+        for text in (note, inline[0]):
+            self.assertIn("**Suggestion:**\n\n```java\n@Override\nvoid f() {}\n```", text)
+        self.assertEqual(rp._labelled("- **Why:**", " one line "), "- **Why:** one line")
+
     def test_rendered_note_keeps_fenced_code_exact(self):
         review = {"head_sha": HEAD, "verdict": "COMMENT", "summary": "thiếu @Override",
                   "findings": [{"severity": "minor", "title": "t", "suggestion": "dùng:\n```java\n@Override\nvoid a(){}\n```"}]}
