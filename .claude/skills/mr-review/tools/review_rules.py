@@ -34,6 +34,9 @@ MARKER_RE = re.compile(r"<!-- ai-review:(\d+):([0-9a-f]{7,40}) -->")
 _URL = re.compile(r"https?://[^\s)>\]]+", re.I)
 # GitLab pings "@name" after any non-word char — a backtick included (Codex fmt R1 #1)
 MENTION = re.compile(r"(?<!\w)@([A-Za-z0-9_][A-Za-z0-9_.-]*)")
+# HTML character references (decimal / hex / named): GitLab decodes them before finding mentions.
+# defang() turns each into "&amp;…" (shown literally); the rule allows no other reference in prose.
+ENTITY = re.compile(r"&(?!amp;)(?:#[0-9]{1,8}|#[xX][0-9A-Fa-f]{1,8}|[A-Za-z][A-Za-z0-9]{0,31});")
 _FENCE_OPEN = re.compile(r"(`{3,}|~{3,})(.*)")             # column 0 only: never inside a container
 # a line that opens an HTML block: markdown (fences included) inside it is NOT parsed, so text in it
 # could ping while looking "fenced" to fence_spans(); our own marker comments are the only exception
@@ -134,6 +137,8 @@ def content_problems(job: dict, texts: list) -> list:
                 probs.append(f"@mention of someone other than the MR author: @{m}")
         if _HTML_LINE.search(prose):
             probs.append("raw HTML block in the text")
+        if ENTITY.search(prose):
+            probs.append("HTML character reference in the text")
         if _SECRET.search(t):
             probs.append("text looks like it contains a secret/token")
         if _RUN_THIS.search(t):

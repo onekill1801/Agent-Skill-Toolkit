@@ -4,6 +4,7 @@ and agent_runner role routing. GitLab and Orca are faked — no network.
     python -m unittest discover -s tests
 """
 
+import html
 import json
 import os
 import subprocess
@@ -199,12 +200,18 @@ class PostGateTest(unittest.TestCase):
                   "```\n@x\r```\n@all", "<!-- ai-review\n```\n-->\n@all\n```",
                   "[a]: /u \"\n```\n\"\n@all\n```", ">>>\n```\n@x\n>>>\n@all\n```",
                   "[a\\]]: /u \"\n```\n\"\n@all\n```", "[a\nb]: /u \"\n```\n\"\n@all\n```",   # Codex fmt R3 #1
-                  "$$\n```\n$$\n@all\n```"]
+                  "$$\n```\n$$\n@all\n```",
+                  "notify &#64;all and @&#97;ll", "&#x40;all &#X40;here", "&commat;all"]    # Codex fmt R4 #1
         for t in tricks:
             out = rp.defang(t)
             self.assertFalse([r for r in rr.content_problems({"author": "dev"}, [out]) if "mention" in r], (t, out))
-            for m in rr.MENTION.finditer(rr.outside_fences(out)):
-                self.fail(f"live mention left in {out!r}: {m.group(0)}")
+            for m in rr.MENTION.finditer(html.unescape(rr.outside_fences(out))):   # as GitLab's DOM sees it
+                if not m.group(0).startswith("@" + rp.WORD_JOINER):
+                    self.fail(f"live mention left in {out!r}: {m.group(0)}")
+            self.assertNotIn("HTML character reference in the text",
+                             rr.content_problems({"author": "dev"}, [out]), (t, out))
+        self.assertEqual(rp.defang("a &amp; b, x &lt; y"), "a &amp; b, x &amp;lt; y")
+        self.assertIn("HTML character reference in the text", rr.content_problems({}, ["ping &#64;all"]))
 
     def test_validate_new_optional_fields(self):
         self.assertEqual(rp.validate(self.job(), self.review(compliance={"Testing": {"status": "ok"}},

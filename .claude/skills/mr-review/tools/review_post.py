@@ -145,6 +145,9 @@ def defang(text: str, author: str = "") -> str:
     text, keep = text or "", (author or "").lower()
 
     def fix(seg):
+        # entities first: "&#64;all" would decode to a live @all in GitLab's DOM (Codex fmt R4 #1);
+        # "&amp;#64;all" shows the characters literally and decodes to nothing
+        seg = rr.ENTITY.sub(lambda m: "&amp;" + m.group(0)[1:], seg)
         return rr.MENTION.sub(lambda m: m.group(0) if keep and m.group(1).lower() == keep
                               else "@" + WORD_JOINER + m.group(1), seg)
     out, pos = [], 0
