@@ -82,8 +82,9 @@ def fence_spans(text: str) -> list:
         if cur is None:
             m = _FENCE_OPEN.fullmatch(line)
             if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
-                lang = m.group(2).strip().split(" ")[0].lower()
-                if lang not in PLAIN_CODE_LANGS:
+                # the WHOLE info string must be one plain language: GitLab reads extra words as
+                # parameters ("json table" = json:table — Codex fmt R9 #1)
+                if m.group(2).strip().lower() not in PLAIN_CODE_LANGS:
                     return []          # json:table, mermaid, math, suggestion:…: GitLab transforms them
                 cur = (pos, m.group(1)[0], len(m.group(1)))
         elif re.fullmatch(r" {0,3}" + re.escape(cur[1]) + "{%d,}[ \t]*" % cur[2], line):
