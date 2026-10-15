@@ -32,8 +32,41 @@ MARKER_FMT = "<!-- ai-review:{iid}:{head} -->"
 MARKER_RE = re.compile(r"<!-- ai-review:(\d+):([0-9a-f]{7,40}) -->")
 
 _URL = re.compile(r"https?://[^\s)>\]]+", re.I)
-_MENTION = re.compile(r"(?<![\w`])@([A-Za-z0-9_.-]+)")
-_CODE = re.compile(r"```.*?(?:```|\Z)|`[^`\n]*`", re.S)
+# GitLab pings "@name" after any non-word char — a backtick included (Codex fmt R1 #1)
+MENTION = re.compile(r"(?<!\w)@([A-Za-z0-9_][A-Za-z0-9_.-]*)")
+_FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+# a line that opens an HTML block: markdown (fences included) inside it is NOT parsed, so text in it
+# could ping while looking "fenced" to fence_spans(); our own marker comments are the only exception
+_HTML_LINE = re.compile(r"(?m)^ {0,3}<(?!!-- ai-review)[A-Za-z/!?]")
+
+
+def fence_spans(text: str) -> list:
+    """[(start, end)] of top-level fenced code blocks, CommonMark rules: opener at line start with
+    <= 3 spaces, ``` / ~~~ of length >= 3 (a backtick opener's info string has no backtick), closer =
+    same char, length >= opener, nothing else on the line; unclosed runs to the end. Stricter than
+    GitLab (fences inside lists/quotes are NOT recognised) — never looser: a block seen here is code."""
+    spans, pos, cur = [], 0, None
+    for line in (text or "").splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        if cur is None:
+            m = _FENCE_OPEN.match(body)
+            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+                cur = (pos, m.group(1)[0], len(m.group(1)))
+        elif re.fullmatch(r" {0,3}" + re.escape(cur[1]) + "{%d,}[ \t]*" % cur[2], body):
+            spans.append((cur[0], pos + len(line)))
+            cur = None
+        pos += len(line)
+    if cur is not None:
+        spans.append((cur[0], len(text)))
+    return spans
+
+
+def outside_fences(text: str) -> str:
+    out, pos = [], 0
+    for start, end in fence_spans(text):
+        out += [text[pos:start], "\n"]
+        pos = end
+    return "".join(out) + text[pos:]
 _SECRET = re.compile(
     r"glpat-[A-Za-z0-9_-]{10,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}"
     r"|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----"
@@ -85,9 +118,12 @@ def content_problems(job: dict, texts: list) -> list:
             h = (urlparse(u).hostname or "").lower()
             if not host or h != host:
                 probs.append(f"link outside GitLab host: {h or u[:40]}")
-        for m in _MENTION.findall(_CODE.sub(" ", t)):       # GitLab does not ping from code spans/blocks
+        prose = outside_fences(t)                             # GitLab does not ping from fenced code
+        for m in MENTION.findall(prose):
             if m.lower() not in allowed_mentions:
                 probs.append(f"@mention of someone other than the MR author: @{m}")
+        if _HTML_LINE.search(prose):
+            probs.append("raw HTML block in the text")
         if _SECRET.search(t):
             probs.append("text looks like it contains a secret/token")
         if _RUN_THIS.search(t):

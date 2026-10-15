@@ -183,18 +183,35 @@ class PostGateTest(unittest.TestCase):
         self.assertIn("Chi tiết ở comment inline", note)
         self.assertNotIn("secret why", note)
 
-    def test_defang_wraps_bare_mentions_but_not_code_or_author(self):
-        self.assertEqual(rp.defang("thiếu dòng trước @Test và @dev", "dev"), "thiếu dòng trước `@Test` và @dev")
-        self.assertEqual(rp.defang("x `@Override` y"), "x `@Override` y")
-        self.assertEqual(rp.defang("```java\n@Test\nvoid a(){}\n```"), "```java\n@Test\nvoid a(){}\n```")
+    def test_defang_neutralises_mentions_except_fences_and_author(self):
+        wj = rp.WORD_JOINER
+        self.assertEqual(rp.defang("thiếu dòng trước @Test và @dev", "dev"), f"thiếu dòng trước @{wj}Test và @dev")
+        self.assertEqual(rp.defang("x `@Override` y"), f"x `@{wj}Override` y")
+        fenced = "```java\n@Test\nvoid a(){}\n```"
+        self.assertEqual(rp.defang(fenced), fenced)                       # copied code stays byte-exact
         self.assertEqual(rp.defang("mail a@b.com"), "mail a@b.com")
+
+    def test_defang_survives_markdown_tricks(self):                         # Codex fmt R1 #1
+        tricks = ["\\`@all\\`", "text ``` @all", "``@all`", "x`@all", "<code>@all</code>",
+                  "- ```\n  @all\n  ```", "> ```\n> @all\n> ```", "~~~\n@all\n~~", "    ```\n@all\n```"]
+        for t in tricks:
+            out = rp.defang(t)
+            self.assertFalse([r for r in rr.content_problems({"author": "dev"}, [out]) if "mention" in r], (t, out))
+            for m in rr.MENTION.finditer(rr.outside_fences(out)):
+                self.fail(f"live mention left in {out!r}: {m.group(0)}")
 
     def test_validate_new_optional_fields(self):
         self.assertEqual(rp.validate(self.job(), self.review(compliance={"Testing": {"status": "ok"}},
                                                              positives=["x"])), [])
         errs = rp.validate(self.job(), self.review(compliance={"Speed": {"status": "ok"},
-                                                               "Testing": {"status": "good"}}, positives="x"))
-        self.assertEqual(len(errs), 3)
+                                                               "Testing": {"status": "good"},
+                                                               "Security": {"status": []}}, positives="x"))
+        self.assertEqual(len(errs), 4)                                      # no TypeError (Codex fmt R1 #2)
+
+    def test_files_table_escapes_pipes(self):                               # Codex fmt R1 #3
+        with mock.patch.object(rp, "_ws", return_value={"files": [{"path": "src/a|b.py", "added": 1, "removed": 0}]}):
+            note = rp.render_note(self.job(), self.review(findings=[]), set())
+        self.assertIn("| `src/a\\|b.py` | +1 / -0 | 0 |", note)
 
 
 import review_rules as rr  # noqa: E402
@@ -239,10 +256,18 @@ class AutoPostRulesTest(unittest.TestCase):
         self.assertTrue(self.ok(self.job(), note="cc @dev — https://gitlab.example.vn/grp/proj/-/merge_requests/5")
                         ["auto_post"])
 
-    def test_mentions_inside_code_do_not_block(self):
-        self.assertTrue(self.ok(self.job(), note="thiếu dòng trống trước `@Test`\n```java\n@Override\n```")
-                        ["auto_post"])
-        self.assertFalse(self.ok(self.job(), note="`code` then @someone")["auto_post"])
+    def test_mentions_inside_fences_do_not_block(self):
+        self.assertTrue(self.ok(self.job(), note="ok\n```java\n@Override\n```")["auto_post"])
+        for bad in ("`@Test` in a code span still pings? GitLab: no, but the rule is strict",
+                    "`code` then @someone", "x`@all", "<div>\n\n```\n@all\n```\n</div>"):
+            self.assertFalse(self.ok(self.job(), note=bad)["auto_post"], bad)
+
+    def test_fence_spans_commonmark(self):
+        t = "a\n```java\n@x\n```\nb\n~~~~\n@y\n~~~\n~~~~\n"
+        self.assertEqual([t[s:e] for s, e in rr.fence_spans(t)], ["```java\n@x\n```\n", "~~~~\n@y\n~~~\n~~~~\n"])
+        self.assertEqual(rr.fence_spans("``` a`b\n@x\n```"), [(11, 14)])    # backtick in info: not an opener
+        self.assertEqual(rr.fence_spans("    ```\n@x"), [])                  # 4 spaces: not a fence
+        self.assertEqual(rr.fence_spans("```\n@x"), [(0, 6)])               # unclosed: to the end
 
     def test_scope_mode_and_source(self):
         self.assertFalse(self.ok(self.job(project_path="other/repo", project_id="9"))["auto_post"])

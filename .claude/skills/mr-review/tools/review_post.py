@@ -106,7 +106,8 @@ def validate(job: dict, review: dict) -> list:
             for cat, c in comp.items():
                 if cat not in COMPLIANCE:
                     errs.append(f"compliance.{cat}: category must be one of {COMPLIANCE}")
-                elif not isinstance(c, dict) or c.get("status") not in STATUS_ICON:
+                elif not isinstance(c, dict) or not isinstance(c.get("status"), str) \
+                        or c["status"] not in STATUS_ICON:
                     errs.append(f"compliance.{cat}.status must be one of {tuple(STATUS_ICON)}")
                 elif c.get("note") is not None and not isinstance(c.get("note"), str):
                     errs.append(f"compliance.{cat}.note must be a string")
@@ -133,22 +134,24 @@ SECTIONS = (("🔴 Critical Issues (must fix before merge)", ("blocker",), "No c
 COMPLIANCE = ("Correctness", "Code Quality", "Architecture", "Security", "Performance", "Testing")
 STATUS_ICON = {"ok": "✅", "warn": "⚠️", "fail": "❌"}
 
-_CODE = re.compile(r"```.*?(?:```|\Z)|`[^`\n]*`", re.S)
-_AT = re.compile(r"(?<![\w`])@([A-Za-z0-9_.-]+)")
+WORD_JOINER = "⁠"     # invisible; GitLab needs a name char right after "@" to make a mention
 
 
 def defang(text: str, author: str = "") -> str:
-    """`@Test`, `@Override`… outside code would ping a GitLab user of that name: wrap every @word
-    that is not the MR author in backticks (code spans/fences are left untouched)."""
-    keep = (author or "").lower()
+    """`@Test`, `@Override`, `@all`… would ping a GitLab user/group of that name. Every @word that is
+    not the MR author gets an invisible WORD JOINER after the "@" — independent of markdown parsing
+    (escaped/unbalanced backticks can not undo it: Codex fmt R1 #1). Only fenced code blocks, where
+    GitLab never pings, are left byte-exact so suggested code still compiles when copied."""
+    text, keep = text or "", (author or "").lower()
 
     def fix(seg):
-        return _AT.sub(lambda m: m.group(0) if keep and m.group(1).lower() == keep else f"`{m.group(0)}`", seg)
+        return rr.MENTION.sub(lambda m: m.group(0) if keep and m.group(1).lower() == keep
+                              else "@" + WORD_JOINER + m.group(1), seg)
     out, pos = [], 0
-    for m in _CODE.finditer(text or ""):
-        out += [fix(text[pos:m.start()]), m.group(0)]
-        pos = m.end()
-    return "".join(out) + fix((text or "")[pos:])
+    for start, end in rr.fence_spans(text):
+        out += [fix(text[pos:start]), text[start:end]]
+        pos = end
+    return "".join(out) + fix(text[pos:])
 
 
 def _loc(f: dict) -> str:
@@ -226,7 +229,8 @@ def render_note(job: dict, review: dict, inline_ok: set, approver: str = "") -> 
         for f in files:
             add, rem = f.get("added"), f.get("removed")
             size = "binary" if add is None else f"+{add} / -{rem}"
-            lines.append(f"| `{f.get('path', '?')}` | {size} | {per.get(f.get('path'), 0)} |")
+            path = str(f.get("path", "?")).replace("|", "\\|").replace("`", "'").replace("\n", " ")
+            lines.append(f"| `{path}` | {size} | {per.get(f.get('path'), 0)} |")
     tests = review.get("tests") or []
     if tests:
         lines += ["", "**Kiểm thử:** " + " · ".join(f"`{t.get('cmd', '?')}` → {t.get('result', '?')}" for t in tests)]
