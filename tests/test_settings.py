@@ -148,6 +148,15 @@ class CatalogTest(Base):
         self.assertEqual((it["value"], it["set"]), ("shadow", True))
         self.assertNotIn("GITLAB_PRIVATE_TOKEN", [i["key"] for i in snap["items"]])
 
+    def test_effective_group_auto_approve_is_the_union(self):                 # Codex settings R3 #1
+        with open(self.env, "a", encoding="utf-8") as f:
+            f.write("FCHAT_WATCH_AUTO_APPROVE=read\nTELEGRAM_AUTO_APPROVE=read,bash\n")
+        w = [x for x in S.snapshot()["warnings"] if "group TChat" in x]
+        self.assertEqual(len(w), 1)
+        self.assertIn("bash, read", w[0])
+        tg = next(i for i in S.snapshot()["items"] if i["key"] == "FCHAT_WATCH_AUTO_APPROVE")
+        self.assertIn("CỘNG THÊM", tg["help"])
+
     def test_apply_env_and_store_with_audit_and_restart_hint(self):
         out = S.apply({"REVIEW_AUTO_POST": "auto", "capacity": "7"}, by="test",
                       expected={"REVIEW_AUTO_POST": "shadow"})

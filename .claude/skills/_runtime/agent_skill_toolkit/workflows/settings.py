@@ -70,8 +70,9 @@ CATALOG = [
     _s("FCHAT_WATCH_FREEFORM", "TChat", "Nhận cả việc khác review/build",
        "1 = tin khớp từ khoá nhưng không phải review/build vẫn giao cho agent", "bool", "0",
        restart=(GROUP_WATCH,), sensitive=True),
-    _s("FCHAT_WATCH_AUTO_APPROVE", "TChat", "Lượt group được tự duyệt",
-       "read = chỉ đọc (an toàn) · file = sửa file · bash = lệnh shell ghi; còn lại hỏi nút Duyệt trên Telegram",
+    _s("FCHAT_WATCH_AUTO_APPROVE", "TChat", "Lượt group tự duyệt THÊM",
+       "CỘNG THÊM vào 'Bot CODE tự duyệt nhóm' (không thay thế): lượt group được tự duyệt = hợp của hai cài đặt. "
+       "read = chỉ đọc · file = sửa file · bash = lệnh shell ghi; còn lại hỏi nút Duyệt trên Telegram",
        "multi", "read", choices=("read", "file", "bash"), restart=(GROUP_WATCH,), sensitive=True),
     _s("FCHAT_WATCH_TIMEOUT", "TChat", "Thời gian tối đa một lượt agent (giây)", "", "int", "1800",
        lo=60, hi=7200, restart=(GROUP_WATCH,)),
@@ -80,7 +81,8 @@ CATALOG = [
        "không bấm trong khoảng này thì yêu cầu tự bị từ chối", "int", "300", lo=30, hi=86400,
        restart=(COORD, GROUP_WATCH, TG_CODE)),
     _s("TELEGRAM_AUTO_APPROVE", "Telegram", "Bot CODE tự duyệt nhóm",
-       "read · file · bash — nhóm thao tác bot CODE chạy không hỏi ('danger' luôn hỏi)", "multi", "read,file",
+       "read · file · bash — nhóm thao tác bot CODE chạy không hỏi ('danger' luôn hỏi); cũng là MỨC SÀN "
+       "của lượt group TChat", "multi", "read,file",
        choices=("read", "file", "bash"), restart=(TG_CODE,), sensitive=True),
     # ---------------------------------------------------------------- coordinator (store, live)
     _s("capacity", "Điều phối", "Số việc chạy song song",
@@ -195,6 +197,16 @@ def warnings(vals: dict) -> list:
         out.append(f"Có {len(etask)} khoá ETASK_* nhưng code chỉ đọc ATASK_* — aTask chưa chạy được: đổi tiền tố ETASK_ → ATASK_.")
     if vals.get("REVIEW_AUTO_POST") == "auto" and not vals.get("REVIEW_AUTO_POST_PROJECTS"):
         out.append("REVIEW_AUTO_POST=auto nhưng chưa có project nào được tự đăng (REVIEW_AUTO_POST_PROJECTS trống).")
+    # what a TChat group turn may really do without asking: the two settings are UNIONED by
+    # telegram_approve (the group one only widens) — Codex settings R3 #1
+    def cats(key, default):
+        raw = vals.get(key)
+        raw = default if not raw else raw
+        return {c.strip().lower() for c in raw.split(",") if c.strip()}
+    group = cats("FCHAT_WATCH_AUTO_APPROVE", "read") | cats("TELEGRAM_AUTO_APPROVE", "read,file")
+    if group - {"read"}:
+        out.append("Lượt agent từ group TChat (nhiều người gõ) đang được tự duyệt: "
+                   + ", ".join(sorted(group)) + " — hợp của 2 cài đặt tự duyệt; muốn chỉ đọc thì để cả hai là read.")
     for k in ("SSL_VERIFY", "FCHAT_VERIFY_SSL", "ATASK_VERIFY_SSL", "TELEGRAM_VERIFY_SSL"):
         if (vals.get(k) or "").lower() == "false":
             out.append(f"{k}=false: kết nối không kiểm chứng chỉ TLS.")
