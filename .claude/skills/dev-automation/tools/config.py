@@ -91,6 +91,17 @@ def gitlab_base_url() -> str:
     return f"{url}/api/v4"
 
 
+def claude_usage_url() -> str:
+    """Orca-compatible OAuth usage endpoint; tokens stay in managed auth files."""
+    return get("CLAUDE_USAGE_URL", "https://api.anthropic.com/api/oauth/usage")
+
+
+def claude_oauth_config() -> tuple[str, str]:
+    """Public Claude Code OAuth configuration, matching Orca's refresh client."""
+    return (get("CLAUDE_OAUTH_TOKEN_URL", "https://platform.claude.com/v1/oauth/token"),
+            get("CLAUDE_OAUTH_CLIENT_ID", "9d1c250a-e61b-44d9-88ed-5944d1962f5e"))
+
+
 def validate() -> list[str]:
     """Return a list of missing required config keys."""
     required = [

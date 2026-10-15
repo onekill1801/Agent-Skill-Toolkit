@@ -1,0 +1,47 @@
+{
+  "name": "create-user end-to-end",
+  "_doc": "Mẫu kịch bản flow_check: API tạo user -> kiểm DB -> kiểm message Kafka -> kiểm cache Redis. Sửa url/topic/sql cho khớp service thật. Chạy: python flow_check.py --file <đường dẫn file này>",
+  "vars": {
+    "name": "Alice"
+  },
+  "steps": [
+    {
+      "type": "api",
+      "name": "POST /users",
+      "method": "POST",
+      "url": "/api/users",
+      "body": { "name": "{name}", "email": "{name}@example.com" },
+      "expect": { "status": 201, "json": { "$.status": "ACTIVE" } },
+      "saveFrom": { "uid": "$.id" }
+    },
+    {
+      "type": "api",
+      "name": "GET /users/{uid} trả ra đúng",
+      "method": "GET",
+      "url": "/api/users/{uid}",
+      "expect": { "status": 200, "json": { "$.name": "{name}", "$.id": "{uid}" } }
+    },
+    {
+      "type": "db",
+      "name": "row user trong DB ở trạng thái ACTIVE",
+      "engine": "postgres",
+      "sql": "select status from users where id = {uid}",
+      "expect": { "rows": 1, "value": "ACTIVE" }
+    },
+    {
+      "type": "kafka",
+      "name": "event user.created phát ra",
+      "op": "consume",
+      "topic": "user.created",
+      "timeout": 15,
+      "expect": { "contains": "\"uid\":{uid}", "min_count": 1 }
+    },
+    {
+      "type": "redis",
+      "name": "cache user:{uid} được set",
+      "op": "get",
+      "key": "user:{uid}",
+      "expect": { "exists": true }
+    }
+  ]
+}
