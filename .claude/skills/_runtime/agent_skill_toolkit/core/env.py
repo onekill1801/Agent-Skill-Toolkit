@@ -93,6 +93,8 @@ class StaleValue(RuntimeError):
 
 _BAD_VALUE = re.compile(r"[\x00-\x1f\x7f\x85  #\"']")
 MAX_VALUE = 500
+# every line boundary str.splitlines() knows except "\n" and "\r\n" (a lone "\r" included)
+_ODD_BREAK = re.compile(r"\r(?!\n)|[\x0b\x0c\x1c\x1d\x1e\x85  ]")
 
 
 def check_value(value) -> str:
@@ -140,6 +142,10 @@ def set_values(path: str, updates: dict, expected: dict = None) -> dict:
     with locks.file_lock(paths.state_path("locks", "env-file.lock"), timeout=10):
         with open(path, encoding="utf-8", newline="") as f:
             text = f.read()
+        if _ODD_BREAK.search(text):
+            # str.splitlines() (this parser) and file iteration (the skills' loaders) would cut such a file
+            # into DIFFERENT lines: no edit can be verified for every reader (Codex settings R2 #1)
+            raise ValueError(".env contains an unusual line separator (lone CR, U+2028, form feed…) — fix it by hand")
         before = parse(text)
         stale = [k for k, v in (expected or {}).items() if before.get(k, "") != v]
         if stale:

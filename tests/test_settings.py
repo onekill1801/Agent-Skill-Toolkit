@@ -101,6 +101,21 @@ class EnvWriteTest(Base):
         self.assertEqual(E.parse(self.text())["REVIEW_AUTO_POST"], "off")
         self.assertEqual([f for f in os.listdir(self.tmp) if ".tmp-" in f], [])
 
+    def test_file_with_odd_line_separators_is_not_edited(self):              # Codex settings R2 #1
+        for sep in (" ", "\r", "\x0c", "\x85"):
+            raw = f"A=one{sep}REVIEW_AUTO_POST=shadow\n"
+            with open(self.env, "w", encoding="utf-8", newline="") as f:
+                f.write(raw)
+            with self.assertRaises(ValueError, msg=repr(sep)):
+                E.set_values(self.env, {"REVIEW_AUTO_POST": "auto"})
+            self.assertEqual(self.text(), raw)
+
+    def test_keyword_phrases_stay_phrases(self):                              # Codex settings R2 #2
+        sys.path.insert(0, str(ROOT / ".claude" / "skills" / "tchat-automation" / "tools"))
+        import group_watch
+        with mock.patch.object(group_watch.rccfg, "get", return_value="lên dev, merge request,review"):
+            self.assertEqual(group_watch._keywords(), ["lên dev", "merge request", "review"])
+
     def test_file_without_trailing_newline(self):
         with open(self.env, "w", encoding="utf-8", newline="") as f:
             f.write("A=1")

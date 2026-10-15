@@ -123,7 +123,10 @@ def _now():
 
 
 def _keywords():
-    kws = rccfg.get_list("FCHAT_WATCH_KEYWORDS") if rccfg.get("FCHAT_WATCH_KEYWORDS") else None
+    # commas only: a keyword may be a phrase ("lên dev", "merge request") — splitting on spaces too
+    # would turn it into the separate triggers "lên" and "dev" (Codex settings R2 #2)
+    raw = rccfg.get("FCHAT_WATCH_KEYWORDS")
+    kws = [k.strip() for k in raw.split(",") if k.strip()] if raw else None
     return [k.lower() for k in (kws or DEFAULT_KEYWORDS)]
 
 
