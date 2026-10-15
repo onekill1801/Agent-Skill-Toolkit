@@ -313,6 +313,16 @@ class AutoPostRulesTest(unittest.TestCase):
         for unsafe in ("<!-- ai-review\n```\n@x\n```", "a\r\n```\n@x\n```", "[r]: /x\n```\n@x\n```"):
             self.assertEqual(rr.fence_spans(unsafe), [], unsafe)
 
+    def test_payload_hash_ignores_file_metadata_and_cells_have_no_cr(self):   # Codex fmt R14 #1, #2
+        review = self._review(compliance={"Correctness": {"status": "ok", "note": "first\rsecond\r\nthird"}})
+        with mock.patch.object(rp, "_ws", return_value={}), \
+             mock.patch("os.path.getmtime", side_effect=[0, 86400 * 3] * 4):
+            self.assertEqual(rp.payload_hash(self.job(), review), rp.payload_hash(self.job(), review))
+            note = rp.render_note(self.job(), review, set())
+        self.assertNotIn("**Date:**", note)
+        self.assertIn("| Correctness | ✅ | first second third |", note)
+        self.assertEqual(len(rp.validate(self.job(), self._review(date="15/10/2026"))), 1)
+
     def test_code_only_suggestion_starts_a_real_fence(self):                  # Codex fmt R13 #1
         f = {"severity": "minor", "title": "t", "file": "a.py", "line": 3,
              "suggestion": "```java\n@Override\nvoid f() {}\n```"}

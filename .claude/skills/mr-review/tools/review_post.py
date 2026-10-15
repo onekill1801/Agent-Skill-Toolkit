@@ -33,6 +33,7 @@ review.json (default: <worktree>.review.json):
   "compliance": {"Correctness": {"status": "ok|warn|fail", "note": "..."}, ...},   # optional:
                  # Correctness · Code Quality · Architecture · Security · Performance · Testing
   "positives": ["điểm làm tốt", ...],                                              # optional
+  "date": "YYYY-MM-DD",                       # optional; the note's Date line (never file metadata)
   "reviewed_commits": "all | new_only",
   "model": "provider:model"
 }
@@ -47,7 +48,6 @@ import os
 import re
 import subprocess
 import sys
-import time
 
 import review_common as rc
 import review_rules as rr
@@ -57,6 +57,7 @@ SEVERITIES = ("blocker", "major", "minor", "nit")
 SEV_ICON = {"blocker": "🔴", "major": "🟡", "minor": "🟢", "nit": "⚪"}   # same as code_review_prompt.md
 VERDICT_ICON = {"APPROVE": "🟢 APPROVE", "REQUEST_CHANGES": "🔴 REQUEST_CHANGES", "COMMENT": "🟡 COMMENT"}
 MAX_INLINE = 25
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 # --------------------------------------------------------------------------- review.json
@@ -114,8 +115,8 @@ def validate(job: dict, review: dict) -> list:
     pos = review.get("positives")
     if pos is not None and not (isinstance(pos, list) and all(isinstance(p, str) for p in pos)):
         errs.append("positives must be a list of strings")
-    if review.get("date") is not None and not isinstance(review.get("date"), str):
-        errs.append("date must be a string (YYYY-MM-DD)")
+    if review.get("date") is not None and not (isinstance(review["date"], str) and _DATE.fullmatch(review["date"])):
+        errs.append("date must be a string YYYY-MM-DD")
     if review.get("verdict") == "APPROVE" and any(isinstance(f, dict) and f.get("severity") == "blocker"
                                                  for f in findings):
         errs.append("verdict APPROVE with a blocker finding is contradictory")
@@ -170,14 +171,16 @@ def _loc(f: dict) -> str:
     return f"[`{f['file']}`" + (f":{f['line']}" if f.get("line") else "") + "] "
 
 
-def _review_date(job: dict, review: dict) -> str:
-    """Stable for one review file (the approval hash covers the rendered text)."""
-    if isinstance(review.get("date"), str) and review["date"]:
-        return review["date"]
-    try:
-        return time.strftime("%Y-%m-%d", time.localtime(os.path.getmtime(review_path(job))))
-    except OSError:
-        return ""
+def _review_date(review: dict) -> str:
+    """From review.json only — never file metadata: the approval hash covers the rendered text, and
+    touching an unchanged review must not void an approval (Codex fmt R14 #1). No date -> no line."""
+    d = review.get("date")
+    return d if isinstance(d, str) and _DATE.fullmatch(d) else ""
+
+
+def _cell(text) -> str:
+    """One markdown table cell: no line break of any kind (CR is a line ending too — R14 #2), no pipe."""
+    return re.sub(r"\r\n|\r|\n", " ", str(text or "")).replace("|", "\\|")
 
 
 def render_note(job: dict, review: dict, inline_ok: set, approver: str = "") -> str:
@@ -194,7 +197,7 @@ def render_note(job: dict, review: dict, inline_ok: set, approver: str = "") -> 
     lines += [rr.marker(job), "## Code Review Summary", "",
              f"**MR:** !{job['iid']} - {job.get('title') or ''}".rstrip(" -"),
              "**Reviewer:** AI Agent"]
-    date = _review_date(job, review)
+    date = _review_date(review)
     if date:
         lines.append(f"**Date:** {date}")
     lines += [f"**Commit:** {head}{branches}", f"**Overall Verdict:** {VERDICT_ICON[review['verdict']]}",
@@ -221,8 +224,7 @@ def render_note(job: dict, review: dict, inline_ok: set, approver: str = "") -> 
                   "|----------|--------|-------|"]
         for cat in COMPLIANCE:
             c = comp.get(cat) or {}
-            note = str(c.get("note") or "").replace("|", "\\|").replace("\n", " ")
-            lines.append(f"| {cat} | {STATUS_ICON.get(c.get('status'), '—')} | {note} |")
+            lines.append(f"| {cat} | {STATUS_ICON.get(c.get('status'), '—')} | {_cell(c.get('note'))} |")
     pos = [p for p in (review.get("positives") or []) if isinstance(p, str) and p.strip()]
     if pos:
         lines += _section() + ["### Positive Observations", ""] + [f"- {p.strip()}" for p in pos]
@@ -238,7 +240,7 @@ def render_note(job: dict, review: dict, inline_ok: set, approver: str = "") -> 
         for f in files:
             add, rem = f.get("added"), f.get("removed")
             size = "binary" if add is None else f"+{add} / -{rem}"
-            path = str(f.get("path", "?")).replace("|", "\\|").replace("`", "'").replace("\n", " ")
+            path = _cell(f.get("path", "?")).replace("`", "'")
             lines.append(f"| `{path}` | {size} | {per.get(f.get('path'), 0)} |")
     tests = review.get("tests") or []
     if tests:

@@ -78,6 +78,7 @@ Review against:
   "compliance": {"Correctness": {"status": "ok|warn|fail", "note": "ngắn"}, "Code Quality": {...},
                  "Architecture": {...}, "Security": {...}, "Performance": {...}, "Testing": {...}},
   "positives": ["điểm làm tốt, cụ thể"],
+  "date": "YYYY-MM-DD (hôm nay)",
   "reviewed_commits": "new_only",
   "model": "<provider:model>"
 }
