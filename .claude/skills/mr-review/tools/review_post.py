@@ -147,7 +147,7 @@ def defang(text: str) -> str:
     def fix(seg):
         # entities first: "&#64;all" would decode to a live @all in GitLab's DOM (Codex fmt R4 #1);
         # "&amp;#64;all" shows the characters literally and decodes to nothing
-        seg = rr.ENTITY.sub(lambda m: "&amp;" + m.group(0)[1:], seg)
+        seg = rr.ENTITY.sub("&amp;", seg)
         seg = rr.PCT_AT.sub("%2540", seg)                  # [x](%40victim) is a mention (R7 #1)
         return rr.MENTION.sub("@" + WORD_JOINER, seg)
     out, pos = [], 0

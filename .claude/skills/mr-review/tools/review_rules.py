@@ -38,9 +38,13 @@ _URL = re.compile(r"https?://[^\s)>\]]+", re.I)
 # (who is notified about comments on their MR anyway). Emails get neutralised too.
 WORD_JOINER = "⁠"
 MENTION = re.compile("@(?!" + WORD_JOINER + ")")
-# HTML character references (decimal / hex / named): GitLab decodes them before finding mentions.
-# defang() turns each into "&amp;…" (shown literally); the rule allows no other reference in prose.
-ENTITY = re.compile(r"&(?!amp;)(?:#[0-9]{1,8}|#[xX][0-9A-Fa-f]{1,8}|[A-Za-z][A-Za-z0-9]{0,31});")
+# Anything that MAY be an HTML character reference — "&" before "#" or a letter, with or without ";",
+# any length (HTML attribute parsing accepts "&#64victim", "&#0000000064;": Codex fmt R10 #1). GitLab
+# decodes them before finding mentions; defang() turns each "&" into "&amp;" (shown literally).
+ENTITY = re.compile(r"&(?!amp;)(?=[#A-Za-z])")
+# inline HTML carrying attributes (href/src… are processed as references). `List<String>`, `<T extends X>`
+# have no "attr=" and stay allowed.
+_HTML_ATTR = re.compile(r"<[A-Za-z][A-Za-z0-9-]*\s[^<>]*=")
 # a percent-encoded "@" in a link destination: GitLab decodes it before matching references
 # ([x](%40victim) pings victim — Codex fmt R7 #1). defang() makes it %2540 (decodes to a literal %40).
 PCT_AT = re.compile(r"%40")
@@ -159,6 +163,8 @@ def content_problems(job: dict, texts: list) -> list:
             probs.append("raw HTML block in the text")
         if ENTITY.search(prose):
             probs.append("HTML character reference in the text")
+        if _HTML_ATTR.search(prose):
+            probs.append("inline HTML with attributes in the text")
         if PCT_AT.search(prose):
             probs.append("percent-encoded @ in the text")
         if _SECRET.search(t):

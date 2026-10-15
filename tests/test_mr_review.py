@@ -211,7 +211,8 @@ class PostGateTest(unittest.TestCase):
                   '```json:table\n{"markdown": true, "items": [{"reviewer": "@all"}]}\n```',  # R8 #1
                   "```mermaid\nA-->B: @all\n```", "```suggestion:-0+0\n@all\n```", "```math\n@all\n```",
                   "```java\n@Override\n```\n```json:table\n@x\n```",
-                  '```json table\n{"markdown": true, "items": [{"reviewer": "@all"}]}\n```']   # R9 #1
+                  '```json table\n{"markdown": true, "items": [{"reviewer": "@all"}]}\n```',   # R9 #1
+                  'see <a href="&#64victim">review</a>', "x &#0000000064;victim", "&#x40victim"]   # R10 #1
         for t in tricks:
             out = rp.defang(t)
             self.assertFalse([r for r in rr.content_problems({"author": "dev"}, [out]) if "mention" in r], (t, out))
@@ -223,7 +224,10 @@ class PostGateTest(unittest.TestCase):
             self.assertNotIn("HTML character reference in the text", probs, (t, out))
             self.assertNotIn("percent-encoded @ in the text", probs, (t, out))
         self.assertIn("percent-encoded @ in the text", rr.content_problems({}, ["[x](%40v)"]))
-        self.assertEqual(rp.defang("a &amp; b, x &lt; y"), "a &amp; b, x &amp;lt; y")
+        self.assertEqual(rp.defang("a &amp; b, x &lt; y, R&D, a & b"), "a &amp; b, x &amp;lt; y, R&amp;D, a & b")
+        self.assertIn("inline HTML with attributes in the text",
+                      rr.content_problems({}, ['see <a href="x">r</a>']))
+        self.assertEqual([p for p in rr.content_problems({}, ["`List<String>` và `<T extends Foo>`"]) if "HTML" in p], [])
         self.assertIn("HTML character reference in the text", rr.content_problems({}, ["ping &#64;all"]))
 
     def test_validate_new_optional_fields(self):
