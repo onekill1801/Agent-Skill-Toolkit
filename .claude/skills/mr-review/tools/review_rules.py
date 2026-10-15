@@ -41,9 +41,10 @@ _FENCE_OPEN = re.compile(r"(`{3,}|~{3,})(.*)")             # column 0 only: neve
 _MARKER_OK = r"(?!!-- ai-review[^\n]*-->[ \t]*$)"
 _HTML_LINE = re.compile(r"(?m)^ {0,3}<" + _MARKER_OK + r"[A-Za-z/!?]")
 # constructs that can make a column-0 ``` line NOT a fence (or end one early) in GitLab markdown:
-# a bare CR (a line ending there, not here), GitLab's >>> multi-line quote, HTML blocks, link
-# reference definitions (a multi-line title swallows lines). Any of them -> no fence is trusted.
-_FENCE_UNSAFE = re.compile(r"(?m)\r|^ {0,3}(?:>>>|<" + _MARKER_OK + r"[A-Za-z/!?]|\[[^\]\n]*\]:)")
+# a bare CR (a line ending there, not here), GitLab's >>> multi-line quote, $$ math blocks, HTML
+# blocks, and ANY line starting with "[" (link reference definitions / footnotes: escaped "]" and
+# multi-line labels/titles swallow lines — Codex fmt R3 #1). Any of them -> no fence is trusted.
+_FENCE_UNSAFE = re.compile(r"(?m)\r|^ {0,3}(?:>>>|\$\$|\[|<" + _MARKER_OK + r"[A-Za-z/!?])")
 
 
 def fence_spans(text: str) -> list:

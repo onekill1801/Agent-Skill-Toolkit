@@ -197,7 +197,9 @@ class PostGateTest(unittest.TestCase):
                   # Codex fmt R2 #1 + the same family: constructs that end/negate a fence in GitLab
                   "hello\u000b```\n@all\n```", "- item\n  ```\n  code\noutside\n@all\n```",
                   "```\n@x\r```\n@all", "<!-- ai-review\n```\n-->\n@all\n```",
-                  "[a]: /u \"\n```\n\"\n@all\n```", ">>>\n```\n@x\n>>>\n@all\n```"]
+                  "[a]: /u \"\n```\n\"\n@all\n```", ">>>\n```\n@x\n>>>\n@all\n```",
+                  "[a\\]]: /u \"\n```\n\"\n@all\n```", "[a\nb]: /u \"\n```\n\"\n@all\n```",   # Codex fmt R3 #1
+                  "$$\n```\n$$\n@all\n```"]
         for t in tricks:
             out = rp.defang(t)
             self.assertFalse([r for r in rr.content_problems({"author": "dev"}, [out]) if "mention" in r], (t, out))
