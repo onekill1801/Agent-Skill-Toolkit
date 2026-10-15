@@ -7,6 +7,7 @@ and agent_runner role routing. GitLab and Orca are faked — no network.
 import html
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -190,7 +191,7 @@ class PostGateTest(unittest.TestCase):
         self.assertEqual(rp.defang("x `@Override` y"), f"x `@{wj}Override` y")
         fenced = "```java\n@Test\nvoid a(){}\n```"
         self.assertEqual(rp.defang(fenced), fenced)                       # copied code stays byte-exact
-        self.assertEqual(rp.defang("mail a@b.com"), "mail a@b.com")
+        self.assertEqual(rp.defang("mail a@b.com"), f"mail a@{wj}b.com")   # neutralised too: x_@all is a ping
 
     def test_defang_survives_markdown_tricks(self):                         # Codex fmt R1 #1
         tricks = ["\\`@all\\`", "text ``` @all", "``@all`", "x`@all", "<code>@all</code>",
@@ -201,13 +202,15 @@ class PostGateTest(unittest.TestCase):
                   "[a]: /u \"\n```\n\"\n@all\n```", ">>>\n```\n@x\n>>>\n@all\n```",
                   "[a\\]]: /u \"\n```\n\"\n@all\n```", "[a\nb]: /u \"\n```\n\"\n@all\n```",   # Codex fmt R3 #1
                   "$$\n```\n$$\n@all\n```",
-                  "notify &#64;all and @&#97;ll", "&#x40;all &#X40;here", "&commat;all"]    # Codex fmt R4 #1
+                  "notify &#64;all and @&#97;ll", "&#x40;all &#X40;here", "&commat;all",    # Codex fmt R4 #1
+                  "_@all_", "__@all__", "*@all*", "x_@all", "~~@all~~", "\\@all", "@al\\_l"]  # R5 #1
         for t in tricks:
             out = rp.defang(t)
             self.assertFalse([r for r in rr.content_problems({"author": "dev"}, [out]) if "mention" in r], (t, out))
-            for m in rr.MENTION.finditer(html.unescape(rr.outside_fences(out))):   # as GitLab's DOM sees it
-                if not m.group(0).startswith("@" + rp.WORD_JOINER):
-                    self.fail(f"live mention left in {out!r}: {m.group(0)}")
+            # crude model of GitLab's DOM text: entities decoded once, markdown punctuation stripped
+            dom = re.sub(r"[*_~`\\]", "", html.unescape(rr.outside_fences(out)))
+            for m in re.finditer(r"@(?=[A-Za-z0-9_])", dom):
+                self.fail(f"live mention left in {out!r}: …{dom[m.start():m.start() + 8]}")
             self.assertNotIn("HTML character reference in the text",
                              rr.content_problems({"author": "dev"}, [out]), (t, out))
         self.assertEqual(rp.defang("a &amp; b, x &lt; y"), "a &amp; b, x &amp;lt; y")

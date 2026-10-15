@@ -32,8 +32,9 @@ MARKER_FMT = "<!-- ai-review:{iid}:{head} -->"
 MARKER_RE = re.compile(r"<!-- ai-review:(\d+):([0-9a-f]{7,40}) -->")
 
 _URL = re.compile(r"https?://[^\s)>\]]+", re.I)
-# GitLab pings "@name" after any non-word char — a backtick included (Codex fmt R1 #1)
-MENTION = re.compile(r"(?<!\w)@([A-Za-z0-9_][A-Za-z0-9_.-]*)")
+# EVERY "@name", whatever precedes it: markdown can strip the preceding char before GitLab looks
+# (`_@all_` -> <em>@all</em>, "\@all", a backtick: Codex fmt R1 #1, R5 #1). Emails get neutralised too.
+MENTION = re.compile(r"@([A-Za-z0-9_][A-Za-z0-9_.-]*)")
 # HTML character references (decimal / hex / named): GitLab decodes them before finding mentions.
 # defang() turns each into "&amp;…" (shown literally); the rule allows no other reference in prose.
 ENTITY = re.compile(r"&(?!amp;)(?:#[0-9]{1,8}|#[xX][0-9A-Fa-f]{1,8}|[A-Za-z][A-Za-z0-9]{0,31});")
