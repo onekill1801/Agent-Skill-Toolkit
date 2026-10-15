@@ -58,7 +58,10 @@ _HTML_LINE = re.compile(r"(?m)^ {0,3}<" + _MARKER_OK + r"[A-Za-z/!?]")
 # a bare CR (a line ending there, not here), GitLab's >>> multi-line quote, $$ math blocks, HTML
 # blocks, and ANY line starting with "[" (link reference definitions / footnotes: escaped "]" and
 # multi-line labels/titles swallow lines — Codex fmt R3 #1). Any of them -> no fence is trusted.
-_FENCE_UNSAFE = re.compile(r"(?m)\r|^ {0,3}(?:>>>|\$\$|\[|<" + _MARKER_OK + r"[A-Za-z/!?])")
+_FENCE_UNSAFE = re.compile(r"(?m)\r|^ {0,3}(?:>>>|\$\$|\[|<" + _MARKER_OK + r"[A-Za-z/!?])"
+                           # a fence run anywhere but column 0 (indented / list / quote openers that we
+                           # do not track would pair differently in GitLab — Codex fmt R11 #1)
+                           r"|[^\n`]```|[^\n~]~~~")
 
 
 # fences GitLab only highlights. Anything else (json:table renders its cells as markdown BEFORE the

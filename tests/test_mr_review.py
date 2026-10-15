@@ -212,7 +212,9 @@ class PostGateTest(unittest.TestCase):
                   "```mermaid\nA-->B: @all\n```", "```suggestion:-0+0\n@all\n```", "```math\n@all\n```",
                   "```java\n@Override\n```\n```json:table\n@x\n```",
                   '```json table\n{"markdown": true, "items": [{"reviewer": "@all"}]}\n```',   # R9 #1
-                  'see <a href="&#64victim">review</a>', "x &#0000000064;victim", "&#x40victim"]   # R10 #1
+                  'see <a href="&#64victim">review</a>', "x &#0000000064;victim", "&#x40victim",   # R10 #1
+                  "intro\n  ```java\ncode\n```\n@all\n```", "- a\n\n    ```java\n    c\n```\n@all\n```",
+                  "> ```\n```\n@all\n```", " ~~~\n~~~\n@all\n~~~"]                                # R11 #1
         for t in tricks:
             out = rp.defang(t)
             self.assertFalse([r for r in rr.content_problems({"author": "dev"}, [out]) if "mention" in r], (t, out))
