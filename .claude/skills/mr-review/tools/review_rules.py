@@ -34,28 +34,37 @@ MARKER_RE = re.compile(r"<!-- ai-review:(\d+):([0-9a-f]{7,40}) -->")
 _URL = re.compile(r"https?://[^\s)>\]]+", re.I)
 # GitLab pings "@name" after any non-word char — a backtick included (Codex fmt R1 #1)
 MENTION = re.compile(r"(?<!\w)@([A-Za-z0-9_][A-Za-z0-9_.-]*)")
-_FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+_FENCE_OPEN = re.compile(r"(`{3,}|~{3,})(.*)")             # column 0 only: never inside a container
 # a line that opens an HTML block: markdown (fences included) inside it is NOT parsed, so text in it
 # could ping while looking "fenced" to fence_spans(); our own marker comments are the only exception
-_HTML_LINE = re.compile(r"(?m)^ {0,3}<(?!!-- ai-review)[A-Za-z/!?]")
+# our markers are comments CLOSED on their own line (an unclosed one would hide/shift what follows)
+_MARKER_OK = r"(?!!-- ai-review[^\n]*-->[ \t]*$)"
+_HTML_LINE = re.compile(r"(?m)^ {0,3}<" + _MARKER_OK + r"[A-Za-z/!?]")
+# constructs that can make a column-0 ``` line NOT a fence (or end one early) in GitLab markdown:
+# a bare CR (a line ending there, not here), GitLab's >>> multi-line quote, HTML blocks, link
+# reference definitions (a multi-line title swallows lines). Any of them -> no fence is trusted.
+_FENCE_UNSAFE = re.compile(r"(?m)\r|^ {0,3}(?:>>>|<" + _MARKER_OK + r"[A-Za-z/!?]|\[[^\]\n]*\]:)")
 
 
 def fence_spans(text: str) -> list:
-    """[(start, end)] of top-level fenced code blocks, CommonMark rules: opener at line start with
-    <= 3 spaces, ``` / ~~~ of length >= 3 (a backtick opener's info string has no backtick), closer =
-    same char, length >= opener, nothing else on the line; unclosed runs to the end. Stricter than
-    GitLab (fences inside lists/quotes are NOT recognised) — never looser: a block seen here is code."""
+    """[(start, end)] of fenced code blocks GitLab is certain to see as code. Deliberately STRICTER
+    than CommonMark (Codex fmt R2 #1): lines split on "\\n" only; opener at column 0 (a top-level
+    block: nothing but its closer or the end of the text can end it); closer = same char, length >=
+    opener, <= 3 spaces indent, only spaces/tabs after; unclosed runs to the end. A text containing
+    _FENCE_UNSAFE constructs gets no spans at all, so mentions are neutralised inside code too."""
+    text = text or ""
+    if _FENCE_UNSAFE.search(text):
+        return []
     spans, pos, cur = [], 0, None
-    for line in (text or "").splitlines(keepends=True):
-        body = line.rstrip("\r\n")
+    for line in text.split("\n"):
         if cur is None:
-            m = _FENCE_OPEN.match(body)
+            m = _FENCE_OPEN.fullmatch(line)
             if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
                 cur = (pos, m.group(1)[0], len(m.group(1)))
-        elif re.fullmatch(r" {0,3}" + re.escape(cur[1]) + "{%d,}[ \t]*" % cur[2], body):
-            spans.append((cur[0], pos + len(line)))
+        elif re.fullmatch(r" {0,3}" + re.escape(cur[1]) + "{%d,}[ \t]*" % cur[2], line):
+            spans.append((cur[0], min(len(text), pos + len(line) + 1)))
             cur = None
-        pos += len(line)
+        pos += len(line) + 1
     if cur is not None:
         spans.append((cur[0], len(text)))
     return spans

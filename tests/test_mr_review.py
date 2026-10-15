@@ -193,7 +193,11 @@ class PostGateTest(unittest.TestCase):
 
     def test_defang_survives_markdown_tricks(self):                         # Codex fmt R1 #1
         tricks = ["\\`@all\\`", "text ``` @all", "``@all`", "x`@all", "<code>@all</code>",
-                  "- ```\n  @all\n  ```", "> ```\n> @all\n> ```", "~~~\n@all\n~~", "    ```\n@all\n```"]
+                  "- ```\n  @all\n  ```", "> ```\n> @all\n> ```", "~~~\n@all\n~~", "    ```\n@all\n```",
+                  # Codex fmt R2 #1 + the same family: constructs that end/negate a fence in GitLab
+                  "hello\u000b```\n@all\n```", "- item\n  ```\n  code\noutside\n@all\n```",
+                  "```\n@x\r```\n@all", "<!-- ai-review\n```\n-->\n@all\n```",
+                  "[a]: /u \"\n```\n\"\n@all\n```", ">>>\n```\n@x\n>>>\n@all\n```"]
         for t in tricks:
             out = rp.defang(t)
             self.assertFalse([r for r in rr.content_problems({"author": "dev"}, [out]) if "mention" in r], (t, out))
@@ -268,6 +272,20 @@ class AutoPostRulesTest(unittest.TestCase):
         self.assertEqual(rr.fence_spans("``` a`b\n@x\n```"), [(11, 14)])    # backtick in info: not an opener
         self.assertEqual(rr.fence_spans("    ```\n@x"), [])                  # 4 spaces: not a fence
         self.assertEqual(rr.fence_spans("```\n@x"), [(0, 6)])               # unclosed: to the end
+        self.assertEqual(rr.fence_spans("- a\n  ```\n@x\n  ```"), [])          # inside a list: not trusted
+        self.assertEqual(rr.fence_spans("<!-- ai-review:1:ab -->\n```\n@x\n```"), [(24, 34)])   # closed marker ok
+        for unsafe in ("<!-- ai-review\n```\n@x\n```", "a\r\n```\n@x\n```", "[r]: /x\n```\n@x\n```"):
+            self.assertEqual(rr.fence_spans(unsafe), [], unsafe)
+
+    def test_rendered_note_keeps_fenced_code_exact(self):
+        review = {"head_sha": HEAD, "verdict": "COMMENT", "summary": "thiếu @Override",
+                  "findings": [{"severity": "minor", "title": "t", "suggestion": "dùng:\n```java\n@Override\nvoid a(){}\n```"}]}
+        job = self.job()
+        with mock.patch.object(rp, "_ws", return_value={}):
+            note = rp.render_note(job, review, set())
+        self.assertIn("\n```java\n@Override\n", note)                    # code byte-exact
+        self.assertIn("thiếu @" + rp.WORD_JOINER + "Override", note)       # prose neutralised
+        self.assertEqual([r for r in rr.content_problems(job, [note]) if "mention" in r or "HTML" in r], [])
 
     def test_scope_mode_and_source(self):
         self.assertFalse(self.ok(self.job(project_path="other/repo", project_id="9"))["auto_post"])

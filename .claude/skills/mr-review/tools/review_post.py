@@ -183,13 +183,13 @@ def render_note(job: dict, review: dict, inline_ok: set, approver: str = "") -> 
     head = ((job.get("diff_refs") or {}).get("head_sha") or "")[:8]
     branches = f" (`{job['source_branch']}` -> `{job['target_branch']}`)" if job.get("source_branch") else ""
     lines += [rr.marker(job), "## Code Review Summary", "",
-             f"**MR:** !{job['iid']} - {defang(job.get('title') or '', au)}".rstrip(" -"),
+             f"**MR:** !{job['iid']} - {job.get('title') or ''}".rstrip(" -"),
              "**Reviewer:** AI Agent"]
     date = _review_date(job, review)
     if date:
         lines.append(f"**Date:** {date}")
     lines += [f"**Commit:** {head}{branches}", f"**Overall Verdict:** {VERDICT_ICON[review['verdict']]}",
-              "", "---", "", "### Overview", "", defang(review["summary"].strip(), au)]
+              "", "---", "", "### Overview", "", review["summary"].strip()]
     n = 0
     for title, sevs, empty in SECTIONS:
         lines += _section() + [f"### {title}", ""]
@@ -198,13 +198,13 @@ def render_note(job: dict, review: dict, inline_ok: set, approver: str = "") -> 
             lines.append(empty)
         for i, f in items:
             n += 1
-            lines.append(f"**{n}. {_loc(f)}{defang(f['title'], au)}**")
+            lines.append(f"**{n}. {_loc(f)}{f['title']}**")
             if i in inline_ok:
                 lines += ["", "- _Chi tiết ở comment inline._", ""]
                 continue
-            sub = [f"- **Why:** {defang(f['body'].strip(), au)}"] if f.get("body") else []
+            sub = [f"- **Why:** {f['body'].strip()}"] if f.get("body") else []
             if f.get("suggestion"):
-                sub.append(f"- **Suggestion:** {defang(f['suggestion'].strip(), au)}")
+                sub.append(f"- **Suggestion:** {f['suggestion'].strip()}")
             lines += ([""] + sub + [""]) if sub else [""]
     comp = review.get("compliance") or {}
     if comp:
@@ -212,11 +212,11 @@ def render_note(job: dict, review: dict, inline_ok: set, approver: str = "") -> 
                   "|----------|--------|-------|"]
         for cat in COMPLIANCE:
             c = comp.get(cat) or {}
-            note = defang(str(c.get("note") or ""), au).replace("|", "\\|").replace("\n", " ")
+            note = str(c.get("note") or "").replace("|", "\\|").replace("\n", " ")
             lines.append(f"| {cat} | {STATUS_ICON.get(c.get('status'), '—')} | {note} |")
     pos = [p for p in (review.get("positives") or []) if isinstance(p, str) and p.strip()]
     if pos:
-        lines += _section() + ["### Positive Observations", ""] + [f"- {defang(p.strip(), au)}" for p in pos]
+        lines += _section() + ["### Positive Observations", ""] + [f"- {p.strip()}" for p in pos]
     ws = _ws(job)
     files = ws.get("files") or []
     if files:
@@ -239,16 +239,18 @@ def render_note(job: dict, review: dict, inline_ok: set, approver: str = "") -> 
     meta = [x for x in ("🤖 AI review", review.get("model") and f"model {review['model']}",
                         approver and f"duyệt bởi {approver}", f"head {head}", scope) if x]
     lines += ["", "---", "_" + " · ".join(meta) + "_"]
-    return "\n".join(lines)
+    # ONE pass over the exact text the rules check: fences are judged on the whole note, never per
+    # field (a field's fence could pair with another field's in the posted note — Codex fmt R2)
+    return defang("\n".join(lines), au)
 
 
 def render_inline(f: dict, author: str = "") -> str:
-    body = f"{SEV_ICON[f['severity']]} **{defang(f['title'], author)}**"
+    body = f"{SEV_ICON[f['severity']]} **{f['title']}**"
     if f.get("body"):
-        body += f"\n\n**Why:** {defang(f['body'].strip(), author)}"
+        body += f"\n\n**Why:** {f['body'].strip()}"
     if f.get("suggestion"):
-        body += f"\n\n**Suggestion:** {defang(f['suggestion'].strip(), author)}"
-    return body
+        body += f"\n\n**Suggestion:** {f['suggestion'].strip()}"
+    return defang(body, author)
 
 
 def inline_candidates(review: dict) -> list:
