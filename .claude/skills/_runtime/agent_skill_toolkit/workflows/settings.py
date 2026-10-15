@@ -83,7 +83,7 @@ CATALOG = [
     _s("TELEGRAM_AUTO_APPROVE", "Telegram", "Bot CODE tự duyệt nhóm",
        "read · file · bash — nhóm thao tác bot CODE chạy không hỏi ('danger' luôn hỏi); cũng là MỨC SÀN "
        "của lượt group TChat", "multi", "read,file",
-       choices=("read", "file", "bash"), restart=(TG_CODE,), sensitive=True),
+       choices=("read", "file", "bash"), restart=(TG_CODE, GROUP_WATCH), sensitive=True),   # group turns inherit it (R4 #1)
     # ---------------------------------------------------------------- coordinator (store, live)
     _s("capacity", "Điều phối", "Số việc chạy song song",
        "giới hạn toàn cục cho worker (tab Coordinator); 0 = không giới hạn (worker chạy 2 luồng); áp dụng ngay",

@@ -156,6 +156,7 @@ class CatalogTest(Base):
         self.assertIn("bash, read", w[0])
         tg = next(i for i in S.snapshot()["items"] if i["key"] == "FCHAT_WATCH_AUTO_APPROVE")
         self.assertIn("CỘNG THÊM", tg["help"])
+        self.assertIn("TChat group_watch", S.BY_KEY["TELEGRAM_AUTO_APPROVE"]["restart"])   # Codex settings R4 #1
 
     def test_apply_env_and_store_with_audit_and_restart_hint(self):
         out = S.apply({"REVIEW_AUTO_POST": "auto", "capacity": "7"}, by="test",
