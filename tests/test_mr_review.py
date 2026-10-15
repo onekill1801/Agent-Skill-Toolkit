@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.parse
 from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -205,16 +206,19 @@ class PostGateTest(unittest.TestCase):
                   "$$\n```\n$$\n@all\n```",
                   "notify &#64;all and @&#97;ll", "&#x40;all &#X40;here", "&commat;all",    # Codex fmt R4 #1
                   "_@all_", "__@all__", "*@all*", "x_@all", "~~@all~~", "\\@all", "@al\\_l",  # R5 #1
-                  "ping @\\_ops", "@\\-x", "@ all"]                                            # R6 #1
+                  "ping @\\_ops", "@\\-x", "@ all",                                            # R6 #1
+                  "[please review](%40victim)", "[r]: %40victim\n\n[x][r]"]                    # R7 #1
         for t in tricks:
             out = rp.defang(t)
             self.assertFalse([r for r in rr.content_problems({"author": "dev"}, [out]) if "mention" in r], (t, out))
             # crude model of GitLab's DOM text: entities decoded once, markdown punctuation stripped
-            dom = re.sub(r"[*_~`\\]", "", html.unescape(rr.outside_fences(out)))
+            dom = re.sub(r"[*_~`\\]", "", urllib.parse.unquote(html.unescape(rr.outside_fences(out))))
             for m in re.finditer(r"@(?!" + rp.WORD_JOINER + ")", dom):
                 self.fail(f"live mention left in {out!r}: …{dom[m.start():m.start() + 8]}")
-            self.assertNotIn("HTML character reference in the text",
-                             rr.content_problems({"author": "dev"}, [out]), (t, out))
+            probs = rr.content_problems({"author": "dev"}, [out])
+            self.assertNotIn("HTML character reference in the text", probs, (t, out))
+            self.assertNotIn("percent-encoded @ in the text", probs, (t, out))
+        self.assertIn("percent-encoded @ in the text", rr.content_problems({}, ["[x](%40v)"]))
         self.assertEqual(rp.defang("a &amp; b, x &lt; y"), "a &amp; b, x &amp;lt; y")
         self.assertIn("HTML character reference in the text", rr.content_problems({}, ["ping &#64;all"]))
 
