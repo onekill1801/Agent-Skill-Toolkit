@@ -92,9 +92,10 @@ Review against:
   Overview = `summary`; 🔴 Critical = `blocker`, 🟡 Major = `major`, 🟢 Minor/Nitpicks = `minor`+`nit`
   (`body` → **Why**, `suggestion` → **Suggestion**); Standards Compliance = `compliance` (fill all
   6 categories); Positive Observations = `positives`; Files Reviewed is filled from ws.json.
-- Put code identifiers in backticks (`` `@Test` ``, `` `findById` ``). Every `@word` outside fenced
-  code that is not the MR author gets an invisible word joiner after the `@` when rendered, so it
-  never pings a GitLab user; fenced code is posted byte-exact. Do not use raw HTML (blocks auto-post).
+- Put code identifiers in backticks (`` `@Test` ``, `` `findById` ``). Every `@` outside fenced code
+  (the MR author included) gets an invisible word joiner after it when rendered, so a review never
+  pings anyone; fenced code is posted byte-exact. Do not use raw HTML or `&…;` entities (they block
+  auto-post / are shown literally).
 
 ```
 python3 $T/review_post.py validate <job_id>          # fix until "valid": true

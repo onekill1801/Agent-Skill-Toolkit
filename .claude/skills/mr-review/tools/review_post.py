@@ -134,22 +134,21 @@ SECTIONS = (("🔴 Critical Issues (must fix before merge)", ("blocker",), "No c
 COMPLIANCE = ("Correctness", "Code Quality", "Architecture", "Security", "Performance", "Testing")
 STATUS_ICON = {"ok": "✅", "warn": "⚠️", "fail": "❌"}
 
-WORD_JOINER = "⁠"     # invisible; GitLab needs a name char right after "@" to make a mention
+WORD_JOINER = rr.WORD_JOINER    # invisible; GitLab needs a name char right after "@" to make a mention
 
 
-def defang(text: str, author: str = "") -> str:
-    """`@Test`, `@Override`, `@all`… would ping a GitLab user/group of that name. Every @word that is
-    not the MR author gets an invisible WORD JOINER after the "@" — independent of markdown parsing
-    (escaped/unbalanced backticks can not undo it: Codex fmt R1 #1). Only fenced code blocks, where
-    GitLab never pings, are left byte-exact so suggested code still compiles when copied."""
-    text, keep = text or "", (author or "").lower()
+def defang(text: str) -> str:
+    """`@Test`, `@Override`, `@all`… would ping a GitLab user/group of that name. EVERY "@" gets an
+    invisible WORD JOINER after it — independent of markdown parsing (escapes, emphasis, backticks
+    can not undo it: Codex fmt R1/R5/R6). Only fenced code blocks, where GitLab never pings, are left
+    byte-exact so suggested code still compiles when copied."""
+    text = text or ""
 
     def fix(seg):
         # entities first: "&#64;all" would decode to a live @all in GitLab's DOM (Codex fmt R4 #1);
         # "&amp;#64;all" shows the characters literally and decodes to nothing
         seg = rr.ENTITY.sub(lambda m: "&amp;" + m.group(0)[1:], seg)
-        return rr.MENTION.sub(lambda m: m.group(0) if keep and m.group(1).lower() == keep
-                              else "@" + WORD_JOINER + m.group(1), seg)
+        return rr.MENTION.sub("@" + WORD_JOINER, seg)
     out, pos = [], 0
     for start, end in rr.fence_spans(text):
         out += [fix(text[pos:start]), text[start:end]]
@@ -182,7 +181,6 @@ def render_note(job: dict, review: dict, inline_ok: set, approver: str = "") -> 
         return ["", "---", ""]
 
     findings = review.get("findings", [])
-    au = job.get("author") or ""
     head = ((job.get("diff_refs") or {}).get("head_sha") or "")[:8]
     branches = f" (`{job['source_branch']}` -> `{job['target_branch']}`)" if job.get("source_branch") else ""
     lines += [rr.marker(job), "## Code Review Summary", "",
@@ -244,16 +242,16 @@ def render_note(job: dict, review: dict, inline_ok: set, approver: str = "") -> 
     lines += ["", "---", "_" + " · ".join(meta) + "_"]
     # ONE pass over the exact text the rules check: fences are judged on the whole note, never per
     # field (a field's fence could pair with another field's in the posted note — Codex fmt R2)
-    return defang("\n".join(lines), au)
+    return defang("\n".join(lines))
 
 
-def render_inline(f: dict, author: str = "") -> str:
+def render_inline(f: dict) -> str:
     body = f"{SEV_ICON[f['severity']]} **{f['title']}**"
     if f.get("body"):
         body += f"\n\n**Why:** {f['body'].strip()}"
     if f.get("suggestion"):
         body += f"\n\n**Suggestion:** {f['suggestion'].strip()}"
-    return defang(body, author)
+    return defang(body)
 
 
 def inline_candidates(review: dict) -> list:
@@ -264,7 +262,7 @@ def inline_candidates(review: dict) -> list:
 def payload(job: dict, review: dict) -> tuple:
     """(note, inline bodies) — the superset of text that can reach GitLab for this review."""
     findings = review.get("findings", [])
-    return render_note(job, review, set()), [render_inline(findings[i], job.get("author") or "") for i in inline_candidates(review)]
+    return render_note(job, review, set()), [render_inline(findings[i]) for i in inline_candidates(review)]
 
 
 def payload_hash(job: dict, review: dict) -> str:
@@ -449,7 +447,7 @@ def _inline(gl, job: dict, f: dict, i: int = 0) -> bool:
            "head_sha": refs["head_sha"], "new_path": f["file"], "old_path": f.get("old_file") or f["file"]}
     pos["new_line" if side_new else "old_line"] = f["line"]
     url = gl._api(f"/merge_requests/{job['iid']}/discussions")
-    res = gl._request(url, method="POST", data={"body": render_inline(f, job.get("author") or "") +"\n\n" + inline_marker(job, i),
+    res = gl._request(url, method="POST", data={"body": render_inline(f) + "\n\n" + inline_marker(job, i),
                                                   "position": pos})
     if isinstance(res, dict) and res.get("uncertain"):
         # it may exist: stop, the next attempt reconciles by marker before posting anything (Codex R.M4 #2)

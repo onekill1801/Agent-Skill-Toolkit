@@ -185,9 +185,10 @@ class PostGateTest(unittest.TestCase):
         self.assertIn("Chi tiết ở comment inline", note)
         self.assertNotIn("secret why", note)
 
-    def test_defang_neutralises_mentions_except_fences_and_author(self):
+    def test_defang_neutralises_every_at_except_in_fences(self):
         wj = rp.WORD_JOINER
-        self.assertEqual(rp.defang("thiếu dòng trước @Test và @dev", "dev"), f"thiếu dòng trước @{wj}Test và @dev")
+        self.assertEqual(rp.defang("thiếu dòng trước @Test và @dev"), f"thiếu dòng trước @{wj}Test và @{wj}dev")
+        self.assertEqual(rp.defang(rp.defang("@x")), f"@{wj}x")                 # idempotent
         self.assertEqual(rp.defang("x `@Override` y"), f"x `@{wj}Override` y")
         fenced = "```java\n@Test\nvoid a(){}\n```"
         self.assertEqual(rp.defang(fenced), fenced)                       # copied code stays byte-exact
@@ -203,13 +204,14 @@ class PostGateTest(unittest.TestCase):
                   "[a\\]]: /u \"\n```\n\"\n@all\n```", "[a\nb]: /u \"\n```\n\"\n@all\n```",   # Codex fmt R3 #1
                   "$$\n```\n$$\n@all\n```",
                   "notify &#64;all and @&#97;ll", "&#x40;all &#X40;here", "&commat;all",    # Codex fmt R4 #1
-                  "_@all_", "__@all__", "*@all*", "x_@all", "~~@all~~", "\\@all", "@al\\_l"]  # R5 #1
+                  "_@all_", "__@all__", "*@all*", "x_@all", "~~@all~~", "\\@all", "@al\\_l",  # R5 #1
+                  "ping @\\_ops", "@\\-x", "@ all"]                                            # R6 #1
         for t in tricks:
             out = rp.defang(t)
             self.assertFalse([r for r in rr.content_problems({"author": "dev"}, [out]) if "mention" in r], (t, out))
             # crude model of GitLab's DOM text: entities decoded once, markdown punctuation stripped
             dom = re.sub(r"[*_~`\\]", "", html.unescape(rr.outside_fences(out)))
-            for m in re.finditer(r"@(?=[A-Za-z0-9_])", dom):
+            for m in re.finditer(r"@(?!" + rp.WORD_JOINER + ")", dom):
                 self.fail(f"live mention left in {out!r}: …{dom[m.start():m.start() + 8]}")
             self.assertNotIn("HTML character reference in the text",
                              rr.content_problems({"author": "dev"}, [out]), (t, out))
@@ -269,8 +271,10 @@ class AutoPostRulesTest(unittest.TestCase):
             res = self.ok(self.job(), note=text)
             self.assertFalse(res["auto_post"], text)
             self.assertTrue(any(why in r for r in res["reasons"]), (text, res["reasons"]))
-        self.assertTrue(self.ok(self.job(), note="cc @dev — https://gitlab.example.vn/grp/proj/-/merge_requests/5")
+        self.assertTrue(self.ok(self.job(), note="cc dev — https://gitlab.example.vn/grp/proj/-/merge_requests/5")
                         ["auto_post"])
+        self.assertFalse(self.ok(self.job(), note="cc @dev")["auto_post"])     # not even the author: no raw "@"
+        self.assertTrue(self.ok(self.job(), note="cc @" + rr.WORD_JOINER + "dev")["auto_post"])
 
     def test_mentions_inside_fences_do_not_block(self):
         self.assertTrue(self.ok(self.job(), note="ok\n```java\n@Override\n```")["auto_post"])

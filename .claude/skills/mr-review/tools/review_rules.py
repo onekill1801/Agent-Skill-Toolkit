@@ -32,9 +32,12 @@ MARKER_FMT = "<!-- ai-review:{iid}:{head} -->"
 MARKER_RE = re.compile(r"<!-- ai-review:(\d+):([0-9a-f]{7,40}) -->")
 
 _URL = re.compile(r"https?://[^\s)>\]]+", re.I)
-# EVERY "@name", whatever precedes it: markdown can strip the preceding char before GitLab looks
-# (`_@all_` -> <em>@all</em>, "\@all", a backtick: Codex fmt R1 #1, R5 #1). Emails get neutralised too.
-MENTION = re.compile(r"@([A-Za-z0-9_][A-Za-z0-9_.-]*)")
+# EVERY "@" not already followed by a word joiner — whatever precedes or follows it: markdown can
+# strip the preceding char (`_@all_`, a backtick) or unescape the next one (`@\_ops` -> @_ops) before
+# GitLab looks at the DOM text (Codex fmt R1 #1, R5 #1, R6 #1). No exemption, not even the MR author
+# (who is notified about comments on their MR anyway). Emails get neutralised too.
+WORD_JOINER = "⁠"
+MENTION = re.compile("@(?!" + WORD_JOINER + ")")
 # HTML character references (decimal / hex / named): GitLab decodes them before finding mentions.
 # defang() turns each into "&amp;…" (shown literally); the rule allows no other reference in prose.
 ENTITY = re.compile(r"&(?!amp;)(?:#[0-9]{1,8}|#[xX][0-9A-Fa-f]{1,8}|[A-Za-z][A-Za-z0-9]{0,31});")
@@ -126,16 +129,14 @@ def content_problems(job: dict, texts: list) -> list:
     """Rules on the exact text to be posted."""
     probs = []
     host = _gitlab_host()
-    allowed_mentions = {(job.get("author") or "").lower()} - {""}
     for t in texts:
         for u in _URL.findall(t):
             h = (urlparse(u).hostname or "").lower()
             if not host or h != host:
                 probs.append(f"link outside GitLab host: {h or u[:40]}")
         prose = outside_fences(t)                             # GitLab does not ping from fenced code
-        for m in MENTION.findall(prose):
-            if m.lower() not in allowed_mentions:
-                probs.append(f"@mention of someone other than the MR author: @{m}")
+        for m in MENTION.finditer(prose):
+            probs.append(f"@mention could ping someone: {prose[m.start():m.start() + 24].splitlines()[0]}")
         if _HTML_LINE.search(prose):
             probs.append("raw HTML block in the text")
         if ENTITY.search(prose):
