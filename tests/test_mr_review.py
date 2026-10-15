@@ -207,7 +207,10 @@ class PostGateTest(unittest.TestCase):
                   "notify &#64;all and @&#97;ll", "&#x40;all &#X40;here", "&commat;all",    # Codex fmt R4 #1
                   "_@all_", "__@all__", "*@all*", "x_@all", "~~@all~~", "\\@all", "@al\\_l",  # R5 #1
                   "ping @\\_ops", "@\\-x", "@ all",                                            # R6 #1
-                  "[please review](%40victim)", "[r]: %40victim\n\n[x][r]"]                    # R7 #1
+                  "[please review](%40victim)", "[r]: %40victim\n\n[x][r]",                    # R7 #1
+                  '```json:table\n{"markdown": true, "items": [{"reviewer": "@all"}]}\n```',  # R8 #1
+                  "```mermaid\nA-->B: @all\n```", "```suggestion:-0+0\n@all\n```", "```math\n@all\n```",
+                  "```java\n@Override\n```\n```json:table\n@x\n```"]
         for t in tricks:
             out = rp.defang(t)
             self.assertFalse([r for r in rr.content_problems({"author": "dev"}, [out]) if "mention" in r], (t, out))
@@ -293,6 +296,8 @@ class AutoPostRulesTest(unittest.TestCase):
         self.assertEqual(rr.fence_spans("    ```\n@x"), [])                  # 4 spaces: not a fence
         self.assertEqual(rr.fence_spans("```\n@x"), [(0, 6)])               # unclosed: to the end
         self.assertEqual(rr.fence_spans("- a\n  ```\n@x\n  ```"), [])          # inside a list: not trusted
+        self.assertEqual(rr.fence_spans("```Java title\n@x\n```"), [(0, 20)])  # plain language: trusted
+        self.assertEqual(rr.fence_spans("```java\n@x\n```\n```json:table\n@y\n```"), [])   # one transforming fence
         self.assertEqual(rr.fence_spans("<!-- ai-review:1:ab -->\n```\n@x\n```"), [(24, 34)])   # closed marker ok
         for unsafe in ("<!-- ai-review\n```\n@x\n```", "a\r\n```\n@x\n```", "[r]: /x\n```\n@x\n```"):
             self.assertEqual(rr.fence_spans(unsafe), [], unsafe)

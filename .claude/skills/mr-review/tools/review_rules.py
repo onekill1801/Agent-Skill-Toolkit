@@ -57,6 +57,17 @@ _HTML_LINE = re.compile(r"(?m)^ {0,3}<" + _MARKER_OK + r"[A-Za-z/!?]")
 _FENCE_UNSAFE = re.compile(r"(?m)\r|^ {0,3}(?:>>>|\$\$|\[|<" + _MARKER_OK + r"[A-Za-z/!?])")
 
 
+# fences GitLab only highlights. Anything else (json:table renders its cells as markdown BEFORE the
+# mention filter — Codex fmt R8 #1; mermaid/plantuml/kroki/math/suggestion…) -> no fence is trusted.
+PLAIN_CODE_LANGS = frozenset((
+    "", "text", "plaintext", "java", "kotlin", "kt", "groovy", "scala", "xml", "html", "css", "scss",
+    "json", "yaml", "yml", "toml", "ini", "properties", "sql", "plsql", "sh", "bash", "shell", "zsh",
+    "console", "powershell", "ps1", "bat", "cmd", "dockerfile", "makefile", "gradle", "diff", "patch",
+    "javascript", "js", "jsx", "typescript", "ts", "tsx", "python", "py", "go", "rust", "rs", "c",
+    "cpp", "c++", "csharp", "cs", "php", "ruby", "rb", "swift", "dart", "lua", "perl", "r", "http",
+    "graphql", "proto", "protobuf", "nginx", "log"))
+
+
 def fence_spans(text: str) -> list:
     """[(start, end)] of fenced code blocks GitLab is certain to see as code. Deliberately STRICTER
     than CommonMark (Codex fmt R2 #1): lines split on "\\n" only; opener at column 0 (a top-level
@@ -71,6 +82,9 @@ def fence_spans(text: str) -> list:
         if cur is None:
             m = _FENCE_OPEN.fullmatch(line)
             if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+                lang = m.group(2).strip().split(" ")[0].lower()
+                if lang not in PLAIN_CODE_LANGS:
+                    return []          # json:table, mermaid, math, suggestion:…: GitLab transforms them
                 cur = (pos, m.group(1)[0], len(m.group(1)))
         elif re.fullmatch(r" {0,3}" + re.escape(cur[1]) + "{%d,}[ \t]*" % cur[2], line):
             spans.append((cur[0], min(len(text), pos + len(line) + 1)))
