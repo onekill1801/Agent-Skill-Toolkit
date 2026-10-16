@@ -286,6 +286,12 @@ function renderAttention() {
       (job ? "<br>" + code(`python ${T}/mr-review/tools/review_post.py approve ${job}`) : "")]);
   }
   for (const j of ((section("reviews").data || {}).jobs) || []) {
+    for (const f of j.notify_failed || []) {
+      rows.push([`<span class="badge s-failed">📣 báo group lỗi</span>`,
+        `<b>${esc(j.mr)}</b> · đã đăng review nhưng chưa báo được vào group<div class="note">${esc(f.error)} · thử ${esc(f.attempts)} lần` +
+        (f.attempts >= 5 ? " · đã ngừng tự thử" : " · sweep tự thử lại") + `</div>`,
+        code(`python ${T}/mr-review/tools/review_post.py notify ${j.id}`)]);
+    }
     if (["awaiting_approval", "needs_human", "blocked"].includes(j.status)) {
       rows.push([`<span class="badge s-blocked">${esc(j.status)}</span>`, `<b>${esc(j.mr)}</b> · ${esc(j.title)}`,
         code(`python ${T}/mr-review/tools/review_post.py render ${j.id}`) + "<br>" + code(`python ${T}/mr-review/tools/review_post.py approve ${j.id}`)]);

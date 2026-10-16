@@ -20,7 +20,8 @@ forge a human approval. The auto-post rules do not depend on those files.
     python review_post.py approval-status <job_id>
     python review_post.py approve|reject <job_id>          # human, interactive terminal only
     python review_post.py post <job_id> [--dry-run] [--no-notify]
-    python review_post.py sweep [--dry-run]                # post approved / close rejected (no LLM)
+    python review_post.py sweep [--dry-run]                # post approved / close rejected / retry notices (no LLM)
+    python review_post.py notify <job_id>                  # re-send the requester notice of a posted review
 
 review.json (default: <worktree>.review.json):
 {
@@ -756,28 +757,89 @@ def _post_locked(jid: str, dry_run: bool, notify: bool) -> dict:
            "note_id": note.get("id")}
     rc.board_card(job, note=f"✅ Đã đăng review ({review['verdict']}, {len(inline_ok)} inline) — {job.get('web_url', '')}")
     if notify:
-        out["notified"] = notify_requesters(job, review)
+        out["notified"] = notify_and_record(job, review)
     return out   # worktree (= Orca card) kept until `review_ws.py gc`
 
 
-def notify_requesters(job: dict, review: dict) -> list:
-    """Fixed-template FChat message to each FChat requester (never raw agent output)."""
+NOTIFY_MAX_ATTEMPTS = 5
+NOTIFY_BACKOFF_S = 60          # retry n waits n * this (sweep runs every ~30 s)
+# credentials the child must read FRESH from .env: a long-running parent (Coordinator) holds the values it
+# loaded at start, and TChat rotates its tokens (the child would send a stale one)
+_STALE_ENV = ("FCHAT_BEARER_TOKEN", "FCHAT_REFRESH_TOKEN", "FCHAT_WS_TOKEN")
+_JWT = re.compile(r"eyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}")
+
+
+def _notify_key(r: dict) -> str:
+    return f"{r.get('group')}|{r.get('by_id') or ''}"
+
+
+def _notify_error(p) -> str:
+    """Short reason from notify_group's output — the JSON error message, else the last stderr line."""
+    for stream in (p.stdout or "", p.stderr or ""):
+        m = re.search(r'"message"\s*:\s*"([^"]{1,300})"', stream)
+        if m:
+            return _JWT.sub("<token>", m.group(1))
+    tail = [ln for ln in (p.stderr or "").splitlines() if ln.strip() and not ln.startswith("[WARN]")]
+    return _JWT.sub("<token>", (tail[-1] if tail else f"exit {p.returncode}"))[:300]
+
+
+def notify_requesters(job: dict, review: dict, only: set = None) -> list:
+    """Fixed-template FChat message to each FChat requester (never raw agent output). Returns one
+    {key, group, ok, error} per requester (`only` = keys to (re)send)."""
     script = os.path.normpath(os.path.join(rc.tools_dir(), "..", "..", "tchat-automation", "tools", "notify_group.py"))
     text = (f"🔎 Review {job.get('project_path')}!{job['iid']} — {VERDICT_ICON[review['verdict']]}: "
             f"{_counts(review.get('findings', []))}. {job.get('web_url', '')}")
+    env = {k: v for k, v in os.environ.items() if k not in _STALE_ENV}
     sent, seen = [], set()
     for r in job.get("requests", []):
-        if r.get("source") != "fchat" or not r.get("group") or (r["group"], r.get("by_id")) in seen:
+        key = _notify_key(r)
+        if r.get("source") != "fchat" or not r.get("group") or key in seen or (only is not None and key not in only):
             continue
-        seen.add((r["group"], r.get("by_id")))
+        seen.add(key)
         args = [sys.executable, script, "--group", r["group"], "--text", text]
         if r.get("group_type"):
             args += ["--group-type", r["group_type"]]
         if r.get("by_id") and r.get("by"):
             args += ["--user-id", r["by_id"], "--user-name", r["by"]]
-        p = subprocess.run(args, capture_output=True, text=True, timeout=60)
-        sent.append({"group": r["group"], "ok": p.returncode == 0})
+        try:
+            p = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                               timeout=60, env=env)
+            ok, err = p.returncode == 0, ("" if p.returncode == 0 else _notify_error(p))
+        except (OSError, subprocess.TimeoutExpired) as e:
+            ok, err = False, f"{type(e).__name__}: {e}"[:300]
+        sent.append({"key": key, "group": r["group"], "ok": ok, "error": err})
     return sent
+
+
+def notify_and_record(job: dict, review: dict) -> list:
+    """Send the requester notices that are still due and RECORD the outcome on the job: `notified`
+    {key: at} never re-sent; `notify_failed` {key: {error, attempts, at}} retried by sweep() (a failure
+    used to vanish — nobody knew the group was never told)."""
+    done = job.setdefault("notified", {})
+    failed = job.setdefault("notify_failed", {})
+    due = {_notify_key(r) for r in job.get("requests", []) if r.get("source") == "fchat" and r.get("group")}
+    due -= set(done)
+    if not due:
+        return []
+    res = notify_requesters(job, review, only=due)
+    for x in res:
+        if x["ok"]:
+            done[x["key"]] = rc.now()
+            failed.pop(x["key"], None)
+        else:
+            f = failed.setdefault(x["key"], {"attempts": 0})
+            f.update(error=x["error"], at=rc.now(), attempts=f["attempts"] + 1)
+        rc.log_event(job, "notified" if x["ok"] else "notify_failed",
+                     **({} if x["ok"] else {"error": x["error"][:120]}))
+    rc.save_job(job)
+    return res
+
+
+def _notify_retry_due(job: dict) -> bool:
+    now = rc.now()
+    return any(f.get("attempts", 0) < NOTIFY_MAX_ATTEMPTS
+               and now - (f.get("at") or 0) >= NOTIFY_BACKOFF_S * f.get("attempts", 1)
+               for f in (job.get("notify_failed") or {}).values())
 
 
 def close_idle_workers(dry_run: bool = False) -> list:
@@ -810,9 +872,39 @@ def close_idle_workers(dry_run: bool = False) -> list:
     return closed
 
 
+def _retry_notify(job: dict) -> dict:
+    with rc.file_lock(f"post-{job['id']}", timeout=5, stale_after=1800):   # the same lock as post(): one sender
+        job = rc.load_job(job["id"])
+        if not job or job.get("status") != "posted" or not _notify_retry_due(job):
+            return {}
+        review = load_review(job, job.get("review_file", ""))
+        res = notify_and_record(job, review)
+    return {"job_id": job["id"], "notify_retry": [{"ok": x["ok"], "error": x["error"]} for x in res]}
+
+
+def notify_again(jid: str) -> dict:
+    """Human re-send after the automatic retries gave up: every requester not yet told gets the notice."""
+    with rc.file_lock(f"post-{jid}", timeout=5, stale_after=1800):
+        job = rc.load_job(jid)
+        if not job or job.get("status") != "posted":
+            raise ValueError(f"job {jid} is not posted (status {job and job.get('status')})")
+        for f in (job.get("notify_failed") or {}).values():
+            f["attempts"] = 0
+        res = notify_and_record(job, load_review(job, job.get("review_file", "")))
+    return {"job_id": jid, "notified": res, "already_told": len(job.get("notified") or {})}
+
+
 def sweep(dry_run: bool = False) -> dict:
     actions = close_idle_workers(dry_run)
     for job in rc.all_jobs():
+        if job.get("status") == "posted" and not dry_run and _notify_retry_due(job):
+            try:
+                a = _retry_notify(job)
+                if a:
+                    actions.append(a)
+            except (OSError, ValueError, TimeoutError) as e:       # review file gone, lock busy…
+                actions.append({"job_id": job["id"], "notify_retry_error": str(e)[:200]})
+            continue
         if job.get("status") != "awaiting_approval":
             continue
         decision = approval_status(job)
@@ -847,6 +939,8 @@ def main(argv=None) -> int:
     p.add_argument("--no-notify", action="store_true")
     p = sub.add_parser("sweep")
     p.add_argument("--dry-run", action="store_true")
+    p = sub.add_parser("notify")                  # [WRITE] re-send the requester notice of a POSTED review
+    p.add_argument("job_id")
     a = ap.parse_args(argv)
     try:
         if a.cmd == "sweep":
@@ -869,6 +963,8 @@ def main(argv=None) -> int:
             out = {"job_id": a.job_id, "approval": approval_status(job)}
         elif a.cmd in ("approve", "reject"):
             out = human_decide(job, a.cmd == "approve")
+        elif a.cmd == "notify":
+            out = notify_again(a.job_id)
         else:
             out = post(a.job_id, a.dry_run, notify=not a.no_notify)
     except FileNotFoundError as e:

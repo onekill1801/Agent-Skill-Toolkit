@@ -36,7 +36,7 @@ WRITE_RULES = [
     (tool("checklists") + r"\s+(create|delete|add-comment|del-comment)\b", "aTask write"),
     (tool("jenkins") + r"\s+(build|trigger)\b", "Jenkins build"),
     (tool("ssh_exec"), "SSH to other machines"),
-    (tool("review_post") + r"\s+(post|sweep)\b", "post review to GitLab"),
+    (tool("review_post") + r"\s+(post|sweep|notify)\b", "post review to GitLab / notify the group"),
     (r"\bgit\s+push\b", "git push"),
     (tool("podfwd") + r"\s+(start|start-saved|fetch)\b.*--allow-prod", "tunnel/copy from a PROD cluster"),
     (r"\b(kubectl|oc)\b(\s+--?\S+(\s+[^-\s]\S*)?)*\s+(apply|delete|patch|edit|scale|rollout|set|replace|exec|"

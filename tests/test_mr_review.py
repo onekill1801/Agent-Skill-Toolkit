@@ -629,6 +629,92 @@ class CompactNoteTest(unittest.TestCase):
         self.assertEqual(rp.note_style(), "full")                              # the default
 
 
+class NotifyTest(unittest.TestCase):
+    """Requester notices after a post: outcome recorded on the job, failures retried by sweep (a failure
+    used to vanish), fresh TChat credentials in the child, manual `notify` after the retries give up."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="notify-test-")
+        p = mock.patch.dict(os.environ, {"REVIEW_STATE_DIR": self.tmp, "REVIEW_ORCA": "0",
+                                         "FCHAT_BEARER_TOKEN": "stale-token-of-the-parent"})
+        p.start()
+        self.addCleanup(p.stop)
+        self.review = {"head_sha": HEAD, "verdict": "COMMENT", "summary": "ok",
+                       "findings": [{"severity": "major", "title": "t"}]}
+        r = mock.patch.object(rp, "load_review", return_value=self.review)
+        r.start()
+        self.addCleanup(r.stop)
+
+    def job(self, **kw):
+        j = {"id": "77-5", "project_id": "77", "iid": 5, "project_path": "g/p", "web_url": "https://x/5",
+             "status": "posted", "head_sha": HEAD, "review_file": "r.json",
+             "requests": [{"source": "fchat", "group": "G1", "group_type": "SUPER_PRIVATE", "by": "An", "by_id": "U1"},
+                          {"source": "fchat", "group": "G1", "by": "An", "by_id": "U1"},          # same person twice
+                          {"source": "manual"}]}
+        j.update(kw)
+        rc.save_job(j)
+        return j
+
+    def run_result(self, rc_code, out="", err=""):
+        return mock.Mock(returncode=rc_code, stdout=out, stderr=err)
+
+    def test_success_is_recorded_once_and_the_child_gets_no_stale_token(self):
+        job = self.job()
+        with mock.patch.object(rp.subprocess, "run", return_value=self.run_result(0, "{}")) as run:
+            res = rp.notify_and_record(job, self.review)
+            self.assertEqual([x["ok"] for x in res], [True])                   # one notice per person
+            self.assertNotIn("FCHAT_BEARER_TOKEN", run.call_args.kwargs["env"])
+            self.assertEqual(run.call_args.kwargs["encoding"], "utf-8")
+            self.assertEqual(rp.notify_and_record(job, self.review), [])         # never sent twice
+        saved = rc.load_job("77-5")
+        self.assertIn("G1|U1", saved["notified"])
+        self.assertEqual(saved["history"][-1]["event"], "notified")
+
+    def test_failure_is_recorded_with_a_clean_reason_and_retried_by_sweep(self):
+        job = self.job()
+        err = '{"error": true, "message": "401 Unauthorized eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.c2lnbmF0dXJlMTIz"}'
+        with mock.patch.object(rp.subprocess, "run", return_value=self.run_result(1, err, "[WARN] x")):
+            rp.notify_and_record(job, self.review)
+        f = rc.load_job("77-5")["notify_failed"]["G1|U1"]
+        self.assertEqual(f["attempts"], 1)
+        self.assertIn("401 Unauthorized", f["error"])
+        self.assertNotIn("eyJhbGci", f["error"])                                 # a token never lands on disk
+        with mock.patch.object(rp, "close_idle_workers", return_value=[]), \
+             mock.patch.object(rp.subprocess, "run", return_value=self.run_result(0, "{}")) as run:
+            self.assertEqual(rp.sweep()["actions"], [])                         # backoff: not due yet
+            run.assert_not_called()
+            with mock.patch.object(rc, "now", return_value=rc.now() + rp.NOTIFY_BACKOFF_S + 1):
+                acts = rp.sweep()["actions"]
+        self.assertEqual(acts[0]["notify_retry"], [{"ok": True, "error": ""}])
+        saved = rc.load_job("77-5")
+        self.assertEqual(saved["notify_failed"], {})
+        self.assertIn("G1|U1", saved["notified"])
+
+    def test_retries_stop_after_the_maximum_and_notify_command_resends(self):
+        self.job(notify_failed={"G1|U1": {"attempts": rp.NOTIFY_MAX_ATTEMPTS, "error": "x", "at": 0}})
+        self.assertFalse(rp._notify_retry_due(rc.load_job("77-5")))
+        with mock.patch.object(rp.subprocess, "run", return_value=self.run_result(0, "{}")):
+            out = rp.notify_again("77-5")
+        self.assertEqual([x["ok"] for x in out["notified"]], [True])
+        with self.assertRaises(ValueError):
+            self.job(status="awaiting_approval")
+            rp.notify_again("77-5")
+
+    def test_dashboard_lists_failed_notices(self):
+        self.job(notify_failed={"G1|U1": {"attempts": 2, "error": "timeout", "at": 0}})
+        sys.path.insert(0, os.path.join(os.path.dirname(rp.__file__), "..", "..", "dev-automation", "tools"))
+        import dashboard
+        with mock.patch.dict(os.environ, {"REVIEW_STATE_DIR": self.tmp}):
+            jobs = dashboard.read_reviews()["jobs"]
+        self.assertEqual(jobs[0]["notify_failed"], [{"error": "timeout", "attempts": 2}])
+
+    def test_guard_asks_before_notify(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(rp.__file__), "..", "..", "..", "hooks"))
+        import guard_write
+        self.assertEqual(guard_write.decide({"tool_name": "Bash",
+                                             "tool_input": {"command": "python review_post.py notify 77-5"}})[0], "ask")
+
+
 class GuardHookTest(unittest.TestCase):
     HOOK = os.path.join(_ROOT, ".claude", "hooks", "guard_write.py")
 
