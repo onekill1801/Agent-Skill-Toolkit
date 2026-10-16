@@ -34,12 +34,15 @@ review.json (default: <worktree>.review.json):
                  # Correctness · Code Quality · Architecture · Security · Performance · Testing
   "positives": ["điểm làm tốt", ...],                                              # optional
   "date": "YYYY-MM-DD",                       # optional; the note's Date line (never file metadata)
+  "verdict_note": "kèm 1 góp ý Major về test",  # optional, after the verdict
+  "scope": "chỉ đọc code (diff + source nhánh). Chưa chạy mvn test.",   # optional "> Phạm vi" line
   "reviewed_commits": "all | new_only",
   "model": "provider:model"
 }
-REVIEW_NOTE_STYLE=compact (default): verdict + summary + one or two lines per finding (nits: title only).
-REVIEW_NOTE_STYLE=full: the "Code Review Summary" layout of dev-automation/prompts/code_review_prompt.md
-(Critical = blocker, Major = major, Minor/Nitpicks = minor+nit; compliance, positives, Files Reviewed).
+REVIEW_NOTE_STYLE=full (default): the "Code Review Summary" layout agreed with the team — MR/Date/Commit/
+Verdict header, "> Phạm vi" line, Overview, Critical/Major (Why:/Suggestion:) and Minor/Nitpicks (one
+paragraph), Standards Compliance, Positive Observations, Files Reviewed (from ws.json).
+REVIEW_NOTE_STYLE=compact: verdict + summary + one or two lines per finding (nits: title only).
 REVIEW_INLINE_COMMENTS=1 also posts findings with file:line on the diff line (default 0: one note only).
 """
 
@@ -50,6 +53,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 import review_common as rc
 import review_rules as rr
@@ -117,6 +121,10 @@ def validate(job: dict, review: dict) -> list:
     pos = review.get("positives")
     if pos is not None and not (isinstance(pos, list) and all(isinstance(p, str) for p in pos)):
         errs.append("positives must be a list of strings")
+    for k in ("verdict_note", "scope"):
+        if review.get(k) is not None and not (isinstance(review[k], str) and len(review[k]) <= 300
+                                              and not re.search(r"[\r\n]", review[k])):
+            errs.append(f"{k} must be one line of text (<= 300 chars)")
     if review.get("date") is not None and not (isinstance(review["date"], str) and _DATE.fullmatch(review["date"])):
         errs.append("date must be a string YYYY-MM-DD")
     if review.get("verdict") == "APPROVE" and any(isinstance(f, dict) and f.get("severity") == "blocker"
@@ -137,7 +145,7 @@ SECTIONS = (("🔴 Critical Issues (must fix before merge)", ("blocker",), "No c
 COMPACT_SECTIONS = (("🔴 Phải sửa trước khi merge", ("blocker",), ""), ("🟡 Nên sửa", ("major",), ""),
                     ("🟢 Nhỏ", ("minor", "nit"), ""))
 COMPLIANCE = ("Correctness", "Code Quality", "Architecture", "Security", "Performance", "Testing")
-STATUS_ICON = {"ok": "✅", "warn": "⚠️", "fail": "❌"}
+STATUS_ICON = {"ok": "✅", "warn": "🟡", "fail": "❌"}
 
 WORD_JOINER = rr.WORD_JOINER    # invisible; GitLab needs a name char right after "@" to make a mention
 
@@ -188,10 +196,10 @@ def _cell(text) -> str:
 
 
 def note_style() -> str:
-    """REVIEW_NOTE_STYLE: compact (default — short note, one or two lines per finding) | full (the
-    complete "Code Review Summary" with compliance / positives / files tables)."""
-    s = (rc.config.get("REVIEW_NOTE_STYLE", "compact") or "compact").strip().lower()
-    return s if s in ("compact", "full") else "compact"
+    """REVIEW_NOTE_STYLE: full (default — the team's "Code Review Summary" layout) | compact (a short
+    note, one or two lines per finding, no tables)."""
+    s = (rc.config.get("REVIEW_NOTE_STYLE", "full") or "full").strip().lower()
+    return s if s in ("compact", "full") else "full"
 
 
 def inline_enabled() -> bool:
@@ -320,78 +328,122 @@ def _render_compact(job: dict, review: dict, inline_ok: set, approver: str) -> s
     return defang("\n".join(lines))
 
 
-def render_note(job: dict, review: dict, inline_ok: set, approver: str = "") -> str:
-    if note_style() == "compact":
-        return _render_compact(job, review, inline_ok, approver)
-    lines = []
+def _title(t: str) -> str:
+    t = t.strip()
+    return t if t[-1:] in ".!?:…" else t + "."
 
-    def _section():
-        while lines and lines[-1] == "":
-            lines.pop()
-        return ["", "---", ""]
 
+_SRC_ROOT = re.compile(r"^(?:.*?/)?src/(?:main|test|it|integrationTest)/(?:java|kotlin|groovy|scala|resources)/")
+
+
+def _files_rel(paths: list) -> dict:
+    """{path: path without its source root (src/main/java/, src/test/java/...) and without the package
+    prefix ALL changed files share} - src/main/java/com/fis/etask/module/x/A.java -> module/x/A.java."""
+    split = [_SRC_ROOT.sub("", p.replace("\\", "/")).split("/") for p in paths]
+    common = 0
+    if len(split) > 1:
+        for parts in zip(*[s[:-1] for s in split]):
+            if len(set(parts)) != 1:
+                break
+            common += 1
+    common = max(0, common - 1)          # keep one shared folder for context (module/task/..., as the team writes it)
+    return {p: "/".join(s[common:]) for p, s in zip(paths, split)}
+
+
+def _scope_line(job: dict, review: dict, head: str) -> str:
+    """'> Phạm vi: …' — the reviewer's own note, else what the tests list says was (not) run."""
+    if isinstance(review.get("scope"), str) and review["scope"].strip():
+        return "> Phạm vi: " + review["scope"].strip()
+    ran = [t for t in (review.get("tests") or []) if t.get("result") in ("pass", "fail")]
+    if ran:
+        return "> Phạm vi: đã chạy " + " · ".join(f"`{t.get('cmd', '?')}` → {t['result']}" for t in ran) + "."
+    return f"> Phạm vi: chỉ đọc code (diff + source nhánh tại `{head}`). Chưa chạy build/test."
+
+
+def _render_full(job: dict, review: dict, inline_ok: set, approver: str) -> str:
+    """The team's "Code Review Summary" layout (the sample agreed with the user, 2026-10-16)."""
     findings = review.get("findings", [])
     head = ((job.get("diff_refs") or {}).get("head_sha") or "")[:8]
-    branches = f" (`{job['source_branch']}` -> `{job['target_branch']}`)" if job.get("source_branch") else ""
-    lines += [rr.marker(job), "## Code Review Summary", "",
-             f"**MR:** !{job['iid']} - {job.get('title') or ''}".rstrip(" -"),
-             "**Reviewer:** AI Agent"]
+    names = _short_names([f["file"] for f in findings if f.get("file")])
+    ws = _ws(job)
+    lines = [rr.marker(job), "## Code Review Summary", "",
+             f"**MR:** !{job['iid']} - {job.get('title') or ''}".rstrip(" -"), "**Reviewer:** AI Agent"]
     date = _review_date(review)
+    if not date and isinstance(ws.get("prepared_at"), (int, float)):
+        date = time.strftime("%Y-%m-%d", time.localtime(ws["prepared_at"]))   # stable for this workspace
     if date:
         lines.append(f"**Date:** {date}")
-    lines += [f"**Commit:** {head}{branches}", f"**Overall Verdict:** {VERDICT_ICON[review['verdict']]}",
-              "", "---", "", "### Overview", "", review["summary"].strip()]
-    n = 0
+    src = f" (source `{job['source_branch']}` -> target `{job['target_branch']}`)" if job.get("source_branch") else ""
+    lines.append(f"**Commit:** `{head}`{src}")
+    note = review.get("verdict_note")
+    lines += [f"**Overall Verdict:** {VERDICT_ICON[review['verdict']]}"
+              + (f" ({note.strip()})" if isinstance(note, str) and note.strip() else ""),
+              "", _scope_line(job, review, head), "", "---", "", "### Overview", "", review["summary"].strip()]
     for title, sevs, empty in SECTIONS:
-        lines += _section() + [f"### {title}", ""]
+        lines += _section_break(lines) + [f"### {title}", ""]
         items = [(i, f) for i, f in enumerate(findings) if f.get("severity") in sevs]
         if not items:
             lines.append(empty)
-        for i, f in items:
-            n += 1
-            lines.append(f"**{n}. {_loc(f)}{f['title']}**")
+        for n, (i, f) in enumerate(items, 1):
+            loc = (f"[`{names[f['file']]}`" + (f":{f['line']}" if f.get("line") else "") + "] ") if f.get("file") else ""
+            head_line = f"**{n}. {loc}{_title(f['title'])}**"
             if i in inline_ok:
-                lines += ["", "- _Chi tiết ở comment inline._", ""]
+                lines += [head_line + " _(chi tiết ở comment inline)_", ""]
                 continue
-            sub = [_labelled("- **Why:**", f["body"])] if f.get("body") else []
-            if f.get("suggestion"):
-                sub.append(_labelled("- **Suggestion:**", f["suggestion"]))
-            lines += ([""] + sub + [""]) if sub else [""]
+            body, sug = (f.get("body") or "").strip(), (f.get("suggestion") or "").strip()
+            if f.get("severity") in ("blocker", "major"):
+                lines.append(head_line)
+                if body:
+                    lines.append(_labelled("Why:", body))
+                if sug:
+                    lines.append(_labelled("Suggestion:", sug))
+            else:                                               # minor / nit: one paragraph, as in the sample
+                text = " ".join(x for x in (body, sug) if x and "\n" not in x)
+                lines.append(head_line + (" " + text if text else ""))
+                if body and "\n" in body:
+                    lines += ["", body]
+                if sug and "\n" in sug:                         # code: labelled, the fence on its own lines
+                    lines += ["", _labelled("Suggestion:", sug)]
+            lines.append("")
     comp = review.get("compliance") or {}
     if comp:
-        lines += _section() + ["### Standards Compliance", "", "| Category | Status | Notes |",
-                  "|----------|--------|-------|"]
+        lines += _section_break(lines) + ["### Standards Compliance", "", "| Category | Status | Notes |",
+                                          "|----------|--------|-------|"]
         for cat in COMPLIANCE:
             c = comp.get(cat) or {}
             lines.append(f"| {cat} | {STATUS_ICON.get(c.get('status'), '—')} | {_cell(c.get('note'))} |")
     pos = [p for p in (review.get("positives") or []) if isinstance(p, str) and p.strip()]
     if pos:
-        lines += _section() + ["### Positive Observations", ""] + [f"- {p.strip()}" for p in pos]
-    ws = _ws(job)
+        lines += _section_break(lines) + ["### Positive Observations", ""] + [f"- {p.strip()}" for p in pos]
     files = ws.get("files") or []
     if files:
+        rel = _files_rel([f.get("path", "?") for f in files])
         per = {}
         for f in findings:
             if f.get("file"):
                 per[f["file"]] = per.get(f["file"], 0) + 1
-        lines += _section() + ["### Files Reviewed", "", "| File | Lines Changed | Issues Found |",
-                  "|------|--------------|--------------|"]
+        lines += _section_break(lines) + ["### Files Reviewed", "", "| File | Lines Changed | Issues Found |",
+                                          "|------|--------------|--------------|"]
         for f in files:
             add, rem = f.get("added"), f.get("removed")
             size = "binary" if add is None else f"+{add} / -{rem}"
-            path = _cell(f.get("path", "?")).replace("`", "'")
+            path = _cell(rel.get(f.get("path", "?"), "?")).replace("`", "'")
             lines.append(f"| `{path}` | {size} | {per.get(f.get('path'), 0)} |")
-    tests = review.get("tests") or []
-    if tests:
-        lines += ["", "**Kiểm thử:** " + " · ".join(f"`{t.get('cmd', '?')}` → {t.get('result', '?')}" for t in tests)]
-    c = (ws.get("commits") or {})
-    scope = f"{c.get('new', '?')}/{c.get('total', '?')} commit mới" if c else ""
-    meta = [x for x in ("🤖 AI review", review.get("model") and f"model {review['model']}",
-                        approver and f"duyệt bởi {approver}", f"head {head}", scope) if x]
-    lines += ["", "---", "_" + " · ".join(meta) + "_"]
     # ONE pass over the exact text the rules check: fences are judged on the whole note, never per
     # field (a field's fence could pair with another field's in the posted note — Codex fmt R2)
-    return defang("\n".join(lines))
+    return defang("\n".join(lines).rstrip() + "\n")
+
+
+def _section_break(lines: list) -> list:
+    while lines and lines[-1] == "":
+        lines.pop()
+    return ["", "---", ""]
+
+
+def render_note(job: dict, review: dict, inline_ok: set, approver: str = "") -> str:
+    if note_style() == "compact":
+        return _render_compact(job, review, inline_ok, approver)
+    return _render_full(job, review, inline_ok, approver)
 
 
 def render_inline(f: dict) -> str:

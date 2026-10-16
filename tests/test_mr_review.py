@@ -156,40 +156,56 @@ class PostGateTest(unittest.TestCase):
     def test_render_note_folds_non_inline_findings(self):
         with mock.patch.object(rp, "_ws", return_value={}):
             note = rp.render_note(self.job(), self.review(), set())
-        self.assertIn("**1. [`a.py`:3] t**", note)
+        self.assertIn("**1. [`a.py`:3] t.**", note)
         self.assertIn("No critical issues found.", note)
 
-    def test_render_note_uses_code_review_summary_layout(self):
-        review = self.review(verdict="REQUEST_CHANGES", date="2026-10-15", positives=["gọn"],
-                             compliance={"Correctness": {"status": "fail", "note": "a|b"}},
-                             findings=[{"severity": "nit", "title": "n"},
-                                       {"severity": "blocker", "title": "b", "body": "why", "suggestion": "fix",
-                                        "file": "x.java", "line": 9},
-                                       {"severity": "major", "title": "m"}])
-        ws = {"files": [{"path": "x.java", "added": 3, "removed": 1}, {"path": "img.png", "added": None}]}
-        job = self.job(title="T", source_branch="f", target_branch="dev")
+    def test_render_note_matches_the_team_sample(self):                       # layout agreed 2026-10-16
+        path = "src/main/java/com/fis/etask/module/task/TaskHistoryRecorder.java"
+        review = self.review(verdict="APPROVE", date="2026-10-08", verdict_note="kèm 1 góp ý Major về test",
+                             scope="chỉ đọc code (diff + source nhánh tại 2a981f75). Chưa chạy `mvn compile`/test.",
+                             positives=["Tái sử dụng batchInsert."],
+                             compliance={"Testing": {"status": "warn", "note": "Chưa có test (xem Major 1)"},
+                                         "Security": {"status": "ok", "note": "a|b"}},
+                             findings=[{"severity": "major", "title": "Chưa có unit test cho `recordTaskCreationBatch`",
+                                        "body": "method mới có nhiều nhánh.", "suggestion": "thêm test tối thiểu.",
+                                        "file": path, "line": 87},
+                                       {"severity": "minor", "title": "Gom nhóm theo `projectId` là không cần thiết",
+                                        "body": "batchInsert đã bind project_id.", "suggestion": "Gọi thẳng batchInsert.",
+                                        "file": path, "line": 125},
+                                       {"severity": "nit", "title": "MR chưa có description", "body": "Nên ghi ngắn mục đích."}])
+        ws = {"files": [{"path": path, "added": 85, "removed": 40},
+                        {"path": "src/main/java/com/fis/etask/module/integration/MassImportTasks.java",
+                         "added": 4, "removed": 4}]}
+        job = self.job(iid=1153, title="UPDATE import ai log history", source_branch="Update-Import",
+                       target_branch="merge/rfc")
         with mock.patch.object(rp, "_ws", return_value=ws):
             note = rp.render_note(job, review, set())
+        expect = [
+            "## Code Review Summary\n\n**MR:** !1153 - UPDATE import ai log history\n**Reviewer:** AI Agent\n"
+            "**Date:** 2026-10-08\n**Commit:** `aaaaaaaa` (source `Update-Import` -> target `merge/rfc`)\n"
+            "**Overall Verdict:** 🟢 APPROVE (kèm 1 góp ý Major về test)\n\n> Phạm vi: chỉ đọc code",
+            "---\n\n### Overview\n\nok\n\n---\n\n### 🔴 Critical Issues (must fix before merge)\n\n"
+            "No critical issues found.\n\n---",
+            "### 🟡 Major Suggestions (strongly recommended)\n\n**1. [`TaskHistoryRecorder.java`:87] Chưa có unit test "
+            "cho `recordTaskCreationBatch`.**\nWhy: method mới có nhiều nhánh.\nSuggestion: thêm test tối thiểu.\n\n---",
+            "### 🟢 Minor / Nitpicks\n\n**1. [`TaskHistoryRecorder.java`:125] Gom nhóm theo `projectId` là không cần "
+            "thiết.** batchInsert đã bind project_id. Gọi thẳng batchInsert.\n\n**2. MR chưa có description.** "
+            "Nên ghi ngắn mục đích.\n\n---",
+            "### Standards Compliance\n\n| Category | Status | Notes |",
+            "| Security | ✅ | a\\|b |", "| Testing | 🟡 | Chưa có test (xem Major 1) |", "| Correctness | — |  |",
+            "### Positive Observations\n\n- Tái sử dụng batchInsert.\n\n---\n\n### Files Reviewed",
+            "| `module/task/TaskHistoryRecorder.java` | +85 / -40 | 2 |", "| `module/integration/MassImportTasks.java` | +4 / -4 | 0 |"]
+        for e in expect:
+            self.assertIn(e, note)
         self.assertTrue(note.startswith(rr.marker(job)))
-        order = [note.index(s) for s in ("## Code Review Summary", "**Overall Verdict:** 🔴 REQUEST_CHANGES",
-                                         "### Overview", "### 🔴 Critical", "**1. [`x.java`:9] b**",
-                                         "- **Why:** why", "- **Suggestion:** fix", "### 🟡 Major", "**2. m**",
-                                         "### 🟢 Minor / Nitpicks", "**3. n**", "### Standards Compliance",
-                                         "### Positive Observations", "### Files Reviewed")]
-        self.assertEqual(order, sorted(order))
-        self.assertIn("**Date:** 2026-10-15", note)
-        self.assertIn("| Correctness | ❌ | a\\|b |", note)
-        self.assertIn("| Security | — |  |", note)
-        self.assertIn("| `x.java` | +3 / -1 | 1 |", note)
-        self.assertIn("| `img.png` | binary | 0 |", note)
-        self.assertIn("(`f` -> `dev`)", note)
+        self.assertNotIn("AI review ·", note)                                  # no footer in the team layout
 
     def test_inline_finding_is_listed_once_in_note(self):
         review = self.review(findings=[{"severity": "major", "title": "t", "body": "secret why", "file": "a.py",
                                         "line": 3}])
         with mock.patch.object(rp, "_ws", return_value={}):
             note = rp.render_note(self.job(), review, {0})
-        self.assertIn("Chi tiết ở comment inline", note)
+        self.assertIn("chi tiết ở comment inline", note)
         self.assertNotIn("secret why", note)
 
     def test_defang_neutralises_every_at_except_in_fences(self):
@@ -337,7 +353,7 @@ class AutoPostRulesTest(unittest.TestCase):
         with mock.patch.object(rp, "_ws", return_value={}):
             note, inline = rp.payload(self.job(), review)
         for text in (note, inline[0]):
-            self.assertIn("**Suggestion:**\n\n```java\n@Override\nvoid f() {}\n```", text)
+            self.assertRegex(text, r"Suggestion:(\*\*)?\n\n```java\n@Override\nvoid f\(\) \{\}\n```")
         self.assertEqual(rp._labelled("- **Why:**", " one line "), "- **Why:** one line")
 
     def test_rendered_note_keeps_fenced_code_exact(self):
@@ -413,7 +429,7 @@ class AutoPostRulesTest(unittest.TestCase):
         self.assertEqual(posted_inline, [])                 # finding 0 was already posted inline
         note = gl.add_mr_comment.call_args[0][1]
         self.assertIn(rr.marker(job), note)
-        self.assertIn("AI review", note)
+        self.assertIn("## Code Review Summary", note)
 
     def test_uncertain_inline_stops_then_reconciles_by_marker(self):          # Codex R.M4 R1 #2
         gl = mock.Mock()
@@ -474,14 +490,14 @@ class AutoPostRulesTest(unittest.TestCase):
 
 
 class CompactNoteTest(unittest.TestCase):
-    """Default note (REVIEW_NOTE_STYLE unset = compact) and inline comments off by default."""
+    """REVIEW_NOTE_STYLE=compact (opt-in) and inline comments off by default."""
 
     def setUp(self):
         p = mock.patch.dict(os.environ)
         p.start()
         self.addCleanup(p.stop)
-        for k in ("REVIEW_NOTE_STYLE", "REVIEW_INLINE_COMMENTS"):
-            os.environ.pop(k, None)
+        os.environ.pop("REVIEW_INLINE_COMMENTS", None)                       # default: off
+        os.environ["REVIEW_NOTE_STYLE"] = "compact"                          # not the default since 2026-10-16
         w = mock.patch.object(rp, "_ws", return_value={"commits": {"new": 2, "total": 5},
                                                        "files": [{"path": "a.py", "added": 1, "removed": 0}]})
         w.start()
@@ -590,7 +606,9 @@ class CompactNoteTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"REVIEW_NOTE_STYLE": "full"}):
             self.assertIn("## Code Review Summary", rp.render_note(self.job(), self.review([]), set()))
         with mock.patch.dict(os.environ, {"REVIEW_NOTE_STYLE": "weird"}):
-            self.assertEqual(rp.note_style(), "compact")
+            self.assertEqual(rp.note_style(), "full")
+        os.environ.pop("REVIEW_NOTE_STYLE")
+        self.assertEqual(rp.note_style(), "full")                              # the default
 
 
 class GuardHookTest(unittest.TestCase):

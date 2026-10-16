@@ -79,6 +79,8 @@ Review against:
                  "Architecture": {...}, "Security": {...}, "Performance": {...}, "Testing": {...}},
   "positives": ["điểm làm tốt, cụ thể"],
   "date": "YYYY-MM-DD (hôm nay)",
+  "verdict_note": "tuỳ chọn, vd: kèm 1 góp ý Major về test",
+  "scope": "vd: chỉ đọc code (diff + source nhánh tại <sha>). Chưa chạy mvn compile/test.",
   "reviewed_commits": "new_only",
   "model": "<provider:model>"
 }
@@ -92,10 +94,12 @@ Review against:
 - **Be short** (the team reads it on the MR): `summary` 1–3 câu; `title` ≤ 12 từ; `body` 1–2 câu (vì sao
   sai / hậu quả); `suggestion` 1 câu hoặc một khối code ngắn; tối đa ~8 finding — gộp lỗi cùng loại,
   bỏ nit không đáng nói. Không nhắc lại diff, không khen chung chung.
-- Default note (REVIEW_NOTE_STYLE=compact): verdict + summary + `[file:line] title — body ↳ Sửa: suggestion`
-  grouped 🔴 `blocker` / 🟡 `major` / 🟢 `minor`+`nit` (nit: title only). With REVIEW_NOTE_STYLE=full the
-  "Code Review Summary" layout (`dev-automation/prompts/code_review_prompt.md`) also shows `compliance`
-  (6 categories) and `positives` — fill them anyway, they cost one line each.
+- Default note (REVIEW_NOTE_STYLE=full) = the team's "Code Review Summary": header (MR, Date, Commit, Verdict +
+  `verdict_note`), `> Phạm vi:` = `scope`, Overview = `summary`, 🔴 Critical = `blocker`, 🟡 Major = `major`
+  (`body` → **Why:**, `suggestion` → **Suggestion:**), 🟢 Minor/Nitpicks = `minor`+`nit` (title + one short
+  paragraph), Standards Compliance = `compliance` (fill all 6), Positive Observations = `positives` (2–4 cụ thể),
+  Files Reviewed from ws.json. Titles are short statements (the renderer adds the final "."); findings with
+  no file (e.g. "MR chưa có description") are fine. REVIEW_NOTE_STYLE=compact = short note without tables.
 - Put code identifiers in backticks (`` `@Test` ``, `` `findById` ``). Every `@` outside fenced code
   (the MR author included) gets an invisible word joiner after it when rendered, so a review never
   pings anyone; fenced code is posted byte-exact. Do not use raw HTML or `&…;` entities (they block
