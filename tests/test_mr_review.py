@@ -744,6 +744,31 @@ class NotifyTest(unittest.TestCase):
         self.assertEqual(saved["notices"]["G1|U1"]["state"], "sent")
         self.assertTrue(saved["worker_terminal_closed"])
 
+    def test_timeout_is_uncertain_not_retried(self):                          # Codex notify R2 #1
+        self.job()
+        with mock.patch.object(rp.subprocess, "run", side_effect=rp.subprocess.TimeoutExpired("x", 60)):
+            rp.deliver_notices("77-5", self.review)
+        self.assertEqual(self.notices()["G1|U1"]["state"], "uncertain")
+        with mock.patch.object(rp.subprocess, "run") as run, \
+             mock.patch.object(rc, "now", return_value=rc.now() + 100000):
+            rp.sweep()
+            run.assert_not_called()
+
+    def test_a_requeued_job_is_never_overwritten(self):                       # Codex notify R2 #2
+        self.job(people=("U1", "U2"), note_id=7)
+
+        def requeue_while_sending(*a, **kw):                                  # add_job replaces the job
+            rc.save_job({"id": "77-5", "project_id": "77", "iid": 5, "status": "queued", "head_sha": "b" * 40,
+                          "requests": [{"source": "fchat", "group": "G2", "by_id": "U9"}]})
+            return self.res(0, self.OK)
+        with mock.patch.object(rp.subprocess, "run", side_effect=requeue_while_sending) as run:
+            rp.deliver_notices("77-5", self.review)
+        self.assertEqual(run.call_count, 1)                                   # stopped: delivery obsolete
+        saved = rc.load_job("77-5")
+        self.assertEqual(saved["status"], "queued")
+        self.assertEqual(saved["requests"][0]["group"], "G2")
+        self.assertNotIn("notices", saved)
+
     def test_dashboard_lists_open_notices(self):
         self.job()
         j = rc.load_job("77-5")

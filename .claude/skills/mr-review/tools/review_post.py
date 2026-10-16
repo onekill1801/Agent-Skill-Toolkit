@@ -829,7 +829,10 @@ def _send_one(r: dict, text: str) -> tuple:
     try:
         p = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace",
                            timeout=60, env=env)
-    except (OSError, subprocess.TimeoutExpired) as e:
+    except subprocess.TimeoutExpired:
+        # send.py transmits FIRST and then waits for the echo: the message may have arrived (R2 #1)
+        return "uncertain", "hết thời gian chờ khi gửi — không rõ tin đã tới chưa"
+    except OSError as e:                                       # the child never started: nothing was sent
         return "failed", _clean_error(f"{type(e).__name__}: {e}")
     return _notify_result(p)
 
@@ -849,33 +852,56 @@ def _due(n: dict, now: int) -> bool:
             and now - (n.get("at") or 0) >= NOTIFY_BACKOFF_S * max(1, n.get("attempts", 1)))
 
 
+def _update_posted(jid: str, note_id, change) -> dict:
+    """Apply `change(job)` and save — under the "queue" lock every job writer uses (review_queue.add_job
+    re-queues a posted job under it), and only while the job is still THIS posted review (same note id):
+    a job replaced by a new request / head is never overwritten with stale state (Codex notify R2 #2).
+    Returns the saved job, or None when the review was replaced."""
+    with rc.file_lock("queue"):
+        job = rc.load_job(jid)
+        if not job or job.get("status") != "posted" or job.get("note_id") != note_id:
+            return None
+        change(job)
+        rc.save_job(job, sync=False)
+        return job
+
+
 def deliver_notices(jid: str, review: dict = None, force: bool = False) -> list:
-    """Send every notice that is due — per recipient (R1 #4) — saving the job after EACH step: `sending`
-    before, the outcome after (R1 #3). Caller holds the post-<jid> lock. `force` (a human): also
-    failed-out / unconfirmed / uncertain ones."""
+    """Send every notice that is due — per recipient (R1 #4) — recording `sending` before and the outcome
+    after EACH send (R1 #3), each write through _update_posted. Caller holds the post-<jid> lock (one
+    sender per job). `force` (a human): also failed-out / unconfirmed / uncertain ones."""
     job = rc.load_job(jid)
     if not job or job.get("status") != "posted":
         return []
-    notices, now = job.setdefault("notices", {}), rc.now()
-    for n in notices.values():                                 # a sender that died mid-send
-        if n.get("state") == "sending" and now - (n.get("at") or 0) > NOTIFY_SENDING_STALE_S:
-            n.update(state="uncertain", error="tiến trình gửi bị dừng giữa chừng — không rõ tin đã tới chưa")
-    reqs = _requesters(job)
-    keys = [k for k, n in notices.items() if k in reqs
+    note_id = job.get("note_id")
+
+    def settle_dead(j):                                        # a sender that died mid-send
+        now = rc.now()
+        for n in (j.get("notices") or {}).values():
+            if n.get("state") == "sending" and now - (n.get("at") or 0) > NOTIFY_SENDING_STALE_S:
+                n.update(state="uncertain", error="tiến trình gửi bị dừng giữa chừng — không rõ tin đã tới chưa")
+    job = _update_posted(jid, note_id, settle_dead)
+    if job is None:
+        return []
+    reqs, now = _requesters(job), rc.now()
+    keys = [k for k, n in (job.get("notices") or {}).items() if k in reqs
             and (_due(n, now) or (force and n.get("state") in NOTICE_OPEN + ("pending",)))]
     if not keys:
-        rc.save_job(job, sync=False)
         return []
     review = review or load_review(job, job.get("review_file", ""))
     text, out = notice_text(job, review), []
     for k in keys:
-        n = notices[k]
-        n.update(state="sending", at=rc.now(), attempts=(0 if force else n.get("attempts", 0)) + 1)
-        rc.save_job(job, sync=False)
+        def mark(j, k=k):
+            n = j["notices"][k]
+            n.update(state="sending", at=rc.now(), attempts=(0 if force else n.get("attempts", 0)) + 1)
+        if _update_posted(jid, note_id, mark) is None:
+            break                                              # replaced meanwhile: this delivery is obsolete
         state, err = _send_one(reqs[k], text)
-        n.update(state=state, at=rc.now(), error=err)
-        rc.log_event(job, "notified" if state == "sent" else f"notify_{state}", **({"error": err[:120]} if err else {}))
-        rc.save_job(job, sync=False)
+
+        def record(j, k=k, state=state, err=err):
+            j["notices"][k].update(state=state, at=rc.now(), error=err)
+            rc.log_event(j, "notified" if state == "sent" else f"notify_{state}", **({"error": err[:120]} if err else {}))
+        _update_posted(jid, note_id, record)
         out.append({"key": k, "state": state, "error": err})
     return out
 
@@ -914,7 +940,7 @@ def close_idle_workers(dry_run: bool = False) -> list:
             # reload + save under the job's lock: a snapshot taken above must not overwrite what another
             # process recorded meanwhile, e.g. a delivered notice (Codex notify R1 #5)
             try:
-                with rc.file_lock(f"post-{j['id']}", timeout=5, stale_after=1800):
+                with rc.file_lock("queue", timeout=5):         # the lock every job writer uses (R2 #2)
                     cur = rc.load_job(j["id"]) or j
                     cur["worker_terminal_closed"] = True
                     if err:
@@ -932,8 +958,7 @@ def notify_again(jid: str) -> dict:
         job = rc.load_job(jid)
         if not job or job.get("status") != "posted":
             raise ValueError(f"job {jid} is not posted (status {job and job.get('status')})")
-        seed_notices(job)                              # a job posted before notices existed
-        rc.save_job(job, sync=False)
+        _update_posted(jid, job.get("note_id"), seed_notices)   # a job posted before notices existed
         res = deliver_notices(jid, force=True)
     return {"job_id": jid, "notified": res}
 
