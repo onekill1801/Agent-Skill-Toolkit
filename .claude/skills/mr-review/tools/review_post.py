@@ -666,7 +666,7 @@ def _inline(gl, job: dict, f: dict, i: int = 0) -> bool:
     if isinstance(res, dict) and res.get("uncertain"):
         # it may exist: stop, the next attempt reconciles by marker before posting anything (Codex R.M4 #2)
         job.setdefault("inline_uncertain", {})[refs["head_sha"]] = True
-        rc.save_job(job, sync=False)
+        _save_merged(job, sync=False)
         raise RuntimeError(f"inline comment #{i}: outcome unknown ({res.get('message', '')[:120]}) — "
                            "will reconcile before retrying")
     if isinstance(res, dict) and res.get("error"):
@@ -684,10 +684,10 @@ def _safe_name(s: str) -> str:
     return re.sub(r"[^\w.-]", "", s or "")[:40]
 
 
-def _save_posted(job: dict, notify: bool) -> None:
-    """Save the job as posted under the "queue" lock — merging what review_queue.add_job appended while
-    GitLab was being called (another requester, a re-request for a new head), so nobody is dropped and
-    every requester gets a pending notice (Codex notify R3 #2)."""
+def _save_merged(job: dict, seed: bool = False, sync: bool = True) -> None:
+    """EVERY save of the posting path: under the "queue" lock, reload and merge what review_queue.add_job
+    appended while GitLab was being called (another requester, a re-request for a new head) so nobody is
+    dropped; `seed` = also create the pending notices (the "posted" save) — Codex notify R3 #2, R4 #1."""
     with rc.file_lock("queue"):
         cur = rc.load_job(job["id"]) or {}
         seen = {json.dumps(r, sort_keys=True) for r in job.get("requests", [])}
@@ -698,9 +698,13 @@ def _save_posted(job: dict, notify: bool) -> None:
             job["rerequested_head"] = cur["rerequested_head"]
         if "priority" in cur:
             job["priority"] = min(job.get("priority", cur["priority"]), cur["priority"])
-        if notify:
+        if seed:
             seed_notices(job)
-        rc.save_job(job)
+        rc.save_job(job, sync=sync)
+
+
+def _save_posted(job: dict, notify: bool) -> None:
+    _save_merged(job, seed=notify)
 
 
 def _post_locked(jid: str, dry_run: bool, notify: bool) -> dict:
@@ -722,7 +726,7 @@ def _post_locked(jid: str, dry_run: bool, notify: bool) -> dict:
         job.update(status="queued" if st["state"] == "opened" else "cancelled", head_sha=st["current_head"],
                    approval=None, previous_review=job.get("review_file"))
         rc.log_event(job, "stale", reviewed=str(st["reviewed_head"])[:8], current=str(st["current_head"])[:8])
-        rc.save_job(job)
+        _save_merged(job)
         return {"job_id": jid, "stale": True, "requeued": job["status"] == "queued", "posted": False}
 
     findings = review.get("findings", [])
@@ -752,14 +756,14 @@ def _post_locked(jid: str, dry_run: bool, notify: bool) -> dict:
             inline_ok |= found
             job.setdefault("inline_done", {})[head] = sorted(inline_ok)
             job["inline_uncertain"].pop(head, None)
-            rc.save_job(job, sync=False)
+            _save_merged(job, sync=False)
         for i in inline_cands:
             if i in done:
                 continue
             if _inline(gl, job, findings[i], i):
                 inline_ok.add(i)
                 job.setdefault("inline_done", {})[head] = sorted(inline_ok)
-                rc.save_job(job, sync=False)
+                _save_merged(job, sync=False)
         note = rc.gl_check(gl.add_mr_comment(job["iid"], render_note(job, review, inline_ok, approver)),
                            "post note")
         if not (isinstance(note, dict) and note.get("id")):          # Codex R.M4 #1: no id = not posted

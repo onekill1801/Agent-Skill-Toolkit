@@ -791,6 +791,19 @@ class NotifyTest(unittest.TestCase):
         self.assertIn("U7", [r.get("by_id") for r in saved["requests"]])
         self.assertEqual(saved["notices"]["G1|U7"]["state"], "pending")
 
+    def test_every_posting_save_keeps_requesters_added_meanwhile(self):       # Codex notify R4 #1
+        self.job(status="running")
+        mine = rc.load_job("77-5")
+        cur = rc.load_job("77-5")
+        cur["requests"].append({"source": "fchat", "group": "G1", "by": "Late", "by_id": "U7"})
+        rc.save_job(cur)
+        mine["inline_done"] = {HEAD: [0]}
+        rp._save_merged(mine, sync=False)                                     # an intermediate (inline) save
+        self.assertIn("U7", [r.get("by_id") for r in rc.load_job("77-5")["requests"]])
+        import inspect
+        for fn in (rp._post_locked, rp._inline):
+            self.assertNotIn("rc.save_job(", inspect.getsource(fn))         # no raw save left on this path
+
     def test_dashboard_lists_open_notices(self):
         self.job()
         j = rc.load_job("77-5")
