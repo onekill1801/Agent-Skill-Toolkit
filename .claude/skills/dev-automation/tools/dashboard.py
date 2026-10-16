@@ -175,9 +175,12 @@ def read_reviews() -> dict:
                     "updated": j.get("updated") or j.get("created"),
                     "by": ", ".join(sorted({str(r.get("by") or r.get("source", ""))
                                             for r in j.get("requests") or [] if isinstance(r, dict)})),
-                    # requester notices that could not be sent (sweep retries them; shown under "needs you")
-                    "notify_failed": [{"error": str(f.get("error") or "")[:200], "attempts": f.get("attempts", 0)}
-                                      for f in (j.get("notify_failed") or {}).values() if isinstance(f, dict)]})
+                    # requester notices not delivered (failed: sweep retries; unconfirmed / uncertain: a human
+                    # decides) — shown under "needs you"
+                    "notify_open": [{"state": n.get("state"), "error": str(n.get("error") or "")[:200],
+                                     "attempts": n.get("attempts", 0)}
+                                    for n in (j.get("notices") or {}).values()
+                                    if isinstance(n, dict) and n.get("state") in ("failed", "unconfirmed", "uncertain")]})
     out.sort(key=lambda j: str(j.get("updated") or ""), reverse=True)
     return {"jobs": out, "unreadable": bad}
 

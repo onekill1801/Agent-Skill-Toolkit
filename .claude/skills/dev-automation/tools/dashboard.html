@@ -286,10 +286,12 @@ function renderAttention() {
       (job ? "<br>" + code(`python ${T}/mr-review/tools/review_post.py approve ${job}`) : "")]);
   }
   for (const j of ((section("reviews").data || {}).jobs) || []) {
-    for (const f of j.notify_failed || []) {
-      rows.push([`<span class="badge s-failed">📣 báo group lỗi</span>`,
-        `<b>${esc(j.mr)}</b> · đã đăng review nhưng chưa báo được vào group<div class="note">${esc(f.error)} · thử ${esc(f.attempts)} lần` +
-        (f.attempts >= 5 ? " · đã ngừng tự thử" : " · sweep tự thử lại") + `</div>`,
+    for (const f of j.notify_open || []) {
+      const why = f.state === "failed"
+        ? (f.attempts >= 5 ? `thử ${esc(f.attempts)} lần · đã ngừng tự thử` : `thử ${esc(f.attempts)} lần · sweep tự thử lại`)
+        : "có thể tin đã tới — kiểm group rồi mới gửi lại (tránh trùng)";
+      rows.push([`<span class="badge s-failed">📣 báo group: ${esc(f.state)}</span>`,
+        `<b>${esc(j.mr)}</b> · đã đăng review nhưng chưa chắc đã báo vào group<div class="note">${esc(f.error)} · ${why}</div>`,
         code(`python ${T}/mr-review/tools/review_post.py notify ${j.id}`)]);
     }
     if (["awaiting_approval", "needs_human", "blocked"].includes(j.status)) {

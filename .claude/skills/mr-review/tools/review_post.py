@@ -724,6 +724,8 @@ def _post_locked(jid: str, dry_run: bool, notify: bool) -> dict:
     with rc.gitlab_project(job["project_id"]) as gl:
         if rr.already_posted(gl, job):                      # reconcile: lost response on a previous try
             job.update(status="posted", posted_at=rc.now(), auto_posted=auto, reconciled=True)
+            if notify:
+                seed_notices(job)                  # the lost try never told anyone: sweep delivers these
             rc.log_event(job, "posted_reconciled")
             rc.save_job(job)
             return {"job_id": jid, "posted": True, "reconciled": True}
@@ -751,95 +753,137 @@ def _post_locked(jid: str, dry_run: bool, notify: bool) -> dict:
     rw.ledger_add(job["project_id"], job["iid"], reviewed)
     job.update(status="posted", posted_at=rc.now(), note_id=note.get("id"), inline_posted=len(inline_ok),
                auto_posted=auto)
+    if notify:
+        seed_notices(job)                          # SAME save as "posted": a crash now still notifies later
     rc.log_event(job, "posted", verdict=review["verdict"], inline=len(inline_ok), auto=auto)
     rc.save_job(job)
     out = {"job_id": jid, "posted": True, "verdict": review["verdict"], "inline": len(inline_ok),
            "note_id": note.get("id")}
     rc.board_card(job, note=f"✅ Đã đăng review ({review['verdict']}, {len(inline_ok)} inline) — {job.get('web_url', '')}")
     if notify:
-        out["notified"] = notify_and_record(job, review)
+        out["notified"] = deliver_notices(jid, review)       # under post()'s lock
     return out   # worktree (= Orca card) kept until `review_ws.py gc`
 
 
 NOTIFY_MAX_ATTEMPTS = 5
 NOTIFY_BACKOFF_S = 60          # retry n waits n * this (sweep runs every ~30 s)
+NOTIFY_SENDING_STALE_S = 600   # a "sending" mark older than this = the sender died mid-send
 # credentials the child must read FRESH from .env: a long-running parent (Coordinator) holds the values it
 # loaded at start, and TChat rotates its tokens (the child would send a stale one)
 _STALE_ENV = ("FCHAT_BEARER_TOKEN", "FCHAT_REFRESH_TOKEN", "FCHAT_WS_TOKEN")
-_JWT = re.compile(r"eyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}")
+_TOKENISH = re.compile(r"eyJ[\w-]+\.[\w-]+\.[\w-]+|[A-Za-z0-9_\-+/=]{32,}")
+# notice states: pending -> sending -> sent | failed (retried with backoff) | unconfirmed | uncertain.
+# unconfirmed (TChat did not echo the message) and uncertain (sender died mid-send) are NEVER re-sent
+# automatically — the message may have arrived; a human decides (`review_post.py notify <job>`).
+NOTICE_OPEN = ("failed", "unconfirmed", "uncertain")
 
 
 def _notify_key(r: dict) -> str:
     return f"{r.get('group')}|{r.get('by_id') or ''}"
 
 
-def _notify_error(p) -> str:
-    """Short reason from notify_group's output — the JSON error message, else the last stderr line."""
-    for stream in (p.stdout or "", p.stderr or ""):
-        m = re.search(r'"message"\s*:\s*"([^"]{1,300})"', stream)
-        if m:
-            return _JWT.sub("<token>", m.group(1))
-    tail = [ln for ln in (p.stderr or "").splitlines() if ln.strip() and not ln.startswith("[WARN]")]
-    return _JWT.sub("<token>", (tail[-1] if tail else f"exit {p.returncode}"))[:300]
+def _clean_error(text: str) -> str:
+    """Redact BEFORE truncating (a token cut in half would no longer match — Codex notify R1 #6)."""
+    return _TOKENISH.sub("<redacted>", str(text or "")).strip()[:200]
 
 
-def notify_requesters(job: dict, review: dict, only: set = None) -> list:
-    """Fixed-template FChat message to each FChat requester (never raw agent output). Returns one
-    {key, group, ok, error} per requester (`only` = keys to (re)send)."""
-    script = os.path.normpath(os.path.join(rc.tools_dir(), "..", "..", "tchat-automation", "tools", "notify_group.py"))
-    text = (f"🔎 Review {job.get('project_path')}!{job['iid']} — {VERDICT_ICON[review['verdict']]}: "
-            f"{_counts(review.get('findings', []))}. {job.get('web_url', '')}")
-    env = {k: v for k, v in os.environ.items() if k not in _STALE_ENV}
-    sent, seen = [], set()
+def _notify_result(p) -> tuple:
+    """(state, error) from notify_group's exit code + JSON output."""
+    res = None
+    try:
+        res = json.loads(p.stdout) if (p.stdout or "").strip().startswith("{") else None
+    except ValueError:
+        res = None
+    if p.returncode == 0 and isinstance(res, dict) and not res.get("error"):
+        # send.py: "sent" with "confirmed": false = no echo from TChat — not proof of delivery (R1 #1)
+        return ("sent", "") if res.get("confirmed") else ("unconfirmed", "TChat không xác nhận đã nhận tin")
+    msg = res.get("message") if isinstance(res, dict) else None
+    if not msg:
+        tail = [ln for ln in (p.stderr or "").splitlines() if ln.strip() and not ln.startswith("[WARN]")]
+        msg = tail[-1] if tail else f"exit {p.returncode}"
+    return "failed", _clean_error(msg)
+
+
+def _requesters(job: dict) -> dict:
+    """{key: request} — one notice per (group, person), FChat requests only."""
+    out = {}
     for r in job.get("requests", []):
-        key = _notify_key(r)
-        if r.get("source") != "fchat" or not r.get("group") or key in seen or (only is not None and key not in only):
-            continue
-        seen.add(key)
-        args = [sys.executable, script, "--group", r["group"], "--text", text]
-        if r.get("group_type"):
-            args += ["--group-type", r["group_type"]]
-        if r.get("by_id") and r.get("by"):
-            args += ["--user-id", r["by_id"], "--user-name", r["by"]]
-        try:
-            p = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                               timeout=60, env=env)
-            ok, err = p.returncode == 0, ("" if p.returncode == 0 else _notify_error(p))
-        except (OSError, subprocess.TimeoutExpired) as e:
-            ok, err = False, f"{type(e).__name__}: {e}"[:300]
-        sent.append({"key": key, "group": r["group"], "ok": ok, "error": err})
-    return sent
+        if r.get("source") == "fchat" and r.get("group"):
+            out.setdefault(_notify_key(r), r)
+    return out
 
 
-def notify_and_record(job: dict, review: dict) -> list:
-    """Send the requester notices that are still due and RECORD the outcome on the job: `notified`
-    {key: at} never re-sent; `notify_failed` {key: {error, attempts, at}} retried by sweep() (a failure
-    used to vanish — nobody knew the group was never told)."""
-    done = job.setdefault("notified", {})
-    failed = job.setdefault("notify_failed", {})
-    due = {_notify_key(r) for r in job.get("requests", []) if r.get("source") == "fchat" and r.get("group")}
-    due -= set(done)
-    if not due:
+def notice_text(job: dict, review: dict) -> str:
+    return (f"🔎 Review {job.get('project_path')}!{job['iid']} — {VERDICT_ICON[review['verdict']]}: "
+            f"{_counts(review.get('findings', []))}. {job.get('web_url', '')}")
+
+
+def _send_one(r: dict, text: str) -> tuple:
+    script = os.path.normpath(os.path.join(rc.tools_dir(), "..", "..", "tchat-automation", "tools", "notify_group.py"))
+    args = [sys.executable, script, "--group", r["group"], "--text", text]
+    if r.get("group_type"):
+        args += ["--group-type", r["group_type"]]
+    if r.get("by_id") and r.get("by"):
+        args += ["--user-id", r["by_id"], "--user-name", r["by"]]
+    env = {k: v for k, v in os.environ.items() if k not in _STALE_ENV}
+    try:
+        p = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=60, env=env)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return "failed", _clean_error(f"{type(e).__name__}: {e}")
+    return _notify_result(p)
+
+
+def seed_notices(job: dict) -> None:
+    """Record who must be told, in the SAME save that marks the job posted: a crash before any notice is
+    sent leaves `pending` entries that sweep() delivers (Codex notify R1 #2)."""
+    notices = job.setdefault("notices", {})
+    for key in _requesters(job):
+        notices.setdefault(key, {"state": "pending", "attempts": 0, "at": rc.now()})
+
+
+def _due(n: dict, now: int) -> bool:
+    if n.get("state") == "pending":
+        return True
+    return (n.get("state") == "failed" and n.get("attempts", 0) < NOTIFY_MAX_ATTEMPTS
+            and now - (n.get("at") or 0) >= NOTIFY_BACKOFF_S * max(1, n.get("attempts", 1)))
+
+
+def deliver_notices(jid: str, review: dict = None, force: bool = False) -> list:
+    """Send every notice that is due — per recipient (R1 #4) — saving the job after EACH step: `sending`
+    before, the outcome after (R1 #3). Caller holds the post-<jid> lock. `force` (a human): also
+    failed-out / unconfirmed / uncertain ones."""
+    job = rc.load_job(jid)
+    if not job or job.get("status") != "posted":
         return []
-    res = notify_requesters(job, review, only=due)
-    for x in res:
-        if x["ok"]:
-            done[x["key"]] = rc.now()
-            failed.pop(x["key"], None)
-        else:
-            f = failed.setdefault(x["key"], {"attempts": 0})
-            f.update(error=x["error"], at=rc.now(), attempts=f["attempts"] + 1)
-        rc.log_event(job, "notified" if x["ok"] else "notify_failed",
-                     **({} if x["ok"] else {"error": x["error"][:120]}))
-    rc.save_job(job)
-    return res
+    notices, now = job.setdefault("notices", {}), rc.now()
+    for n in notices.values():                                 # a sender that died mid-send
+        if n.get("state") == "sending" and now - (n.get("at") or 0) > NOTIFY_SENDING_STALE_S:
+            n.update(state="uncertain", error="tiến trình gửi bị dừng giữa chừng — không rõ tin đã tới chưa")
+    reqs = _requesters(job)
+    keys = [k for k, n in notices.items() if k in reqs
+            and (_due(n, now) or (force and n.get("state") in NOTICE_OPEN + ("pending",)))]
+    if not keys:
+        rc.save_job(job, sync=False)
+        return []
+    review = review or load_review(job, job.get("review_file", ""))
+    text, out = notice_text(job, review), []
+    for k in keys:
+        n = notices[k]
+        n.update(state="sending", at=rc.now(), attempts=(0 if force else n.get("attempts", 0)) + 1)
+        rc.save_job(job, sync=False)
+        state, err = _send_one(reqs[k], text)
+        n.update(state=state, at=rc.now(), error=err)
+        rc.log_event(job, "notified" if state == "sent" else f"notify_{state}", **({"error": err[:120]} if err else {}))
+        rc.save_job(job, sync=False)
+        out.append({"key": k, "state": state, "error": err})
+    return out
 
 
-def _notify_retry_due(job: dict) -> bool:
+def _notices_due(job: dict) -> bool:
     now = rc.now()
-    return any(f.get("attempts", 0) < NOTIFY_MAX_ATTEMPTS
-               and now - (f.get("at") or 0) >= NOTIFY_BACKOFF_S * f.get("attempts", 1)
-               for f in (job.get("notify_failed") or {}).values())
+    return any(_due(n, now) or (n.get("state") == "sending" and now - (n.get("at") or 0) > NOTIFY_SENDING_STALE_S)
+               for n in (job.get("notices") or {}).values())
 
 
 def close_idle_workers(dry_run: bool = False) -> list:
@@ -862,48 +906,49 @@ def close_idle_workers(dry_run: bool = False) -> list:
         if h == os.environ.get("ORCA_TERMINAL_HANDLE"):
             continue                                   # never close the caller's own tab
         if not dry_run:
+            err = ""
             try:
                 o.terminal_close(h)
             except Exception as e:  # noqa: BLE001 — already closed by hand, etc.
-                j["worker_terminal_error"] = str(e)[:120]
-            j["worker_terminal_closed"] = True
-            rc.save_job(j, sync=False)
+                err = str(e)[:120]
+            # reload + save under the job's lock: a snapshot taken above must not overwrite what another
+            # process recorded meanwhile, e.g. a delivered notice (Codex notify R1 #5)
+            try:
+                with rc.file_lock(f"post-{j['id']}", timeout=5, stale_after=1800):
+                    cur = rc.load_job(j["id"]) or j
+                    cur["worker_terminal_closed"] = True
+                    if err:
+                        cur["worker_terminal_error"] = err
+                    rc.save_job(cur, sync=False)
+            except TimeoutError:
+                continue                               # busy: the next sweep marks it
         closed.append({"job_id": j["id"], "closed_terminal": h})
     return closed
 
 
-def _retry_notify(job: dict) -> dict:
-    with rc.file_lock(f"post-{job['id']}", timeout=5, stale_after=1800):   # the same lock as post(): one sender
-        job = rc.load_job(job["id"])
-        if not job or job.get("status") != "posted" or not _notify_retry_due(job):
-            return {}
-        review = load_review(job, job.get("review_file", ""))
-        res = notify_and_record(job, review)
-    return {"job_id": job["id"], "notify_retry": [{"ok": x["ok"], "error": x["error"]} for x in res]}
-
-
 def notify_again(jid: str) -> dict:
-    """Human re-send after the automatic retries gave up: every requester not yet told gets the notice."""
+    """Human re-send: every requester not yet told (failed, unconfirmed, uncertain, pending) gets the notice."""
     with rc.file_lock(f"post-{jid}", timeout=5, stale_after=1800):
         job = rc.load_job(jid)
         if not job or job.get("status") != "posted":
             raise ValueError(f"job {jid} is not posted (status {job and job.get('status')})")
-        for f in (job.get("notify_failed") or {}).values():
-            f["attempts"] = 0
-        res = notify_and_record(job, load_review(job, job.get("review_file", "")))
-    return {"job_id": jid, "notified": res, "already_told": len(job.get("notified") or {})}
+        seed_notices(job)                              # a job posted before notices existed
+        rc.save_job(job, sync=False)
+        res = deliver_notices(jid, force=True)
+    return {"job_id": jid, "notified": res}
 
 
 def sweep(dry_run: bool = False) -> dict:
     actions = close_idle_workers(dry_run)
     for job in rc.all_jobs():
-        if job.get("status") == "posted" and not dry_run and _notify_retry_due(job):
+        if job.get("status") == "posted" and not dry_run and _notices_due(job):
             try:
-                a = _retry_notify(job)
-                if a:
-                    actions.append(a)
+                with rc.file_lock(f"post-{job['id']}", timeout=5, stale_after=1800):   # one sender per job
+                    res = deliver_notices(job["id"])
+                if res:
+                    actions.append({"job_id": job["id"], "notices": [{"state": x["state"], "error": x["error"]} for x in res]})
             except (OSError, ValueError, TimeoutError) as e:       # review file gone, lock busy…
-                actions.append({"job_id": job["id"], "notify_retry_error": str(e)[:200]})
+                actions.append({"job_id": job["id"], "notify_error": _clean_error(e)})
             continue
         if job.get("status") != "awaiting_approval":
             continue
