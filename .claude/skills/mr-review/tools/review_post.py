@@ -203,19 +203,66 @@ def inline_enabled() -> bool:
 COMPACT_MAX = 250             # characters of one-line prose per body / suggestion in the compact note
 
 
+_LINKISH = re.compile(r"!?\[[^\]\n]*\]\([^)\n]*\)|<[^>\n]*>|https?://\S+")
+
+
+def _protected(text: str) -> list:
+    """[(start, end)] a cut must not fall inside: code spans (a run of N backticks closes only with a run
+    of exactly N — CommonMark; an unmatched run protects the rest of the text), links, autolinks, URLs."""
+    spans, i = [], 0
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] != "`":
+            i += 1
+            continue
+        j = i
+        while j < len(text) and text[j] == "`":
+            j += 1
+        run = j - i
+        m = re.compile(r"(?<!`)`{%d}(?!`)" % run).search(text, j)
+        end = m.end() if m else len(text)
+        spans.append((i, end))
+        i = end
+    spans += [m.span() for m in _LINKISH.finditer(text)]
+    return spans
+
+
 def _clip(text: str, limit: int = COMPACT_MAX) -> str:
-    """One-line prose cut at the last sentence end (else word) before `limit`, with "…". Multi-line text
-    (code blocks) is never cut. Never leaves an odd number of backticks (an open code span)."""
+    """One-line prose cut at the last sentence end (else word boundary) before `limit`, with " …". The
+    cut is never inside a code span, link or URL (Codex compact R1 #2) and an unpaired `**` left at the
+    end is dropped. Multi-line text (code blocks) is never cut."""
     text = text.strip()
     if "\n" in text or len(text) <= limit:
         return text
-    cut = text[:limit]
-    ends = [cut.rfind(p) for p in (". ", "; ", "! ", "? ")]
-    at = max(ends)
-    cut = cut[:at + 1] if at >= limit // 3 else cut[:cut.rfind(" ")] if " " in cut else cut
-    if cut.count("`") % 2:
-        cut = cut[:cut.rfind("`")]
-    return cut.rstrip(" ,;:") + " …"
+    prot = _protected(text)
+    free = lambda k: all(not (s < k < e) for s, e in prot)          # noqa: E731
+    sentence = [k + 1 for k in range(limit // 3, limit) if text[k] in ".;!?" and text[k + 1:k + 2] == " " and free(k + 1)]
+    words = [k for k in range(1, limit) if text[k] == " " and free(k)]
+    at = sentence[-1] if sentence else words[-1] if words else 0
+    if not at:
+        return text                                                  # one unbreakable token: keep it whole
+    cut = text[:at].rstrip(" ,;:")
+    if cut.count("**") % 2:
+        cut = cut[:cut.rfind("**")].rstrip()
+    return cut + " …"
+
+
+def _short_names(paths: list) -> dict:
+    """{path: shortest trailing part that is still unique among `paths`} — `C.java`, or `api/C.java`
+    when two findings sit in files of the same name (Codex compact R1 #3)."""
+    parts = {p: re.split(r"[\\/]", p) for p in set(paths)}
+    out = {}
+    for p, segs in parts.items():
+        for n in range(1, len(segs) + 1):
+            tail = segs[-n:]
+            if all(q == p or parts[q][-n:] != tail for q in parts):
+                out[p] = "/".join(tail)
+                break
+        else:
+            out[p] = p
+    return out
 
 
 def _short(f: dict) -> str:
@@ -224,16 +271,16 @@ def _short(f: dict) -> str:
     return "" if not body else (f" — {_clip(body)}" if "\n" not in body else "\n\n" + body + "\n")
 
 
-def _loc_short(f: dict) -> str:
-    """[`File.java`:12] — the file NAME: the full path is in the diff, and it doubled the line length."""
+def _loc_short(f: dict, names: dict) -> str:
+    """[`File.java`:12] — the shortest unique tail of the path (the full path doubled the line length)."""
     if not f.get("file"):
         return ""
-    name = re.split(r"[\\/]", f["file"])[-1]
-    return f"[`{name}`" + (f":{f['line']}" if f.get("line") else "") + "] "
+    return f"[`{names.get(f['file'], f['file'])}`" + (f":{f['line']}" if f.get("line") else "") + "] "
 
 
 def _render_compact(job: dict, review: dict, inline_ok: set, approver: str) -> str:
     findings = review.get("findings", [])
+    names = _short_names([f["file"] for f in findings if f.get("file")])
     head = ((job.get("diff_refs") or {}).get("head_sha") or "")[:8]
     where = f" · `{job['source_branch']}` → `{job['target_branch']}`" if job.get("source_branch") else ""
     lines = [rr.marker(job), f"### 🤖 Code Review — {VERDICT_ICON[review['verdict']]}",
@@ -247,12 +294,12 @@ def _render_compact(job: dict, review: dict, inline_ok: set, approver: str) -> s
         for i, f in items:
             n += 1
             if i in inline_ok:
-                lines.append(f"{n}. {_loc_short(f)}**{f['title']}** → _xem comment inline_")
+                lines.append(f"{n}. {_loc_short(f, names)}**{f['title']}** → _xem comment inline_")
                 continue
             if f.get("severity") == "nit":                    # nitpicks: the title says it all
-                lines.append(f"{n}. {_loc_short(f)}{f['title']}")
+                lines.append(f"{n}. {_loc_short(f, names)}{f['title']}")
                 continue
-            lines.append(f"{n}. {_loc_short(f)}**{f['title']}**{_short(f)}")
+            lines.append(f"{n}. {_loc_short(f, names)}**{f['title']}**{_short(f)}")
             if f.get("suggestion"):
                 lines.append(_labelled("   ↳ _Sửa:_", _clip(f["suggestion"])))
     if not findings:
@@ -601,7 +648,10 @@ def _post_locked(jid: str, dry_run: bool, notify: bool) -> dict:
                 "note": render_note(job, review, set(), approver)}
 
     head = (job.get("diff_refs") or {}).get("head_sha") or ""
-    done = set(job.get("inline_done", {}).get(head, []))   # survives a crash between inline and note
+    # survives a crash between inline and note — but only for findings that are inline candidates NOW:
+    # with inline comments turned off since, the note must carry every finding in full, exactly as the
+    # approved / dry-run payload did (Codex compact R1 #1)
+    done = set(job.get("inline_done", {}).get(head, [])) & set(inline_cands)
     inline_ok = set(done)
     with rc.gitlab_project(job["project_id"]) as gl:
         if rr.already_posted(gl, job):                      # reconcile: lost response on a previous try

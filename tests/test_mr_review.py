@@ -540,6 +540,42 @@ class CompactNoteTest(unittest.TestCase):
         self.assertIn("1. [`C.java`:3] **t**", note)
         self.assertNotIn("src/main/java", note)
 
+    def test_clip_never_cuts_inside_spans_links_or_bold(self):                 # Codex compact R1 #2
+        for text in ("Use ``a " + "x " * 150 + "`` then more " + "w " * 50,
+                     "Xem [tài liệu " + "d " * 150 + "](https://gitlab.example.vn/x) " + "w " * 50,
+                     "Gọi https://gitlab.example.vn/" + "p" * 300 + " rồi " + "w " * 50,
+                     "**rất quan trọng " + "b " * 150 + "** và " + "w " * 50):
+            out = rp._clip(text)
+            body = out[:-2]
+            for s, e in rp._protected(text):
+                self.assertFalse(s < len(body) < e, (text[:30], out[-40:]))
+            self.assertEqual(body.count("**") % 2, 0)
+        self.assertEqual(rp._clip("x" * 400), "x" * 400)                       # no break point: whole
+
+    def test_short_names_are_unique(self):                                     # Codex compact R1 #3
+        names = rp._short_names(["api/models/user.py", "worker/models/user.py", "src/a/C.java", "x/D.java"])
+        self.assertEqual(names["api/models/user.py"], "api/models/user.py")
+        self.assertEqual(names["worker/models/user.py"], "worker/models/user.py")
+        self.assertEqual(names["src/a/C.java"], "C.java")
+        names = rp._short_names(["a/models/user.py", "a/views/user.py"])
+        self.assertEqual(set(names.values()), {"models/user.py", "views/user.py"})
+
+    def test_inline_done_is_ignored_when_inline_is_off(self):                  # Codex compact R1 #1
+        import contextlib
+        f = [{"severity": "major", "title": "t", "body": "chi tiết", "file": "a.py", "line": 3}]
+        job = {**self.job(), "inline_done": {HEAD: [0]}, "approval": {"via": "rules"}, "status": "awaiting_approval"}
+        gl = mock.Mock()
+        gl._api.side_effect = lambda p: p
+        gl._request.return_value = []                                         # no marker on the MR yet
+        gl.add_mr_comment.return_value = {"id": 9}
+        ws = mock.Mock(check_stale=lambda j: {"stale": False}, ledger_add=lambda *a: None)
+        with mock.patch.object(rc, "load_job", return_value=job), mock.patch.object(rc, "save_job"),              mock.patch.object(rc, "log_event"), mock.patch.object(rc, "board_card"),              mock.patch.object(rp, "approval_status", return_value="approved"),              mock.patch.object(rp, "load_review", return_value=self.review(f)),              mock.patch.object(rc, "gitlab_project", return_value=contextlib.nullcontext(gl)),              mock.patch.dict(sys.modules, {"review_ws": ws}):
+            out = rp._post_locked("77-5", dry_run=False, notify=False)
+        self.assertTrue(out["posted"])
+        note = gl.add_mr_comment.call_args[0][1]
+        self.assertIn("chi tiết", note)                                       # the finding in full
+        self.assertNotIn("xem comment inline", note)
+
     def test_style_full_and_unknown_value(self):
         with mock.patch.dict(os.environ, {"REVIEW_NOTE_STYLE": "full"}):
             self.assertIn("## Code Review Summary", rp.render_note(self.job(), self.review([]), set()))
