@@ -137,10 +137,11 @@ Review chỉ tự đăng khi qua mọi luật (`review_rules.py`): tối đa 30 
 không chứa secret, không link ra ngoài GitLab, không có HTML/ký hiệu có thể tag người. Trượt luật → quay về hỏi duyệt.
 `shadow` = chỉ đánh giá, vẫn hỏi bạn. `off` = luôn hỏi.
 
-**Mẫu comment đăng lên GitLab** ("Code Review Summary", như bản cũ):
-Overview → 🔴 Critical / 🟡 Major / 🟢 Minor (mỗi mục: `[file:dòng] tiêu đề`, **Why**, **Suggestion**) →
-Standards Compliance (bảng 6 mục ✅/⚠️/❌) → Positive Observations → Files Reviewed (tự lấy từ diff) → Kiểm thử.
-Finding có dòng cụ thể được đăng thêm thành comment inline.
+**Comment đăng lên GitLab** — mặc định **gọn** (`REVIEW_NOTE_STYLE=compact`): kết luận + tóm tắt 1–3 câu, rồi từng lỗi
+một dòng `[File.java:dòng] tiêu đề — vì sao` + `↳ Sửa: …`, nhóm 🔴 Phải sửa / 🟡 Nên sửa / 🟢 Nhỏ (nit chỉ tiêu đề);
+câu quá dài được cắt "…". `full` = mẫu "Code Review Summary" đầy đủ (bảng tiêu chuẩn, điểm tốt, danh sách file).
+**Comment thẳng vào dòng code** (`REVIEW_INLINE_COMMENTS`) mặc định **tắt** — mọi lỗi gom trong một comment.
+Bật (`1`) khi muốn tác giả thấy lỗi ngay tại dòng trong diff và resolve từng cái. Đổi cả hai ở thẻ Cài đặt của dashboard.
 
 **Review không bao giờ tag ai:** mọi `@` ngoài code block được chèn một ký tự vô hình — `@Test`, `@Override`,
 `@all` hiển thị như thường nhưng không gửi thông báo. Code trong khối ```` ```java ```` giữ nguyên để copy.

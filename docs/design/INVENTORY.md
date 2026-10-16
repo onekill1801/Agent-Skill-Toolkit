@@ -165,7 +165,7 @@
 | fork-terminal | `worktree_manager.py` |  | create, remove | 174 |
 | mr-review | `review_common.py` | ✅ |  | 334 |
 | mr-review | `review_flow.py` | ✅ | enqueue, enqueue-text, reconcile, release-quarantine, status, work | 449 |
-| mr-review | `review_post.py` |  | approval-status, approve, post, reject, render, request-approval, sweep, validate | 677 |
+| mr-review | `review_post.py` |  | approval-status, approve, post, reject, render, request-approval, sweep, validate | 821 |
 | mr-review | `review_queue.py` | ✅ | add, add-text, cancel, list, next, pending, set, show | 229 |
 | mr-review | `review_rules.py` |  |  | 250 |
 | mr-review | `review_ws.py` |  | check-stale, cleanup, diff, gc, prepare | 394 |
@@ -201,7 +201,7 @@
 | tchat-automation | `ws_client.py` |  |  | 147 |
 | team-registry | `team.py` |  | bootstrap, get, list, match, remove, set | 223 |
 
-## Test: 38 file, 713 hàm test
+## Test: 38 file, 721 hàm test
 
 - `test_accounts.py`
 - `test_agent_init.py`
