@@ -187,7 +187,7 @@ class PostGateTest(unittest.TestCase):
             "---\n\n### Overview\n\nok\n\n---\n\n### 🔴 Critical Issues (must fix before merge)\n\n"
             "No critical issues found.\n\n---",
             "### 🟡 Major Suggestions (strongly recommended)\n\n**1. [`TaskHistoryRecorder.java`:87] Chưa có unit test "
-            "cho `recordTaskCreationBatch`.**\nWhy: method mới có nhiều nhánh.\nSuggestion: thêm test tối thiểu.\n\n---",
+            "cho `recordTaskCreationBatch`.**  \nWhy: method mới có nhiều nhánh.  \nSuggestion: thêm test tối thiểu.\n\n---",
             "### 🟢 Minor / Nitpicks\n\n**1. [`TaskHistoryRecorder.java`:125] Gom nhóm theo `projectId` là không cần "
             "thiết.** batchInsert đã bind project_id. Gọi thẳng batchInsert.\n\n**2. MR chưa có description.** "
             "Nên ghi ngắn mục đích.\n\n---",
@@ -199,6 +199,24 @@ class PostGateTest(unittest.TestCase):
             self.assertIn(e, note)
         self.assertTrue(note.startswith(rr.marker(job)))
         self.assertNotIn("AI review ·", note)                                  # no footer in the team layout
+
+    def test_file_labels_stay_unique(self):                                   # Codex layout R1 #2
+        rel = rp._files_rel(["one/src/main/java/com/acme/Foo.java", "two/src/main/java/com/acme/Foo.java",
+                             "one/src/main/java/com/acme/Bar.java"])
+        self.assertEqual(len(set(rel.values())), 3)
+        self.assertEqual(rel["one/src/main/java/com/acme/Foo.java"], "one/src/main/java/com/acme/Foo.java")
+        self.assertEqual(rp._files_rel(["a\\b\\C.java"]), {"a\\b\\C.java": "a/b/C.java"})
+        self.assertEqual(rp._files_rel(["README.md"]), {"README.md": "README.md"})
+
+    def test_why_and_suggestion_are_separate_lines(self):                     # Codex layout R1 #1
+        f = [{"severity": "blocker", "title": "t", "body": "b", "suggestion": "```java\nx();\n```"}]
+        with mock.patch.object(rp, "_ws", return_value={}):
+            note = rp.render_note(self.job(), self.review(findings=f), set())
+        self.assertIn("**1. t.**  \nWhy: b  \nSuggestion:\n\n```java\nx();\n```", note)
+        f = [{"severity": "major", "title": "t", "body": "```\nlog\n```", "suggestion": "s"}]
+        with mock.patch.object(rp, "_ws", return_value={}):
+            note = rp.render_note(self.job(), self.review(findings=f), set())
+        self.assertIn("**1. t.**  \nWhy:\n\n```\nlog\n```\n\nSuggestion: s", note)
 
     def test_inline_finding_is_listed_once_in_note(self):
         review = self.review(findings=[{"severity": "major", "title": "t", "body": "secret why", "file": "a.py",

@@ -347,7 +347,12 @@ def _files_rel(paths: list) -> dict:
                 break
             common += 1
     common = max(0, common - 1)          # keep one shared folder for context (module/task/..., as the team writes it)
-    return {p: "/".join(s[common:]) for p, s in zip(paths, split)}
+    out = {p: "/".join(s[common:]) for p, s in zip(paths, split)}
+    seen = {}
+    for label in out.values():
+        seen[label] = seen.get(label, 0) + 1
+    # a label shared by two files (same package in two modules / source roots): show their full paths
+    return {p: (p.replace(chr(92), "/") if seen[label] > 1 else label) for p, label in out.items()}   # Codex layout R1 #2
 
 
 def _scope_line(job: dict, review: dict, head: str) -> str:
@@ -392,11 +397,16 @@ def _render_full(job: dict, review: dict, inline_ok: set, approver: str) -> str:
                 continue
             body, sug = (f.get("body") or "").strip(), (f.get("suggestion") or "").strip()
             if f.get("severity") in ("blocker", "major"):
-                lines.append(head_line)
-                if body:
-                    lines.append(_labelled("Why:", body))
-                if sug:
-                    lines.append(_labelled("Suggestion:", sug))
+                # one line each, as in the sample: a trailing double space is a Markdown hard line break,
+                # so title / Why / Suggestion never run together into one paragraph (Codex layout R1 #1)
+                parts = [head_line] + ([_labelled("Why:", body)] if body else []) \
+                    + ([_labelled("Suggestion:", sug)] if sug else [])
+                for k, part in enumerate(parts):
+                    last = k == len(parts) - 1
+                    if "\n" in part:                            # a block (code): a blank line closes it
+                        lines += [part] + ([] if last else [""])
+                    else:
+                        lines.append(part if last else part + "  ")
             else:                                               # minor / nit: one paragraph, as in the sample
                 text = " ".join(x for x in (body, sug) if x and "\n" not in x)
                 lines.append(head_line + (" " + text if text else ""))
