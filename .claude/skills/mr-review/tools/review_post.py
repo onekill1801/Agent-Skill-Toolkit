@@ -246,9 +246,11 @@ def _clip(text: str, limit: int = COMPACT_MAX) -> str:
     cut = text[:at].rstrip(" ,;:")
     # emphasis delimiters OUTSIDE code spans / links only: a literal `**` in code is not bold, and cutting
     # there would break the span (Codex compact R2 #1). The cut point stays outside every protected span.
+    # an unpaired one is CLOSED, never cut away — cutting at it could leave nothing (R3 #1); `cut` ends in
+    # a non-space, so the appended `**` is a valid closing delimiter
     stars = [m.start() for m in re.finditer(r"\*\*", cut) if all(not (s <= m.start() < e) for s, e in prot)]
     if len(stars) % 2:
-        cut = cut[:stars[-1]].rstrip(" ,;:")
+        cut += "**"
     return cut + " …"
 
 

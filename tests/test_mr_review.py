@@ -555,8 +555,12 @@ class CompactNoteTest(unittest.TestCase):
         self.assertTrue(out.startswith("Use `**` literally."), out[:40])
         self.assertEqual(out[:-2].count("`") % 2, 0)
         out = rp._clip("Dùng `a**b` và **đậm " + "w " * 150)
-        self.assertTrue(out.startswith("Dùng `a**b` và"), out[:40])
-        self.assertNotIn("**đậm", out)
+        self.assertTrue(out.startswith("Dùng `a**b` và **đậm"), out[:40])
+        self.assertTrue(out.endswith("** …"))                                   # closed, content kept
+        out = rp._clip("**Never retry this operation because it charges twice. " + "Charges are final. " * 15 + "**")
+        self.assertTrue(out.startswith("**Never retry this operation"), out[:40])  # Codex compact R3 #1
+        self.assertTrue(out.endswith("** …"))
+        self.assertGreater(len(out), 100)
 
     def test_short_names_are_unique(self):                                     # Codex compact R1 #3
         names = rp._short_names(["api/models/user.py", "worker/models/user.py", "src/a/C.java", "x/D.java"])
