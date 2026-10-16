@@ -89,10 +89,13 @@ Review against:
 - `blocker` = must fix before merge (bug, security, data loss, broken contract).
   APPROVE with a blocker is rejected by the validator.
 - Prefer few, concrete, verified findings over many speculative ones.
-- The posted note follows the "Code Review Summary" layout (`dev-automation/prompts/code_review_prompt.md`):
-  Overview = `summary`; 🔴 Critical = `blocker`, 🟡 Major = `major`, 🟢 Minor/Nitpicks = `minor`+`nit`
-  (`body` → **Why**, `suggestion` → **Suggestion**); Standards Compliance = `compliance` (fill all
-  6 categories); Positive Observations = `positives`; Files Reviewed is filled from ws.json.
+- **Be short** (the team reads it on the MR): `summary` 1–3 câu; `title` ≤ 12 từ; `body` 1–2 câu (vì sao
+  sai / hậu quả); `suggestion` 1 câu hoặc một khối code ngắn; tối đa ~8 finding — gộp lỗi cùng loại,
+  bỏ nit không đáng nói. Không nhắc lại diff, không khen chung chung.
+- Default note (REVIEW_NOTE_STYLE=compact): verdict + summary + `[file:line] title — body ↳ Sửa: suggestion`
+  grouped 🔴 `blocker` / 🟡 `major` / 🟢 `minor`+`nit` (nit: title only). With REVIEW_NOTE_STYLE=full the
+  "Code Review Summary" layout (`dev-automation/prompts/code_review_prompt.md`) also shows `compliance`
+  (6 categories) and `positives` — fill them anyway, they cost one line each.
 - Put code identifiers in backticks (`` `@Test` ``, `` `findById` ``). Every `@` outside fenced code
   (the MR author included) gets an invisible word joiner after it when rendered, so a review never
   pings anyone; fenced code is posted byte-exact. Do not use raw HTML or `&…;` entities (they block

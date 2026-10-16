@@ -37,8 +37,10 @@ review.json (default: <worktree>.review.json):
   "reviewed_commits": "all | new_only",
   "model": "provider:model"
 }
-The note uses the "Code Review Summary" layout of dev-automation/prompts/code_review_prompt.md
-(Critical = blocker, Major = major, Minor/Nitpicks = minor+nit; Files Reviewed from ws.json).
+REVIEW_NOTE_STYLE=compact (default): verdict + summary + one or two lines per finding (nits: title only).
+REVIEW_NOTE_STYLE=full: the "Code Review Summary" layout of dev-automation/prompts/code_review_prompt.md
+(Critical = blocker, Major = major, Minor/Nitpicks = minor+nit; compliance, positives, Files Reviewed).
+REVIEW_INLINE_COMMENTS=1 also posts findings with file:line on the diff line (default 0: one note only).
 """
 
 import argparse
@@ -132,6 +134,8 @@ def _counts(findings: list) -> str:
 SECTIONS = (("🔴 Critical Issues (must fix before merge)", ("blocker",), "No critical issues found."),
             ("🟡 Major Suggestions (strongly recommended)", ("major",), "No major suggestions."),
             ("🟢 Minor / Nitpicks", ("minor", "nit"), "Code looks clean."))
+COMPACT_SECTIONS = (("🔴 Phải sửa trước khi merge", ("blocker",), ""), ("🟡 Nên sửa", ("major",), ""),
+                    ("🟢 Nhỏ", ("minor", "nit"), ""))
 COMPLIANCE = ("Correctness", "Code Quality", "Architecture", "Security", "Performance", "Testing")
 STATUS_ICON = {"ok": "✅", "warn": "⚠️", "fail": "❌"}
 
@@ -183,7 +187,90 @@ def _cell(text) -> str:
     return re.sub(r"\r\n|\r|\n", " ", str(text or "")).replace("|", "\\|")
 
 
+def note_style() -> str:
+    """REVIEW_NOTE_STYLE: compact (default — short note, one or two lines per finding) | full (the
+    complete "Code Review Summary" with compliance / positives / files tables)."""
+    s = (rc.config.get("REVIEW_NOTE_STYLE", "compact") or "compact").strip().lower()
+    return s if s in ("compact", "full") else "compact"
+
+
+def inline_enabled() -> bool:
+    """REVIEW_INLINE_COMMENTS=1: findings with file:line are ALSO posted as comments on the diff line.
+    Default 0: everything stays in the one review note (less noise in the MR)."""
+    return (rc.config.get("REVIEW_INLINE_COMMENTS", "0") or "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+COMPACT_MAX = 250             # characters of one-line prose per body / suggestion in the compact note
+
+
+def _clip(text: str, limit: int = COMPACT_MAX) -> str:
+    """One-line prose cut at the last sentence end (else word) before `limit`, with "…". Multi-line text
+    (code blocks) is never cut. Never leaves an odd number of backticks (an open code span)."""
+    text = text.strip()
+    if "\n" in text or len(text) <= limit:
+        return text
+    cut = text[:limit]
+    ends = [cut.rfind(p) for p in (". ", "; ", "! ", "? ")]
+    at = max(ends)
+    cut = cut[:at + 1] if at >= limit // 3 else cut[:cut.rfind(" ")] if " " in cut else cut
+    if cut.count("`") % 2:
+        cut = cut[:cut.rfind("`")]
+    return cut.rstrip(" ,;:") + " …"
+
+
+def _short(f: dict) -> str:
+    """'— body' when the body is one line (clipped); a multi-line body (code) goes on its own lines."""
+    body = (f.get("body") or "").strip()
+    return "" if not body else (f" — {_clip(body)}" if "\n" not in body else "\n\n" + body + "\n")
+
+
+def _loc_short(f: dict) -> str:
+    """[`File.java`:12] — the file NAME: the full path is in the diff, and it doubled the line length."""
+    if not f.get("file"):
+        return ""
+    name = re.split(r"[\\/]", f["file"])[-1]
+    return f"[`{name}`" + (f":{f['line']}" if f.get("line") else "") + "] "
+
+
+def _render_compact(job: dict, review: dict, inline_ok: set, approver: str) -> str:
+    findings = review.get("findings", [])
+    head = ((job.get("diff_refs") or {}).get("head_sha") or "")[:8]
+    where = f" · `{job['source_branch']}` → `{job['target_branch']}`" if job.get("source_branch") else ""
+    lines = [rr.marker(job), f"### 🤖 Code Review — {VERDICT_ICON[review['verdict']]}",
+             f"!{job['iid']}{where} · `{head}`", "", _clip(review["summary"], 400)]
+    n = 0
+    for title, sevs, _ in COMPACT_SECTIONS:
+        items = [(i, f) for i, f in enumerate(findings) if f.get("severity") in sevs]
+        if not items:
+            continue
+        lines += ["", f"**{title}**", ""]
+        for i, f in items:
+            n += 1
+            if i in inline_ok:
+                lines.append(f"{n}. {_loc_short(f)}**{f['title']}** → _xem comment inline_")
+                continue
+            if f.get("severity") == "nit":                    # nitpicks: the title says it all
+                lines.append(f"{n}. {_loc_short(f)}{f['title']}")
+                continue
+            lines.append(f"{n}. {_loc_short(f)}**{f['title']}**{_short(f)}")
+            if f.get("suggestion"):
+                lines.append(_labelled("   ↳ _Sửa:_", _clip(f["suggestion"])))
+    if not findings:
+        lines += ["", "Không có vấn đề cần sửa. 👍"]
+    failed = [t for t in (review.get("tests") or []) if t.get("result") == "fail"]
+    if failed:
+        lines += ["", "**Test lỗi:** " + " · ".join(f"`{t.get('cmd', '?')}`" for t in failed)]
+    c = (_ws(job).get("commits") or {})
+    meta = [x for x in ("🤖 AI review", review.get("model") and f"model {review['model']}",
+                        approver and f"duyệt bởi {approver}",
+                        c and f"{c.get('new', '?')}/{c.get('total', '?')} commit mới") if x]
+    lines += ["", "_" + " · ".join(meta) + "_"]
+    return defang("\n".join(lines))
+
+
 def render_note(job: dict, review: dict, inline_ok: set, approver: str = "") -> str:
+    if note_style() == "compact":
+        return _render_compact(job, review, inline_ok, approver)
     lines = []
 
     def _section():
@@ -265,6 +352,8 @@ def render_inline(f: dict) -> str:
 
 
 def inline_candidates(review: dict) -> list:
+    if not inline_enabled():
+        return []
     findings = review.get("findings", [])
     return [i for i, f in enumerate(findings) if f.get("file") and f.get("line")][:MAX_INLINE]
 

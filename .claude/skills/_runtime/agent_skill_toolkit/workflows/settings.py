@@ -52,6 +52,12 @@ CATALOG = [
        choices=("manual", "mr_watch", "fchat"), restart=(COORD, GROUP_WATCH)),
     _s("REVIEW_AUTO_POST_DAILY_MAX", "Review MR", "Số lần tự đăng tối đa / ngày",
        "quá số này thì quay về hỏi duyệt", "int", "30", lo=0, hi=500, restart=(COORD, GROUP_WATCH)),
+    _s("REVIEW_NOTE_STYLE", "Review MR", "Độ dài comment review",
+       "compact = gọn (tóm tắt + mỗi lỗi 1–2 dòng) · full = đầy đủ (thêm bảng tiêu chuẩn, điểm tốt, danh sách file)",
+       "enum", "compact", choices=("compact", "full"), restart=(COORD, GROUP_WATCH)),
+    _s("REVIEW_INLINE_COMMENTS", "Review MR", "Comment thẳng vào dòng code",
+       "1 = lỗi có file:dòng được đăng THÊM thành comment trên đúng dòng trong diff (tác giả resolve từng cái) · "
+       "0 = tất cả gom trong một comment", "bool", "0", restart=(COORD, GROUP_WATCH)),
     _s("REVIEW_CODEGRAPH", "Review MR", "Dùng CodeGraph khi chuẩn bị review",
        "1 = có (nơi gọi ngoài diff, test bị ảnh hưởng; chậm hơn ~1,5 phút) · 0 = tắt", "bool", "1",
        restart=(COORD,)),

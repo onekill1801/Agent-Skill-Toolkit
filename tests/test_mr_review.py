@@ -93,6 +93,12 @@ class ParseTest(unittest.TestCase):
 
 
 class PostGateTest(unittest.TestCase):
+    # these tests pin the FULL layout with inline comments; the compact default has its own class
+    def setUp(self):
+        p = mock.patch.dict(os.environ, {"REVIEW_NOTE_STYLE": "full", "REVIEW_INLINE_COMMENTS": "1"})
+        p.start()
+        self.addCleanup(p.stop)
+
     def job(self, **kw):
         j = {"id": "77-5", "project_id": "77", "iid": 5, "head_sha": HEAD,
              "diff_refs": {"base_sha": "b" * 40, "start_sha": "c" * 40, "head_sha": HEAD}}
@@ -255,7 +261,8 @@ class AutoPostRulesTest(unittest.TestCase):
     """docs/design/agent-ecosystem.md §10.2.1 — auto-post without a human, only if every rule passes."""
 
     ENV = {"REVIEW_AUTO_POST": "auto", "REVIEW_AUTO_POST_PROJECTS": "grp/proj",
-           "GITLAB_URL": "https://gitlab.example.vn", "REVIEW_AUTO_POST_DAILY_MAX": "30"}
+           "GITLAB_URL": "https://gitlab.example.vn", "REVIEW_AUTO_POST_DAILY_MAX": "30",
+           "REVIEW_NOTE_STYLE": "full", "REVIEW_INLINE_COMMENTS": "1"}
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="rr-test-")
@@ -466,11 +473,86 @@ class AutoPostRulesTest(unittest.TestCase):
         self.assertNotEqual(rc.load_job(job["id"]).get("status"), "posted")
 
 
+class CompactNoteTest(unittest.TestCase):
+    """Default note (REVIEW_NOTE_STYLE unset = compact) and inline comments off by default."""
+
+    def setUp(self):
+        p = mock.patch.dict(os.environ)
+        p.start()
+        self.addCleanup(p.stop)
+        for k in ("REVIEW_NOTE_STYLE", "REVIEW_INLINE_COMMENTS"):
+            os.environ.pop(k, None)
+        w = mock.patch.object(rp, "_ws", return_value={"commits": {"new": 2, "total": 5},
+                                                       "files": [{"path": "a.py", "added": 1, "removed": 0}]})
+        w.start()
+        self.addCleanup(w.stop)
+
+    def job(self):
+        return {"id": "77-5", "project_id": "77", "iid": 5, "author": "dev", "source_branch": "f",
+                "target_branch": "dev", "diff_refs": {"head_sha": HEAD}}
+
+    def review(self, findings):
+        return {"head_sha": HEAD, "verdict": "REQUEST_CHANGES", "summary": "Tóm tắt ngắn.", "findings": findings,
+                "compliance": {"Testing": {"status": "fail", "note": "x"}}, "positives": ["tốt"],
+                "tests": [{"cmd": "mvn test", "result": "fail"}, {"cmd": "lint", "result": "pass"}]}
+
+    def test_compact_is_short_and_has_no_tables(self):
+        f = [{"severity": "blocker", "title": "Sai truy vấn", "body": "Trả task.", "suggestion": "Dùng port.",
+              "file": "A.java", "line": 9},
+             {"severity": "nit", "title": "Thiếu dòng trống", "body": "dài dòng", "suggestion": "thêm"}]
+        note = rp.render_note(self.job(), self.review(f), set())
+        self.assertTrue(note.startswith(rr.marker(self.job())))
+        self.assertIn("### 🤖 Code Review — 🔴 REQUEST_CHANGES", note)
+        self.assertIn("1. [`A.java`:9] **Sai truy vấn** — Trả task.\n   ↳ _Sửa:_ Dùng port.", note)
+        self.assertIn("2. Thiếu dòng trống", note)
+        self.assertNotIn("dài dòng", note)                                   # nit: title only
+        for gone in ("Standards Compliance", "Positive Observations", "Files Reviewed", "🟡 Nên sửa", "lint"):
+            self.assertNotIn(gone, note)                                      # no tables, no empty section
+        self.assertIn("**Test lỗi:** `mvn test`", note)
+        self.assertLess(len(note.splitlines()), 20)
+
+    def test_inline_is_off_by_default_and_on_when_set(self):
+        f = [{"severity": "major", "title": "t", "file": "a.py", "line": 3}]
+        self.assertEqual(rp.inline_candidates(self.review(f)), [])
+        self.assertEqual(rp.payload(self.job(), self.review(f))[1], [])
+        with mock.patch.dict(os.environ, {"REVIEW_INLINE_COMMENTS": "1"}):
+            self.assertEqual(rp.inline_candidates(self.review(f)), [0])
+
+    def test_compact_code_suggestion_keeps_a_real_fence_and_no_ping(self):
+        f = [{"severity": "major", "title": "Thiếu @Override", "body": "x",
+              "suggestion": "```java\n@Override\nvoid a(){}\n```"}]
+        note = rp.render_note(self.job(), self.review(f), set())
+        self.assertIn("↳ _Sửa:_\n\n```java\n@Override\n", note)
+        self.assertIn("Thiếu @" + rp.WORD_JOINER + "Override", note)
+        self.assertEqual([r for r in rr.content_problems(self.job(), [note]) if "mention" in r or "HTML" in r], [])
+
+    def test_long_prose_is_clipped_code_never(self):
+        long = "Câu một rất dài " + "x " * 80 + ". Câu hai " + "y " * 100
+        out = rp._clip(long)
+        self.assertLessEqual(len(out), rp.COMPACT_MAX + 2)
+        self.assertTrue(out.endswith(" …"))
+        self.assertEqual(rp._clip("ngắn."), "ngắn.")
+        code = "```java\n" + "a();\n" * 200 + "```"
+        self.assertEqual(rp._clip(code), code)
+        self.assertEqual(rp._clip("dùng `" + "z" * 300 + "` nhé").count("`") % 2, 0)   # no open code span
+        f = [{"severity": "major", "title": "t", "body": long, "file": "src/main/java/a/b/C.java", "line": 3}]
+        note = rp.render_note(self.job(), self.review(f), set())
+        self.assertIn("1. [`C.java`:3] **t**", note)
+        self.assertNotIn("src/main/java", note)
+
+    def test_style_full_and_unknown_value(self):
+        with mock.patch.dict(os.environ, {"REVIEW_NOTE_STYLE": "full"}):
+            self.assertIn("## Code Review Summary", rp.render_note(self.job(), self.review([]), set()))
+        with mock.patch.dict(os.environ, {"REVIEW_NOTE_STYLE": "weird"}):
+            self.assertEqual(rp.note_style(), "compact")
+
+
 class GuardHookTest(unittest.TestCase):
     HOOK = os.path.join(_ROOT, ".claude", "hooks", "guard_write.py")
 
     def decide(self, event, **env):
-        e = {k: v for k, v in os.environ.items() if k not in ("TOOLKIT_HEADLESS", "CLAUDE_TG_BRIDGE")}
+        e = {k: v for k, v in os.environ.items()
+             if k not in ("TOOLKIT_HEADLESS", "CLAUDE_TG_BRIDGE", "TOOLKIT_GUARD_ASK")}
         e.update(env)
         p = subprocess.run([sys.executable, self.HOOK], input=json.dumps(event), capture_output=True,
                            text=True, env=e)
@@ -488,6 +570,8 @@ class GuardHookTest(unittest.TestCase):
         self.assertIsNone(self.bash("python3 review_post.py request-approval 1-2"))
         self.assertEqual(self.bash("cat .env"), "ask")
         self.assertIsNone(self.bash("python3 gitlab_api.py merge-mr 3", CLAUDE_TG_BRIDGE="1"))
+        self.assertIsNone(self.bash("python3 gitlab_api.py merge-mr 3", TOOLKIT_GUARD_ASK="off"))
+        self.assertEqual(self.bash("python3 review_post.py approve 1-2", TOOLKIT_GUARD_ASK="off"), "deny")
         self.assertEqual(self.decide({"tool_name": "Write",
                                       "tool_input": {"file_path": "/r/temp/review_queue/jobs/1-2.json"}}), "deny")
 
