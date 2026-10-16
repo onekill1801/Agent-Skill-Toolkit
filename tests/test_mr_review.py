@@ -551,6 +551,12 @@ class CompactNoteTest(unittest.TestCase):
                 self.assertFalse(s < len(body) < e, (text[:30], out[-40:]))
             self.assertEqual(body.count("**") % 2, 0)
         self.assertEqual(rp._clip("x" * 400), "x" * 400)                       # no break point: whole
+        out = rp._clip("Use `**` literally. " + "word " * 80)                   # Codex compact R2 #1
+        self.assertTrue(out.startswith("Use `**` literally."), out[:40])
+        self.assertEqual(out[:-2].count("`") % 2, 0)
+        out = rp._clip("Dùng `a**b` và **đậm " + "w " * 150)
+        self.assertTrue(out.startswith("Dùng `a**b` và"), out[:40])
+        self.assertNotIn("**đậm", out)
 
     def test_short_names_are_unique(self):                                     # Codex compact R1 #3
         names = rp._short_names(["api/models/user.py", "worker/models/user.py", "src/a/C.java", "x/D.java"])

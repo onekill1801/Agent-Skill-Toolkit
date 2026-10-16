@@ -244,8 +244,11 @@ def _clip(text: str, limit: int = COMPACT_MAX) -> str:
     if not at:
         return text                                                  # one unbreakable token: keep it whole
     cut = text[:at].rstrip(" ,;:")
-    if cut.count("**") % 2:
-        cut = cut[:cut.rfind("**")].rstrip()
+    # emphasis delimiters OUTSIDE code spans / links only: a literal `**` in code is not bold, and cutting
+    # there would break the span (Codex compact R2 #1). The cut point stays outside every protected span.
+    stars = [m.start() for m in re.finditer(r"\*\*", cut) if all(not (s <= m.start() < e) for s, e in prot)]
+    if len(stars) % 2:
+        cut = cut[:stars[-1]].rstrip(" ,;:")
     return cut + " …"
 
 
