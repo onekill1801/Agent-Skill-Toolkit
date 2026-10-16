@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import urllib.parse
 from unittest import mock
@@ -639,7 +640,9 @@ class NotifyTest(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="notify-test-")
         p = mock.patch.dict(os.environ, {"REVIEW_STATE_DIR": self.tmp, "REVIEW_ORCA": "0",
                                          "FCHAT_BEARER_TOKEN": "stale-token-of-the-parent",
-                                         "REVIEW_CLOSE_WORKER_TERMINAL": "0"})
+                                         "REVIEW_CLOSE_WORKER_TERMINAL": "0",
+                                         # sweep() prunes worktrees: NEVER the real work/reviews
+                                         "REVIEW_WS_DIR": os.path.join(self.tmp, "reviews")})
         p.start()
         self.addCleanup(p.stop)
         self.review = {"head_sha": HEAD, "verdict": "COMMENT", "summary": "ok",
@@ -819,6 +822,53 @@ class NotifyTest(unittest.TestCase):
         import guard_write
         self.assertEqual(guard_write.decide({"tool_name": "Bash",
                                              "tool_input": {"command": "python review_post.py notify 77-5"}})[0], "ask")
+
+
+class PruneTest(unittest.TestCase):
+    """Review worktrees (one Orca card each) are removed once no open job uses them."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="prune-test-")
+        self.ws = os.path.join(self.tmp, "reviews")
+        p = mock.patch.dict(os.environ, {"REVIEW_STATE_DIR": self.tmp, "REVIEW_WS_DIR": self.ws})
+        p.start()
+        self.addCleanup(p.stop)
+        import review_ws
+        self.rw = review_ws
+        o = mock.patch.object(review_ws, "open_repo", side_effect=ValueError("no repo in tests"))
+        o.start()
+        self.addCleanup(o.stop)
+
+    def mk(self, name, age=3600):
+        d = os.path.join(self.ws, "77", name)
+        os.makedirs(d, exist_ok=True)
+        for extra in (".review.json", ".ws.json", ".codegraph.md"):
+            open(d + extra, "w").close()
+        old = time.time() - age
+        os.utime(d, (old, old))
+        return d
+
+    def test_only_worktrees_of_open_jobs_and_fresh_ones_stay(self):
+        done = self.mk("5@aaaaaaaa")                                          # posted job
+        superseded = self.mk("6@bbbbbbbb")                                    # old head of a running job
+        running = self.mk("6@cccccccc")
+        fresh = self.mk("7@dddddddd", age=5)                                  # just prepared, not recorded yet
+        rc.save_job({"id": "77-5", "project_id": "77", "iid": 5, "status": "posted", "worktree": done})
+        rc.save_job({"id": "77-6", "project_id": "77", "iid": 6, "status": "running", "worktree": running})
+        self.assertEqual(sorted(self.rw.prune(dry_run=True)["removed"]), sorted([done, superseded]))
+        self.assertTrue(os.path.isdir(done))                                  # dry run: nothing removed
+        out = self.rw.prune()
+        self.assertEqual(sorted(out["removed"]), sorted([done, superseded]))
+        for gone in (done, superseded):
+            self.assertFalse(os.path.exists(gone))
+            self.assertFalse(os.path.exists(gone + ".codegraph.md"))
+            self.assertTrue(os.path.exists(gone + ".review.json"))            # kept: notices / history
+        self.assertTrue(os.path.isdir(running) and os.path.isdir(fresh))
+
+    def test_keep_setting(self):
+        self.assertFalse(self.rw.keep_worktrees())
+        with mock.patch.dict(os.environ, {"REVIEW_KEEP_WORKTREES": "1"}):
+            self.assertTrue(self.rw.keep_worktrees())
 
 
 class GuardHookTest(unittest.TestCase):

@@ -58,6 +58,9 @@ CATALOG = [
     _s("REVIEW_INLINE_COMMENTS", "Review MR", "Comment thẳng vào dòng code",
        "1 = lỗi có file:dòng được đăng THÊM thành comment trên đúng dòng trong diff (tác giả resolve từng cái) · "
        "0 = tất cả gom trong một comment", "bool", "0", restart=(COORD, GROUP_WATCH)),
+    _s("REVIEW_KEEP_WORKTREES", "Review MR", "Giữ worktree sau khi review",
+       "0 = xoá ngay khi review đã đăng (Orca không dồn mục) · 1 = giữ tới khi chạy review_ws gc",
+       "bool", "0", restart=(COORD, GROUP_WATCH)),
     _s("REVIEW_CODEGRAPH", "Review MR", "Dùng CodeGraph khi chuẩn bị review",
        "1 = có (nơi gọi ngoài diff, test bị ảnh hưởng; chậm hơn ~1,5 phút) · 0 = tắt", "bool", "1",
        restart=(COORD,)),

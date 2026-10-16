@@ -781,7 +781,15 @@ def _post_locked(jid: str, dry_run: bool, notify: bool) -> dict:
     rc.board_card(job, note=f"✅ Đã đăng review ({review['verdict']}, {len(inline_ok)} inline) — {job.get('web_url', '')}")
     if notify:
         out["notified"] = deliver_notices(jid, review)       # under post()'s lock
-    return out   # worktree (= Orca card) kept until `review_ws.py gc`
+    if not rw.keep_worktrees():
+        # the review is on GitLab: its worktree (one Orca card per review) is no longer needed —
+        # review.json / ws.json stay for notices and history (REVIEW_KEEP_WORKTREES=1 keeps it)
+        try:
+            out["worktree_removed"] = bool(rw.cleanup(jid).get("removed"))
+        except Exception as e:  # noqa: BLE001 — cleanup is best effort; sweep's prune retries
+            out["worktree_removed"] = False
+            out["worktree_error"] = str(e)[:200]
+    return out
 
 
 NOTIFY_MAX_ATTEMPTS = 5
@@ -991,6 +999,14 @@ def notify_again(jid: str) -> dict:
 
 def sweep(dry_run: bool = False) -> dict:
     actions = close_idle_workers(dry_run)
+    import review_ws
+    if not dry_run and not review_ws.keep_worktrees():
+        try:                                       # worktrees of finished / superseded reviews
+            pruned = review_ws.prune().get("removed") or []
+            if pruned:
+                actions.append({"pruned_worktrees": len(pruned)})
+        except Exception as e:  # noqa: BLE001 — never let housekeeping stop posting
+            actions.append({"prune_error": str(e)[:200]})
     for job in rc.all_jobs():
         if job.get("status") == "posted" and not dry_run and _notices_due(job):
             try:

@@ -26,9 +26,11 @@ import argparse
 import base64
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import time
 
 import review_common as rc
 
@@ -342,6 +344,62 @@ def cleanup(jid: str) -> dict:
     return {"job_id": jid, "removed": removed}
 
 
+_WT_NAME = re.compile(r"^\d+@[0-9a-f]{6,40}(\.merge)?$")
+PRUNE_MIN_AGE_S = 600     # never touch a worktree this young: a prepare may not have recorded it on its job yet
+
+
+def keep_worktrees() -> bool:
+    """REVIEW_KEEP_WORKTREES=1: keep each review's worktree (an Orca card per review) until `gc`."""
+    return (rc.config.get("REVIEW_KEEP_WORKTREES", "0") or "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def prune(dry_run: bool = False) -> dict:
+    """Remove every review worktree (work/reviews/<project>/<iid>@<sha>[.merge]) that no OPEN job uses:
+    reviews already posted / cancelled / rejected and worktrees of superseded heads. review.json / ws.json
+    stay (re-sending a notice and the history need them); a worktree younger than PRUNE_MIN_AGE_S stays."""
+    active = set()
+    for j in rc.all_jobs():
+        if j.get("status") not in rc.TERMINAL and j.get("worktree"):
+            for p in (j["worktree"], j["worktree"] + ".merge"):
+                active.add(os.path.normcase(os.path.abspath(p)))
+    root, now, removed = rc.reviews_dir(), time.time(), []
+    if not os.path.isdir(root):
+        return {"removed": removed}
+    for pid in sorted(os.listdir(root)):
+        pdir = os.path.join(root, pid)
+        if not (pid.isdigit() and os.path.isdir(pdir)):
+            continue
+        cands = []
+        for name in sorted(os.listdir(pdir)):
+            p = os.path.join(pdir, name)
+            if (_WT_NAME.match(name) and os.path.isdir(p) and os.path.normcase(os.path.abspath(p)) not in active
+                    and now - os.path.getmtime(p) > PRUNE_MIN_AGE_S):
+                cands.append(p)
+        if not cands:
+            continue
+        if dry_run:
+            removed += cands
+            continue
+        try:
+            repo = open_repo(pid)
+        except (RuntimeError, ValueError, OSError):
+            repo = None                                   # project gone from the registry: plain delete
+        with rc.file_lock(f"repo-{pid}", timeout=300):
+            for p in cands:
+                if repo is not None:
+                    repo.git("worktree", "remove", "--force", p, check=False)
+                shutil.rmtree(p, ignore_errors=True)
+                if not p.endswith(".merge"):
+                    try:
+                        os.remove(p + ".codegraph.md")
+                    except OSError:
+                        pass
+                removed.append(p)
+            if repo is not None:
+                repo.git("worktree", "prune", check=False)
+    return {"removed": removed}
+
+
 def gc(days: int = 3) -> dict:
     done = []
     for j in rc.all_jobs():
@@ -370,6 +428,8 @@ def main(argv=None) -> int:
     p.add_argument("job_id")
     p = sub.add_parser("gc")
     p.add_argument("--days", type=int, default=3)
+    p = sub.add_parser("prune")                  # remove every worktree no open job uses
+    p.add_argument("--dry-run", action="store_true")
     a = ap.parse_args(argv)
     try:
         if a.cmd == "prepare":
@@ -382,6 +442,8 @@ def main(argv=None) -> int:
             out = diff(a.job_id, a.stat, a.path, a.max_lines)
         elif a.cmd == "cleanup":
             out = cleanup(a.job_id)
+        elif a.cmd == "prune":
+            out = prune(a.dry_run)
         else:
             out = gc(a.days)
     except (ValueError, RuntimeError, TimeoutError, subprocess.TimeoutExpired) as e:
