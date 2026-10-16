@@ -769,6 +769,28 @@ class NotifyTest(unittest.TestCase):
         self.assertEqual(saved["requests"][0]["group"], "G2")
         self.assertNotIn("notices", saved)
 
+    def test_a_crashed_child_is_uncertain_a_structured_error_is_failed(self):  # Codex notify R3 #1
+        self.job(people=("U1", "U2"))
+        outs = iter([self.res(1, "", "Traceback ...\nConnectionResetError: x"),
+                     self.res(1, '{"error": true, "message": "could not resolve groupType"}')])
+        with mock.patch.object(rp.subprocess, "run", side_effect=lambda *a, **k: next(outs)):
+            rp.deliver_notices("77-5", self.review)
+        n = self.notices()
+        self.assertEqual((n["G1|U1"]["state"], n["G1|U2"]["state"]), ("uncertain", "failed"))
+        self.assertIn("groupType", n["G1|U2"]["error"])
+
+    def test_posting_keeps_a_requester_added_meanwhile(self):                 # Codex notify R3 #2
+        self.job(status="running")
+        mine = rc.load_job("77-5")
+        cur = rc.load_job("77-5")
+        cur["requests"].append({"source": "fchat", "group": "G1", "by": "Late", "by_id": "U7"})
+        rc.save_job(cur)                                                     # add_job, while GitLab was called
+        mine.update(status="posted", note_id=3)
+        rp._save_posted(mine, notify=True)
+        saved = rc.load_job("77-5")
+        self.assertIn("U7", [r.get("by_id") for r in saved["requests"]])
+        self.assertEqual(saved["notices"]["G1|U7"]["state"], "pending")
+
     def test_dashboard_lists_open_notices(self):
         self.job()
         j = rc.load_job("77-5")

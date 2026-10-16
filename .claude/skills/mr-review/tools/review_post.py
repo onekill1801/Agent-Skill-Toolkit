@@ -684,6 +684,25 @@ def _safe_name(s: str) -> str:
     return re.sub(r"[^\w.-]", "", s or "")[:40]
 
 
+def _save_posted(job: dict, notify: bool) -> None:
+    """Save the job as posted under the "queue" lock — merging what review_queue.add_job appended while
+    GitLab was being called (another requester, a re-request for a new head), so nobody is dropped and
+    every requester gets a pending notice (Codex notify R3 #2)."""
+    with rc.file_lock("queue"):
+        cur = rc.load_job(job["id"]) or {}
+        seen = {json.dumps(r, sort_keys=True) for r in job.get("requests", [])}
+        for r in cur.get("requests", []):
+            if json.dumps(r, sort_keys=True) not in seen:
+                job.setdefault("requests", []).append(r)
+        if cur.get("rerequested_head"):
+            job["rerequested_head"] = cur["rerequested_head"]
+        if "priority" in cur:
+            job["priority"] = min(job.get("priority", cur["priority"]), cur["priority"])
+        if notify:
+            seed_notices(job)
+        rc.save_job(job)
+
+
 def _post_locked(jid: str, dry_run: bool, notify: bool) -> dict:
     job = rc.load_job(jid)
     if not job:
@@ -724,10 +743,8 @@ def _post_locked(jid: str, dry_run: bool, notify: bool) -> dict:
     with rc.gitlab_project(job["project_id"]) as gl:
         if rr.already_posted(gl, job):                      # reconcile: lost response on a previous try
             job.update(status="posted", posted_at=rc.now(), auto_posted=auto, reconciled=True)
-            if notify:
-                seed_notices(job)                  # the lost try never told anyone: sweep delivers these
             rc.log_event(job, "posted_reconciled")
-            rc.save_job(job)
+            _save_posted(job, notify)              # the lost try never told anyone: sweep delivers these
             return {"job_id": jid, "posted": True, "reconciled": True}
         if (job.get("inline_uncertain") or {}).get(head):    # a previous inline POST had no clear outcome
             found = inline_already_posted(gl, job) & set(inline_cands)
@@ -753,10 +770,8 @@ def _post_locked(jid: str, dry_run: bool, notify: bool) -> dict:
     rw.ledger_add(job["project_id"], job["iid"], reviewed)
     job.update(status="posted", posted_at=rc.now(), note_id=note.get("id"), inline_posted=len(inline_ok),
                auto_posted=auto)
-    if notify:
-        seed_notices(job)                          # SAME save as "posted": a crash now still notifies later
     rc.log_event(job, "posted", verdict=review["verdict"], inline=len(inline_ok), auto=auto)
-    rc.save_job(job)
+    _save_posted(job, notify)                      # notices seeded in the SAME save as "posted"
     out = {"job_id": jid, "posted": True, "verdict": review["verdict"], "inline": len(inline_ok),
            "note_id": note.get("id")}
     rc.board_card(job, note=f"✅ Đã đăng review ({review['verdict']}, {len(inline_ok)} inline) — {job.get('web_url', '')}")
@@ -787,21 +802,28 @@ def _clean_error(text: str) -> str:
     return _TOKENISH.sub("<redacted>", str(text or "")).strip()[:200]
 
 
-def _notify_result(p) -> tuple:
-    """(state, error) from notify_group's exit code + JSON output."""
-    res = None
+def _json_obj(text: str):
     try:
-        res = json.loads(p.stdout) if (p.stdout or "").strip().startswith("{") else None
+        t = (text or "").strip()
+        return json.loads(t) if t.startswith("{") else None
     except ValueError:
-        res = None
+        return None
+
+
+def _notify_result(p) -> tuple:
+    """(state, error) from notify_group's exit code + JSON output. `failed` (auto-retried) ONLY for a
+    structured error — notify_group / send.py report those BEFORE anything is sent (bad config, group type
+    not resolvable, HTTP error). A child that dies without a verdict may have sent: `uncertain` (R3 #1)."""
+    res = _json_obj(p.stdout)
     if p.returncode == 0 and isinstance(res, dict) and not res.get("error"):
         # send.py: "sent" with "confirmed": false = no echo from TChat — not proof of delivery (R1 #1)
         return ("sent", "") if res.get("confirmed") else ("unconfirmed", "TChat không xác nhận đã nhận tin")
-    msg = res.get("message") if isinstance(res, dict) else None
-    if not msg:
-        tail = [ln for ln in (p.stderr or "").splitlines() if ln.strip() and not ln.startswith("[WARN]")]
-        msg = tail[-1] if tail else f"exit {p.returncode}"
-    return "failed", _clean_error(msg)
+    err = res if isinstance(res, dict) and res.get("error") else _json_obj(p.stderr)
+    if isinstance(err, dict) and err.get("error"):
+        return "failed", _clean_error(err.get("message") or f"exit {p.returncode}")
+    tail = [ln for ln in (p.stderr or "").splitlines() if ln.strip() and not ln.startswith("[WARN]")]
+    return "uncertain", _clean_error("tiến trình gửi dừng bất thường — không rõ tin đã tới chưa: "
+                                     + (tail[-1] if tail else f"exit {p.returncode}"))
 
 
 def _requesters(job: dict) -> dict:
