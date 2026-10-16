@@ -311,6 +311,8 @@ python $T/dev-automation/tools/dbeaver.py probe "Folder/Tên kết nối" --sql 
 | Bấm Duyệt rồi mà vẫn chờ | bot Telegram đang chạy từ **repo khác** (thư mục duyệt khác) hoặc bot OPS không chạy | tắt bot cũ, mở lại tab TG bot OPS từ repo này; kiểm dòng `Hub repo` rồi bấm lại |
 | Thẻ duyệt hết hạn | không bấm trong `TELEGRAM_APPROVAL_TIMEOUT` | `review_post.py request-approval <job>` gửi lại |
 | Review không tự đăng dù đã `auto` | trượt luật | `review_rules.py check <job>` xem lý do |
+| Review đã đăng nhưng group không được báo | gửi TChat lỗi / không xác nhận | dashboard "Cần bạn xử lý" ghi lý do; lỗi rõ ràng `sweep` tự thử lại; "uncertain/unconfirmed" kiểm group rồi `review_post.py notify <job>` |
+| `WinError 10060` / timeout khi gọi GitLab | mất VPN | bật FortiClient, `vpn.py status`; xếp lại MR (nhắn lại hoặc `review_flow.py enqueue`) |
 | group_watch không nhận tin | token TChat hết hạn / người gửi không trong allowlist / thiếu từ khoá | §4.9; xem log tab group_watch (`[DENY]`, `[skip]`) |
 | `k8s.py access` → Unauthorized | token kubeconfig hết hạn | lấy kubeconfig mới (§4.10) |
 | Tài khoản Claude "token hết hạn" | access token chưa được Orca gia hạn | mở tài khoản đó trong Orca |
