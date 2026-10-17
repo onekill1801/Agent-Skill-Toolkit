@@ -12,6 +12,7 @@ Backends (no ANTHROPIC_API_KEY needed except `api`):
     cursor   ->  agent  -p --output-format text --model <m> --force --trust (arg prompt)
     agy      ->  agy    --model <m> --print --dangerously-skip-permissions
                  (WARNING: agy does not run headless reliably — see debate_engine notes)
+    codex    ->  codex exec -m <m> -s workspace-write --skip-git-repo-check -   (stdin prompt)
     custom   ->  your own argv via cmd_template "<cmd> {model}"
     api      ->  Claude API via urllib (this one needs ANTHROPIC_API_KEY)
     dry-run  ->  returns dry_run_text, calls nothing (for tests)
@@ -21,6 +22,15 @@ Stdlib only.
 Usage (CLI, mostly for smoke tests):
     python agent_runner.py --backend dry-run --prompt "hi" --dry-run-text "<x>ok</x>"
     echo "review this diff" | python agent_runner.py --backend claude
+    echo "review this diff" | python agent_runner.py --role review --avoid codex
+
+Roles (work/agents.json — gitignored, machine-specific; see agents.sample.json):
+    run_role(prompt, role) tries each "backend:model@account" of the role in order,
+    skipping a backend in `avoid`, an account with no free slot (limits.max_parallel),
+    and moving on when the CLI hits a usage/rate limit or an auth error. Accounts map to
+    per-account config dirs via env (claude: CLAUDE_CONFIG_DIR, codex: CODEX_HOME).
+Every agent started here gets TOOLKIT_HEADLESS=1 (the PreToolUse guard then DENIES
+outward-facing writes instead of asking a human who isn't there).
 """
 
 import argparse
@@ -30,6 +40,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -38,9 +49,16 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _SKILLS = os.path.dirname(os.path.dirname(_HERE))  # .../.claude/skills
 sys.path.insert(0, os.path.join(_SKILLS, "dev-automation", "tools"))
 import config  # noqa: E402
+import runpy  # noqa: E402
+
+runpy.run_path(os.path.join(_SKILLS, "_runtime", "bootstrap.py"))["activate"]()
+from agent_skill_toolkit.core import proc as proc_mod  # noqa: E402
+from agent_skill_toolkit.core import winexec  # noqa: E402
+from agent_skill_toolkit.workflows.execution import quota  # noqa: E402
+from agent_skill_toolkit.workflows.execution import usage as usage_mod  # noqa: E402
 
 ANTHROPIC_VERSION = "2023-06-01"
-DEFAULT_API_MODEL = "claude-opus-4-8"
+DEFAULT_API_MODEL = config.get("ANTHROPIC_MODEL") or "claude-opus-5-5"
 DEFAULT_BASE_URL = "https://api.anthropic.com"
 DEFAULT_MAX_TOKENS = 4000
 CLI_TIMEOUT = 600
@@ -60,6 +78,12 @@ CLI_PRESETS = {
         "default_model": None,
         "prompt_via": "arg",
     },
+    "codex": {
+        "argv": ["codex", "exec", "-m", "{model}", "-s", "workspace-write",
+                 "--skip-git-repo-check", "-"],
+        "default_model": None,
+        "prompt_via": "stdin",
+    },
     "agy": {
         "argv": ["agy", "--model", "{model}", "--print", "--dangerously-skip-permissions"],
         "default_model": "gemini-3-pro-preview",
@@ -68,31 +92,84 @@ CLI_PRESETS = {
 }
 
 
+# READ-ONLY runs (proposal debate, investigations): each backend's own hard switch — never the prompt.
+READONLY_DENY = ["Bash", "PowerShell", "Edit", "MultiEdit", "Write", "NotebookEdit", "WebFetch", "WebSearch",
+                 "Task", "Agent", "KillShell", "BashOutput"]
+
+
+def _read_only_argv(backend: str, argv: list) -> list:
+    if backend == "claude":
+        return argv + ["--disallowedTools", ",".join(READONLY_DENY), "--allowedTools", "Read,Grep,Glob",
+                       "--strict-mcp-config"]
+    if backend == "codex":
+        out = list(argv)
+        if "-s" in out:
+            out[out.index("-s") + 1] = "read-only"
+        else:
+            out[2:2] = ["-s", "read-only"]
+        return out
+    raise AgentRunError(f"backend {backend!r} has no enforceable read-only mode", {"retry_other_backend": True})
+
+
 class AgentRunError(Exception):
     """Unrecoverable error invoking the agent (missing CLI, timeout, refusal, ...)."""
 
+    def __init__(self, message: str, classification: dict = None):
+        Exception.__init__(self, message)   # not super(): AgentQuotaError's MRO continues into QuotaExceeded
+        self.classification = classification or quota.classify(message)
+
+
+class AgentQuotaError(AgentRunError, quota.QuotaExceeded):
+    """The provider refused for a limit (usage / rate / overloaded). Also a
+    quota.QuotaExceeded, so the step engine PAUSES the task (no attempt used) until resume_at."""
+
+    def __init__(self, message: str, classification: dict = None, backend: str = ""):
+        AgentRunError.__init__(self, message, classification)
+        self.resume_at = float(self.classification.get("resume_at") or 0)
+        self.backend, self.reason = backend, message
+
+
+def _cli_failure(message: str, output: str) -> AgentRunError:
+    c = quota.classify(output)
+    return AgentQuotaError(message, c) if c["kind"] == "quota" else AgentRunError(message, c)
+
 
 def _resolve_exec(argv: list) -> list:
-    """Make argv[0] directly executable across OSes.
-
-    On Windows a CLI is often a .cmd/.bat launcher (e.g. Cursor `agent.cmd`) or a
-    .ps1; subprocess(shell=False) can't exec those directly, so route via cmd.exe /
-    powershell. `shutil.which` honours PATHEXT. On macOS/Linux the Windows branch
-    is a no-op.
-    """
-    if not argv:
-        return argv
-    exe = shutil.which(argv[0])
-    if not exe:
+    """Make argv[0] directly executable across OSes — never through cmd.exe with untrusted
+    arguments (a prompt carries MR content; cmd.exe would re-parse it). Windows .cmd/.bat
+    launchers are resolved to what they run (node + script, powershell -File x.ps1, sibling
+    .exe); see agent_skill_toolkit.core.winexec. No-op on macOS/Linux."""
+    if not argv or not shutil.which(argv[0]):
         return argv  # let subprocess raise FileNotFoundError with the original name
-    low = exe.lower()
-    if os.name == "nt":
-        if low.endswith((".cmd", ".bat")):
-            return ["cmd", "/c", exe] + argv[1:]
-        if low.endswith(".ps1"):
-            return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                    "-File", exe] + argv[1:]
-    return [exe] + argv[1:]
+    try:
+        return winexec.command(argv)
+    except winexec.UnsafeLauncher as e:
+        raise AgentRunError(str(e), {"kind": "error", "retry_other_backend": True})
+
+
+# Credentials of the systems the TOOLKIT talks to. An agent we start reads untrusted content
+# (MR diffs, chat text), so it does not get them (Codex review F.4b #1 — interim until the
+# isolated executor, design §10.2; the agent CLIs keep their OWN auth: config dirs / API key).
+_SECRET_ENV = ("GITLAB_PRIVATE_TOKEN", "GITLAB_TOKEN", "AZURE_DEVOPS_PAT", "ATASK_PAT_TOKEN",
+               "ATASK_BEARER_TOKEN", "FCHAT_TOKEN", "FCHAT_BEARER_TOKEN", "TELEGRAM_BOT_TOKEN",
+               "TELEGRAM_APPROVAL_BOT_TOKEN", "JENKINS_TOKEN", "JENKINS_API_TOKEN", "DB_PASSWORD",
+               "FORTIVPN_PASSWORD", "KUBECONFIG_PROD")
+_SECRET_RX = None
+
+
+def agent_env(env_extra: dict = None) -> dict:
+    """Environment for an agent subprocess: headless guard on, toolkit service secrets removed."""
+    import re
+    global _SECRET_RX
+    if _SECRET_RX is None:
+        _SECRET_RX = re.compile(r"(TOKEN|_PAT|PASSWORD|PASSWD|SECRET|PRIVATE_KEY|COOKIE|SESSION)", re.I)
+    keep = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"}  # agent's own auth
+    env = {k: v for k, v in os.environ.items()
+           if k in keep or not (k in _SECRET_ENV or _SECRET_RX.search(k))}
+    env.update(env_extra or {})
+    env["TOOLKIT_HEADLESS"] = "1"
+    env["TOOLKIT_AGENT_SANDBOXED"] = "1"     # marker: toolkit tools may refuse writes when set
+    return env
 
 
 def _combine_prompt(system: str | None, prompt: str) -> str:
@@ -119,7 +196,10 @@ def _build_argv(argv_tmpl: list, model: str, prompt: str, prompt_via: str) -> li
 
 
 def _run_cli(prompt, system, backend, model, cmd_template, prompt_via, timeout,
-             cwd=None) -> str:
+             cwd=None, env_extra=None, read_only=False) -> str:
+    if read_only and (cmd_template or backend not in ("claude", "codex")):
+        raise AgentRunError(f"backend {backend!r} has no enforceable read-only mode",
+                            {"retry_other_backend": True})
     if cmd_template:
         argv_tmpl = shlex.split(cmd_template)
         default_model = None
@@ -133,12 +213,14 @@ def _run_cli(prompt, system, backend, model, cmd_template, prompt_via, timeout,
         raise AgentRunError(f"unknown CLI backend '{backend}'; pass cmd_template instead.")
 
     full_prompt = _combine_prompt(system, prompt)
-    argv = _resolve_exec(_build_argv(argv_tmpl, model or default_model or "",
-                                     full_prompt, prompt_via))
+    built = _build_argv(argv_tmpl, model or default_model or "", full_prompt, prompt_via)
+    argv = _resolve_exec(_read_only_argv(backend, built) if read_only else built)
     stdin_data = full_prompt if prompt_via == "stdin" else None
     try:
-        proc = subprocess.run(argv, input=stdin_data, capture_output=True, text=True,
-                              timeout=timeout, encoding="utf-8", errors="replace", cwd=cwd)
+        env = agent_env(env_extra)
+        # proc.run kills the whole tree on timeout: a CLI launcher's agent child must not keep
+        # editing files after we gave up (Codex review F.4b #5)
+        proc = proc_mod.run(argv, input=stdin_data, timeout=timeout, cwd=cwd, env=env)
     except FileNotFoundError:
         raise AgentRunError(
             f"CLI '{argv[0]}' not found on PATH. Install it, change backend, or pass "
@@ -147,11 +229,71 @@ def _run_cli(prompt, system, backend, model, cmd_template, prompt_via, timeout,
         raise AgentRunError(f"CLI '{argv[0]}' did not respond within {timeout}s.")
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip()[-400:]
-        raise AgentRunError(f"CLI '{argv[0]}' exit {proc.returncode}: {tail}")
+        raise _cli_failure(f"CLI '{argv[0]}' exit {proc.returncode}: {tail}",
+                           (proc.stdout or "") + "\n" + (proc.stderr or ""))
     out = (proc.stdout or "").strip()
     if not out:
-        raise AgentRunError(f"CLI '{argv[0]}' returned empty stdout.")
+        raise _cli_failure(f"CLI '{argv[0]}' returned empty stdout.", proc.stderr or "")
     return out
+
+
+def _api_post_child() -> int:
+    """`agent_runner.py --api-post`: ONE HTTP POST read from stdin ({url, headers, body}), answer as
+    JSON on stdout. Runs in its own process so the parent can kill it at any stage (DNS, TCP, TLS,
+    response) — nothing is sent after the deadline (Codex F.11 R3/R4)."""
+    import base64
+    import http.client
+    import ssl
+    req_in = json.loads(sys.stdin.read())
+    deadline = float(req_in["deadline"])               # wall clock, set by the parent
+    u = urllib.parse.urlsplit(req_in["url"])
+    left = deadline - time.time()
+    if left <= 0:
+        print(json.dumps({"error": "deadline passed before connecting", "late": True}))
+        return 0
+    if u.scheme == "https":
+        conn = http.client.HTTPSConnection(u.hostname, u.port, timeout=left, context=ssl.create_default_context())
+    else:
+        conn = http.client.HTTPConnection(u.hostname, u.port, timeout=left)
+    try:
+        conn.connect()                                  # DNS + TCP + TLS first ...
+        if time.time() >= deadline:                     # ... and nothing is SENT once the deadline passed
+            print(json.dumps({"error": "deadline passed while connecting", "late": True}))
+            return 0
+        path = (u.path or "/") + (f"?{u.query}" if u.query else "")
+        conn.request("POST", path, body=base64.b64decode(req_in["body"]), headers=req_in["headers"])
+        resp = conn.getresponse()
+        status, headers, raw = resp.status, {k.lower(): v for k, v in resp.getheaders()}, resp.read()
+    except (OSError, http.client.HTTPException) as e:
+        print(json.dumps({"error": str(e)}))
+        return 0
+    finally:
+        conn.close()
+    print(json.dumps({"status": status, "headers": headers, "body": base64.b64encode(raw).decode("ascii")}))
+    return 0
+
+
+def _post_with_deadline(url: str, body: bytes, headers: dict, seconds: float) -> tuple:
+    """POST with an OVERALL deadline that really stops it: the request runs in a child process that
+    proc.run kills (whole tree) at the monotonic deadline — before or during DNS / connect / TLS /
+    send / response. Returns (status, headers, body). The API key travels on stdin, never argv."""
+    import base64
+    payload = json.dumps({"url": url, "headers": headers, "body": base64.b64encode(body).decode("ascii"),
+                          "deadline": time.time() + seconds})
+    try:
+        p = proc_mod.run([sys.executable, os.path.abspath(__file__), "--api-post"], input=payload,
+                         timeout=seconds, env=agent_env())
+    except subprocess.TimeoutExpired:
+        raise AgentRunError(f"API turn exceeded its {seconds:.0f}s deadline (cancelled)")
+    try:
+        out = json.loads((p.stdout or "").strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        raise AgentRunError(f"API worker failed: {(p.stderr or p.stdout or '')[-300:]}")
+    if out.get("late"):
+        raise AgentRunError(f"API turn exceeded its {seconds:.0f}s deadline ({out['error']}; nothing sent)")
+    if out.get("error"):
+        raise AgentRunError(f"network error calling Claude API: {out['error']}")
+    return int(out["status"]), out.get("headers") or {}, base64.b64decode(out["body"])
 
 
 def _run_api(prompt, system, model, max_tokens, timeout) -> str:
@@ -164,28 +306,74 @@ def _run_api(prompt, system, model, max_tokens, timeout) -> str:
                "messages": [{"role": "user", "content": prompt}]}
     if system:
         payload["system"] = system
-    req = urllib.request.Request(base_url.rstrip("/") + "/v1/messages",
-                                 data=json.dumps(payload).encode("utf-8"), method="POST")
-    req.add_header("content-type", "application/json")
-    req.add_header("x-api-key", api_key)
-    req.add_header("anthropic-version", ANTHROPIC_VERSION)
+    headers = {"content-type": "application/json", "x-api-key": api_key, "anthropic-version": ANTHROPIC_VERSION}
+    status, rheaders, raw = _post_with_deadline(base_url.rstrip("/") + "/v1/messages",
+                                                json.dumps(payload).encode("utf-8"), headers, float(timeout))
+    if status >= 400:
+        body = raw.decode("utf-8", "replace")[:400]
+        hint = f" retry-after: {rheaders.get('retry-after')}" if rheaders.get("retry-after") else ""
+        raise _cli_failure(f"Claude API HTTP {status}: {body}", f"HTTP {status} {body}{hint}")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        raise AgentRunError(f"Claude API HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:400]}")
-    except urllib.error.URLError as e:
-        raise AgentRunError(f"network error calling Claude API: {e.reason}")
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        raise AgentRunError(f"Claude API returned non-JSON: {raw[:200]!r}")
     if data.get("stop_reason") == "refusal":
         raise AgentRunError(f"model refusal: {data.get('stop_details')}")
     parts = [b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"]
     return "\n".join(p for p in parts if p).strip()
 
 
+class AgentBudgetError(AgentRunError):
+    """This task's agent budget is spent (kind "budget": a human decides). Daily cap / exhausted usage
+    raise AgentQuotaError instead (pause until the reset)."""
+
+
+def _effective_model(backend: str, model: str, cmd_template: str) -> str:
+    if backend == "api":
+        return model or DEFAULT_API_MODEL
+    if cmd_template or backend not in CLI_PRESETS:
+        return model or ""
+    return model or CLI_PRESETS[backend]["default_model"] or ""
+
+
+def _charged_turn(backend, model, role, timeout, notes, fn, account=""):
+    """Every REAL agent turn goes through here (Codex F.11 #1/#2/#7): the claude model follows the
+    usage tier, the turn is reserved atomically against the daily cap / the task's budget BEFORE it
+    starts (worst case = its timeout), then settled to the real duration. The task comes from
+    TOOLKIT_TASK_ID (set by the workflow engine for every subprocess); none = daily cap only."""
+    from agent_skill_toolkit.core import store as store_mod
+    tier = usage_tier()
+    if backend == "claude" and model:
+        down = usage_mod.model_for(role, model, tier)
+        if down != model:
+            if notes is not None:
+                notes.append({"model": f"{model} -> {down} ({tier})"})
+            model = down
+    task_id, step = os.environ.get("TOOLKIT_TASK_ID", ""), os.environ.get("TOOLKIT_STEP", "")
+    with store_mod.Store() as st:
+        try:
+            res = usage_mod.reserve(st, task_id, step, backend, model, timeout, account=account or "")
+        except usage_mod.BudgetSpent as b:
+            if b.kind == "quota":
+                raise AgentQuotaError(str(b), {"kind": "quota", "resume_at": b.resume_at,
+                                               "retry_other_backend": False})
+            raise AgentBudgetError(str(b), {"kind": "budget", "retry_other_backend": False})
+    t0 = time.time()
+    try:
+        return fn(model, float(res["timeout"]))           # fractional, never rounded up
+    finally:
+        try:
+            with store_mod.Store() as st:
+                usage_mod.settle(st, res["row"], round(time.time() - t0, 1))
+        except Exception:  # noqa: BLE001 — accounting failure keeps the worst case, never hides output
+            pass
+
+
 def run_turn(prompt: str, *, system: str = None, backend: str = "claude",
              model: str = None, cmd_template: str = None, prompt_via: str = None,
              timeout: int = CLI_TIMEOUT, max_tokens: int = DEFAULT_MAX_TOKENS,
-             dry_run_text: str = None, cwd: str = None) -> str:
+             dry_run_text: str = None, cwd: str = None, env_extra: dict = None,
+             role: str = "", notes: list = None, read_only: bool = False, account: str = "") -> str:
     """Run one headless agent turn; return raw stdout text. Raises AgentRunError.
 
     `dry_run_text` (or backend='dry-run') short-circuits to a canned response so
@@ -197,36 +385,198 @@ def run_turn(prompt: str, *, system: str = None, backend: str = "claude",
         if dry_run_text is None:
             raise AgentRunError("backend 'dry-run' requires dry_run_text.")
         return dry_run_text
+    if read_only and (cmd_template or backend not in ("claude", "codex", "api")):
+        # refused BEFORE any budget is reserved; run_role moves on to the next candidate
+        raise AgentRunError(f"backend {backend!r} has no enforceable read-only mode",
+                            {"retry_other_backend": True})
+    eff = _effective_model(backend, model, cmd_template)
     if backend == "api":
-        return _run_api(prompt, system, model, max_tokens, timeout)
-    return _run_cli(prompt, system, backend, model, cmd_template, prompt_via, timeout,
-                    cwd=cwd)
+        return _charged_turn(backend, eff, role, timeout, notes,
+                             lambda m, t: _run_api(prompt, system, m, max_tokens, t), account)
+    return _charged_turn(backend, eff, role, timeout, notes,
+                         lambda m, t: _run_cli(prompt, system, backend, m, cmd_template, prompt_via, t,
+                                               cwd=cwd, env_extra=env_extra, read_only=read_only),
+                         account)
+
+
+# --------------------------------------------------------------------------- role routing
+
+def _agents_config() -> dict:
+    work = os.environ.get("WORK_DIR") or os.path.join(os.path.dirname(_SKILLS.rstrip(os.sep)), "..", "work")
+    for path in (os.path.join(work, "agents.json"), os.path.join(_HERE, "agents.sample.json")):
+        try:
+            with open(os.path.normpath(path), encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            continue
+    return {}
+
+
+def parse_candidate(spec: str) -> dict:
+    """'codex:gpt-5.x@main' -> {backend, model, account}; model/account optional."""
+    head, _, account = spec.partition("@")
+    backend, _, model = head.partition(":")
+    return {"backend": backend.strip(), "model": model.strip() or None,
+            "account": account.strip() or None, "spec": spec}
+
+
+def _account_env(cfg: dict, backend: str, account: str) -> dict:
+    acct = ((cfg.get("accounts") or {}).get(backend) or {}).get(account or "") or {}
+    return {k: os.path.expanduser(str(v)) for k, v in (acct.get("env") or {}).items()}
+
+
+SLOT_STALE_S = CLI_TIMEOUT * 3            # a slot file older than this is a crashed run (reclaimed)
+
+
+def slots_dir() -> str:
+    return os.path.normpath(os.path.join(os.path.dirname(_SKILLS.rstrip(os.sep)), "..", "temp", "agent_slots"))
+
+
+class _Slot:
+    """Cross-process slot for one account (O_EXCL lock files) — caps parallel sessions."""
+
+    def __init__(self, key: str, limit: int, info: dict = None):
+        self.key, self.limit, self.path, self.info = key, max(1, limit), None, info or {}
+
+    def __enter__(self):
+        d = slots_dir()
+        os.makedirs(d, exist_ok=True)
+        for i in range(self.limit):
+            p = os.path.join(d, f"{self.key.replace('/', '_')}.{i}.lock")
+            try:
+                if os.path.exists(p) and time.time() - os.path.getmtime(p) > SLOT_STALE_S:
+                    os.remove(p)                      # stale slot from a crashed run
+                fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                # what this slot is doing, for `accounts.py` (who runs what right now)
+                os.write(fd, json.dumps({"pid": os.getpid(), "started": time.time(), **self.info}).encode())
+                os.close(fd)
+                self.path = p
+                return self
+            except FileExistsError:
+                continue
+        return None
+
+    def __exit__(self, *exc):
+        if self.path:
+            # a reader (accounts.py) may hold the file open for a moment; Windows then refuses the
+            # delete — retry briefly instead of leaking the slot until it goes stale (Codex accounts #1)
+            for i in range(10):
+                try:
+                    os.remove(self.path)
+                    return
+                except FileNotFoundError:
+                    return
+                except OSError:
+                    time.sleep(0.05 * (i + 1))
+
+
+def usage_tier() -> str:
+    """Current throttling tier (F.11): TOOLKIT_USAGE_TIER overrides; else the level reported to the
+    store (stale / missing / unreadable store = normal — throttling never blocks an agent turn)."""
+    forced = os.environ.get("TOOLKIT_USAGE_TIER", "").strip().lower()
+    if forced in ("normal", "save", "critical"):
+        return forced
+    try:
+        from agent_skill_toolkit.core import store as store_mod
+        if not os.path.exists(store_mod.default_path()):
+            return "normal"
+        with store_mod.Store() as st:
+            return usage_mod.level(st)["tier"]
+    except Exception:  # noqa: BLE001
+        return "normal"
+
+
+def run_role(prompt: str, role: str, *, system: str = None, cwd: str = None,
+             timeout: int = CLI_TIMEOUT, avoid: tuple = (), read_only: bool = False) -> dict:
+    """Run one turn for `role` using the first usable candidate. Returns
+    {"text", "used": spec, "tried": [...]}; raises AgentRunError if all fail."""
+    cfg = _agents_config()
+    roles = cfg.get("roles") or {}
+    specs = roles.get(role) or roles.get("default") or ["claude"]
+    if isinstance(specs, str):
+        specs = [specs]
+    tried = []
+    for spec in specs:
+        c = parse_candidate(spec)
+        if c["backend"] in avoid:
+            tried.append({"spec": spec, "skipped": "avoided"})
+            continue
+        key = f"{c['backend']}@{c['account'] or 'default'}"
+        limit = int(((cfg.get("limits") or {}).get(key) or {}).get("max_parallel", 99))
+        slot = _Slot(key, limit, {"spec": spec, "role": role, "task_id": os.environ.get("TOOLKIT_TASK_ID", ""),
+                                  "step": os.environ.get("TOOLKIT_STEP", "")})
+        if slot.__enter__() is None:
+            tried.append({"spec": spec, "skipped": "no free slot"})
+            continue
+        try:
+            text = run_turn(prompt, system=system, backend=c["backend"], model=c["model"],
+                            timeout=timeout, cwd=cwd, role=role, notes=tried, read_only=read_only,
+                            env_extra=_account_env(cfg, c["backend"], c["account"]),
+                            account=c["account"] or "")
+            return {"text": text, "used": spec, "tried": tried}
+        except AgentRunError as e:
+            msg = str(e)
+            c = e.classification
+            tried.append({"spec": spec, "error": msg[:200], "kind": c.get("kind"),
+                          "resume_at": c.get("resume_at")})
+            if not c.get("retry_other_backend"):
+                # keep the subtype: a quota stays QuotaExceeded (pause), a budget stays a budget error
+                raise e.__class__(f"{spec}: {msg}", c) from e
+        finally:
+            slot.__exit__()
+    quotas = [t["resume_at"] for t in tried if t.get("kind") == "quota" and t.get("resume_at")]
+    if quotas:                       # every candidate is limited: pause until the EARLIEST reset
+        raise AgentQuotaError(f"all candidates for role '{role}' are rate/usage limited: {tried}",
+                              {"kind": "quota", "resume_at": min(quotas), "retry_other_backend": False})
+    raise AgentRunError(f"no candidate could run role '{role}': {tried}")
 
 
 def main() -> int:
+    if sys.argv[1:] == ["--api-post"]:
+        return _api_post_child()
     ap = argparse.ArgumentParser(description="Run one headless agent turn, print raw text.")
     ap.add_argument("--prompt", default=None, help="prompt text (else read from stdin)")
     ap.add_argument("--system", default=None)
     ap.add_argument("--backend", default="claude",
-                    choices=["claude", "cursor", "agy", "custom", "api", "dry-run"])
+                    choices=["claude", "codex", "cursor", "agy", "custom", "api", "dry-run"])
+    ap.add_argument("--role", default=None, help="route via work/agents.json roles")
+    ap.add_argument("--avoid", default="", help="comma list of backends to skip (with --role)")
     ap.add_argument("--cmd-template", default=None, help="for --backend custom; may contain {model}")
     ap.add_argument("--prompt-via", default=None, choices=[None, "stdin", "arg"])
     ap.add_argument("--model", default=config.get("ANTHROPIC_MODEL") or None)
     ap.add_argument("--timeout", type=int, default=CLI_TIMEOUT)
     ap.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
     ap.add_argument("--dry-run-text", default=None)
+    ap.add_argument("--cwd", default=None, help="run the agent inside this directory")
+    ap.add_argument("--read-only", action="store_true",
+                    help="enforce a read-only agent (claude: tools denied; codex: -s read-only; others refused)")
     args = ap.parse_args()
 
     prompt = args.prompt if args.prompt is not None else sys.stdin.read()
     backend = "custom" if args.cmd_template else args.backend
+
+    def _err(e: AgentRunError) -> int:
+        c = e.classification or {}
+        # kind/resume_at let a calling workflow PAUSE on a provider limit instead of failing
+        print(json.dumps({"error": True, "message": str(e), "kind": c.get("kind"),
+                          "resume_at": c.get("resume_at")}, ensure_ascii=False))
+        return 1
+    if args.role:
+        try:
+            res = run_role(prompt, args.role, system=args.system, timeout=args.timeout, cwd=args.cwd,
+                           avoid=tuple(x for x in args.avoid.split(",") if x), read_only=args.read_only)
+        except AgentRunError as e:
+            return _err(e)
+        print(json.dumps({"used": res["used"], "tried": res["tried"]}, ensure_ascii=False), file=sys.stderr)
+        sys.stdout.write(res["text"].rstrip("\n") + "\n")
+        return 0
     try:
         out = run_turn(prompt, system=args.system, backend=backend, model=args.model,
                        cmd_template=args.cmd_template, prompt_via=args.prompt_via,
                        timeout=args.timeout, max_tokens=args.max_tokens,
-                       dry_run_text=args.dry_run_text)
+                       dry_run_text=args.dry_run_text, cwd=args.cwd, read_only=args.read_only)
     except AgentRunError as e:
-        print(json.dumps({"error": True, "message": str(e)}, ensure_ascii=False))
-        return 1
+        return _err(e)
     sys.stdout.write(out)
     if not out.endswith("\n"):
         sys.stdout.write("\n")

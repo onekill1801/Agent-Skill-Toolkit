@@ -1,5 +1,5 @@
 ---
-name: Team Registry
+name: team-registry
 description: >
   Kho hồ sơ đội nhóm: vai trò, kỹ năng, tính cách, cách tương tác của từng người
   trong dự án/đội nhỏ — để giao việc đúng người và giao tiếp hiệu quả. Dữ liệu ở
