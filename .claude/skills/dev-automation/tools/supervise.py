@@ -49,21 +49,40 @@ def _say(name: str, msg: str) -> None:
 # ----------------------------------------------------------------------------- the process tree
 
 class Tree:
-    """The daemon and EVERY descendant. Windows: a Job Object (KILL_ON_JOB_CLOSE — also covers a supervisor
-    that dies); POSIX: the daemon's process group plus a ppid walk at stop time (a descendant may have
-    started its own session/group)."""
+    """The daemon and EVERY descendant, contained for its whole life:
+      * Windows — a Job Object (KILL_ON_JOB_CLOSE). The daemon is created SUSPENDED, put in the job, then
+        resumed, so nothing it starts can be outside the job (Codex supervise R2 #1); a dying supervisor
+        or a closed tab ends the tree too.
+      * POSIX — Linux makes the supervisor a child subreaper (orphans of a crashed daemon re-parent to
+        it, so they stay findable — R2 #3); everywhere, descendants are also recorded while the daemon
+        runs (track()), and stop() kills both sets."""
 
     def __init__(self, cmd: list):
-        self.job = _WinJob() if os.name == "nt" else None
-        self.p = subprocess.Popen(cmd, **proc.popen_group_kwargs())
+        self.job, self.seen = None, set()
+        previous = _ignore_sigint()                                # no Ctrl+C between spawn and containment (R2 #2)
         try:
-            if self.job:
-                self.job.assign(self.p)
-        except BaseException:                                       # incl. Ctrl+C right here: no orphan
-            proc.kill_tree(self.p)
-            if self.job:
-                self.job.close()
-            raise
+            if os.name == "nt":
+                self.job = _WinJob()
+                kw = proc.popen_group_kwargs()
+                kw["creationflags"] = kw.get("creationflags", 0) | 0x00000004      # CREATE_SUSPENDED
+                self.p = subprocess.Popen(cmd, **kw)
+                try:
+                    self.job.assign(self.p)
+                    _nt_resume(self.p)
+                except BaseException:
+                    self.p.kill()
+                    self.job.close()
+                    raise
+            else:
+                _become_subreaper()
+                self.p = subprocess.Popen(cmd, **proc.popen_group_kwargs())
+        finally:
+            _restore_sigint(previous)
+
+    def track(self) -> None:
+        """POSIX: remember the daemon's current descendants (they may outlive it if it crashes)."""
+        if self.job is None and self.p.poll() is None:
+            self.seen.update(_descendants(self.p.pid))
 
     def poll(self):
         return self.p.poll()
@@ -74,13 +93,10 @@ class Tree:
 
     def stop(self, grace: float = STOP_GRACE_S) -> None:
         """Graceful to the daemon, then kill whatever of the tree is left; returns once it is all gone."""
-        previous = signal.getsignal(signal.SIGINT)
+        previous = _ignore_sigint()                                # a 2nd Ctrl+C must not orphan the tree
         try:
-            signal.signal(signal.SIGINT, signal.SIG_IGN)            # a 2nd Ctrl+C must not orphan the tree
-        except ValueError:
-            previous = None                                         # not the main thread (tests)
-        try:
-            pids = [] if self.job else _descendants(self.p.pid)
+            if self.job is None:
+                self.track()
             if self.p.poll() is None:
                 try:
                     if os.name == "nt":
@@ -96,7 +112,9 @@ class Tree:
             if self.job:
                 self.job.kill_all()                                 # every descendant, wherever its group
             else:
-                for pid in pids + _descendants(self.p.pid):
+                # what the daemon started (recorded while it ran) + every process still below this supervisor
+                # (Linux subreaper: also the orphans of a crashed daemon)
+                for pid in set(self.seen) | set(_descendants(os.getpid())):
                     try:
                         os.kill(pid, signal.SIGKILL)
                     except OSError:
@@ -110,14 +128,44 @@ class Tree:
         finally:
             if self.job:
                 self.job.close()
-            if previous is not None:
-                signal.signal(signal.SIGINT, previous)
+            _restore_sigint(previous)
 
     def alive(self) -> int:
         """How many processes of the tree still run (Windows: the job's count)."""
         if self.job:
             return self.job.active()
         return int(self.p.poll() is None) + len(_descendants(self.p.pid))
+
+
+def _ignore_sigint():
+    try:
+        previous = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        return previous
+    except ValueError:
+        return None                                                 # not the main thread (tests)
+
+
+def _restore_sigint(previous) -> None:
+    if previous is not None:
+        signal.signal(signal.SIGINT, previous)
+
+
+def _nt_resume(p) -> None:
+    import ctypes
+    if ctypes.WinDLL("ntdll").NtResumeProcess(ctypes.c_void_p(int(p._handle))) != 0:
+        raise OSError("NtResumeProcess failed")
+
+
+def _become_subreaper() -> None:
+    """Linux: orphaned descendants re-parent to this process instead of init (PR_SET_CHILD_SUBREAPER)."""
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        import ctypes
+        ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0)
+    except (OSError, AttributeError):
+        pass
 
 
 def _descendants(pid: int) -> list:
@@ -252,6 +300,7 @@ def run(cmd: list, name: str, reload: bool = True, root: str = "", max_restarts:
                 if tree.poll() is not None:
                     reason = f"thoát mã {tree.returncode}"
                     break
+                tree.track()
                 if reload and time.monotonic() - last_watch >= WATCH_EVERY_S:
                     last_watch = time.monotonic()
                     now = fingerprint(root, seen)

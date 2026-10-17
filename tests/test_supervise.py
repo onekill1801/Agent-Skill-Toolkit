@@ -99,6 +99,23 @@ class SuperviseTest(unittest.TestCase):
         self.assertFalse(_alive(grandchild), "a descendant survived the stop")
         self.assertIsNotNone(tree.poll())
 
+    def test_descendants_of_a_crashed_daemon_are_still_killed(self):         # Codex supervise R2 #3 / #1
+        tmp = tempfile.mkdtemp()
+        pidfile = os.path.join(tmp, "orphan.pid")
+        flags = "creationflags=0x200" if os.name == "nt" else "start_new_session=True"
+        code = ("import subprocess, sys\n"                           # spawns at once, then crashes
+                f"g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], {flags})\n"
+                f"open({pidfile!r}, 'w').write(str(g.pid))\n"
+                "sys.exit(1)\n")
+        tree = S.Tree([sys.executable, "-c", code])
+        tree.p.wait(timeout=20)                                       # the daemon is gone
+        with open(pidfile) as f:
+            orphan = int(f.read())
+        self.assertTrue(_alive(orphan))
+        tree.stop(grace=1)
+        time.sleep(0.5)
+        self.assertFalse(_alive(orphan), "the orphan of a crashed daemon survived")
+
     def test_git_failure_is_not_a_change(self):                               # Codex supervise R1 #3
         last = ("abc1234", 5.0, 6.0)
         with mock.patch.object(S, "_git_head", return_value=None), \
