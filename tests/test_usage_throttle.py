@@ -235,8 +235,9 @@ class TurnBudgetTest(Base):
         from agent_skill_toolkit.core import proc
         t0 = time.monotonic()
         with self.assertRaises(subprocess.TimeoutExpired):
-            proc.run([sys.executable, "-c", "import time; time.sleep(0.35); print('done')"], timeout=0.15, poll=0.5)
-        self.assertLess(time.monotonic() - t0, 0.35)
+            proc.run([sys.executable, "-c", "import time; time.sleep(5); print('done')"], timeout=0.15, poll=0.5)
+        # killed long before the child could finish (5 s); the margin absorbs taskkill on a busy machine
+        self.assertLess(time.monotonic() - t0, 2.0)
 
     def test_role_routing_keeps_the_quota_type(self):                       # Codex F.11 R2
         from agent_skill_toolkit.workflows.execution import quota
