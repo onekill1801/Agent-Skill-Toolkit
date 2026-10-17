@@ -1,4 +1,5 @@
-"""supervise.py: a daemon is restarted when it exits (with backoff) and when code / config changes."""
+"""supervise.py: a daemon is restarted when it exits (with backoff) and on a new commit / config change;
+stopping always takes the whole process tree."""
 
 import os
 import subprocess
@@ -12,6 +13,19 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / ".claude" / "skills" / "dev-automation" / "tools"))
 import supervise as S  # noqa: E402
+
+SLEEPER = [sys.executable, "-c", "import time; time.sleep(60)"]
+
+
+def _alive(pid: int) -> bool:
+    if os.name == "nt":
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True).stdout
+        return str(pid) in out
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
 
 
 class SuperviseTest(unittest.TestCase):
@@ -27,40 +41,69 @@ class SuperviseTest(unittest.TestCase):
         time.sleep(0.01 if s == S.POLL_S else 0)
 
     def test_restarts_a_crashing_child_with_growing_backoff(self):
-        cmd = [sys.executable, "-c", "import sys; sys.exit(3)"]
-        S.run(cmd, "t", reload=False, max_restarts=3, sleep=self.sleep)
-        events = [e[1] for e in self.log]
-        self.assertEqual(events, ["supervisor_started", "restarted", "restarted", "restarted", "restarted"])
-        waits = [s for s in self.sleeps if s != S.POLL_S]
-        self.assertEqual(waits, [2.0, 4.0, 8.0])                              # last restart: max reached first
+        S.run([sys.executable, "-c", "import sys; sys.exit(3)"], "t", reload=False, max_restarts=3, sleep=self.sleep)
+        self.assertEqual([e[1] for e in self.log], ["supervisor_started"] + ["restarted"] * 4)
+        self.assertEqual([s for s in self.sleeps if s != S.POLL_S], [2.0, 4.0, 8.0])
         self.assertIn("thoát mã 3", self.log[1][2])
 
-    def test_a_code_change_restarts_at_once(self):
-        cmd = [sys.executable, "-c", "import time; time.sleep(30)"]
-        prints = iter([("a",), ("b",)] + [("b",)] * 50)
-        with mock.patch.object(S, "fingerprint", side_effect=lambda root: next(prints)), \
-             mock.patch.object(S, "WATCH_EVERY_S", 0), \
-             mock.patch.object(S, "stop", wraps=lambda p, grace=1: S.proc.kill_tree(p)) as stop:
-            S.run(cmd, "t", reload=True, root=str(ROOT), max_restarts=0, sleep=self.sleep)
-        stop.assert_called_once()
+    def test_a_launch_failure_takes_the_backoff_path(self):                    # Codex supervise R1 #5
+        S.run([os.path.join(tempfile.mkdtemp(), "no-such-program.exe")], "t", reload=False, max_restarts=1,
+              sleep=self.sleep)
+        self.assertEqual([e[1] for e in self.log], ["supervisor_started", "restarted", "restarted"])
+        self.assertIn("không khởi động được", self.log[1][2])
+
+    def test_a_new_commit_restarts_at_once(self):
+        prints = iter([("a", 1, 1), ("b", 1, 1)] + [("b", 1, 1)] * 50)
+        with mock.patch.object(S, "fingerprint", side_effect=lambda root, last=None: next(prints)), \
+             mock.patch.object(S, "WATCH_EVERY_S", 0), mock.patch.object(S, "STOP_GRACE_S", 5):
+            S.run(SLEEPER, "t", reload=True, root=str(ROOT), max_restarts=0, sleep=self.sleep)
         self.assertEqual([e[1] for e in self.log], ["supervisor_started", "reloaded"])
 
-    def test_ctrl_c_stops_child_and_supervisor(self):
-        cmd = [sys.executable, "-c", "import time; time.sleep(30)"]
+    def test_ctrl_c_stops_the_tree_and_the_supervisor(self):
+        trees = []
+        real = S.Tree
+
+        def track(cmd):
+            trees.append(real(cmd))
+            return trees[-1]
 
         def interrupt(_):
             raise KeyboardInterrupt
-        with mock.patch.object(S, "stop", wraps=lambda p, grace=1: S.proc.kill_tree(p)) as stop:
-            self.assertEqual(S.run(cmd, "t", reload=False, sleep=interrupt), 0)
-        stop.assert_called_once()
+        with mock.patch.object(S, "Tree", side_effect=track), mock.patch.object(S, "STOP_GRACE_S", 5):
+            self.assertEqual(S.run(SLEEPER, "t", reload=False, sleep=interrupt), 0)
+        self.assertIsNotNone(trees[0].poll())
         self.assertEqual(self.log[-1][1], "supervisor_stopped")
 
-    def test_graceful_stop_then_kill(self):
-        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], **S.proc.popen_group_kwargs())
-        t0 = time.monotonic()
-        S.stop(p, grace=5)
-        self.assertIsNotNone(p.poll())
-        self.assertLess(time.monotonic() - t0, 10)
+    def test_stop_kills_descendants_in_their_own_process_group(self):          # Codex supervise R1 #1
+        tmp = tempfile.mkdtemp()
+        pidfile = os.path.join(tmp, "grandchild.pid")
+        flags = "creationflags=0x200" if os.name == "nt" else "start_new_session=True"
+        code = ("import subprocess, sys, time\n"
+                f"g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], {flags})\n"
+                f"open({pidfile!r}, 'w').write(str(g.pid))\n"
+                "time.sleep(60)\n")
+        tree = S.Tree([sys.executable, "-c", code])
+        deadline = time.monotonic() + 20
+        def read():
+            try:
+                with open(pidfile) as f:
+                    return f.read()
+            except OSError:
+                return ""
+        while not read() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        grandchild = int(read())
+        self.assertTrue(_alive(grandchild))
+        tree.stop(grace=2)
+        time.sleep(0.5)
+        self.assertFalse(_alive(grandchild), "a descendant survived the stop")
+        self.assertIsNotNone(tree.poll())
+
+    def test_git_failure_is_not_a_change(self):                               # Codex supervise R1 #3
+        last = ("abc1234", 5.0, 6.0)
+        with mock.patch.object(S, "_git_head", return_value=None), \
+             mock.patch.object(S.os.path, "getmtime", side_effect=OSError):
+            self.assertEqual(S.fingerprint("x", last), last)
 
     def test_fingerprint_follows_head_and_config(self):
         tmp = tempfile.mkdtemp()
@@ -69,7 +112,7 @@ class SuperviseTest(unittest.TestCase):
         open(env, "w").close()
         a = S.fingerprint(tmp)
         os.utime(env, (1, 1))
-        self.assertNotEqual(S.fingerprint(tmp), a)
+        self.assertNotEqual(S.fingerprint(tmp, a), a)
 
     def test_cli_needs_a_command(self):
         self.assertEqual(S.main(["--name", "x"]), 2)
