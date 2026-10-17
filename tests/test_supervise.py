@@ -216,6 +216,14 @@ class SuperviseTest(unittest.TestCase):
             tree.stop(grace=1)
         self.assertEqual(tree.kill_rest(), [])
 
+    def test_a_failed_process_scan_is_not_an_empty_tree(self):               # Codex supervise R7 #2
+        tree = mock.Mock(marker="m")
+        with mock.patch.object(S, "_descendants", return_value=None), \
+             mock.patch.object(S, "_marked", return_value=[]), mock.patch.object(S.time, "sleep"):
+            left = S._kill_until_empty(tree, wait=0)
+        self.assertTrue(left)                                               # gate stays shut
+        self.assertIn("không liệt kê được", left[0])
+
     def test_git_failure_is_not_a_change(self):                               # Codex supervise R1 #3
         last = ("abc1234", 5.0, 6.0)
         with mock.patch.object(S, "_git_head", return_value=None), \

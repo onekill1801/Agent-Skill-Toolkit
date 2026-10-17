@@ -54,11 +54,11 @@ class Tree:
         resumed, so nothing it starts can be outside the job (Codex supervise R2 #1); a dying supervisor
         or a closed tab ends the tree too.
       * POSIX — Linux makes the supervisor a child subreaper (orphans of a crashed daemon re-parent to
-        it, so they stay findable — R2 #3); everywhere, descendants are also recorded while the daemon
-        runs (track()), and stop() kills both sets."""
+        it, so they stay findable — R2 #3); everywhere, the daemon's environment carries a unique marker
+        every descendant inherits, so stop() finds even a re-parented one by it (and only ours)."""
 
     def __init__(self, cmd: list):
-        self.job, self.seen, self.marker, self.interrupted = None, set(), "", False
+        self.job, self.marker, self.interrupted = None, "", False
         previous = _catch_sigint(self)              # no Ctrl+C between spawn and containment (R2 #2) — recorded
         try:
             if os.name == "nt":
@@ -89,11 +89,6 @@ class Tree:
         finally:
             _restore_sigint(previous)
 
-    def track(self) -> None:
-        """POSIX: remember the daemon's current descendants (they may outlive it if it crashes)."""
-        if self.job is None and self.p.poll() is None:
-            self.seen.update(_descendants(self.p.pid))
-
     def poll(self):
         return self.p.poll()
 
@@ -108,8 +103,6 @@ class Tree:
         self.interrupted = False
         previous = _catch_sigint(self)
         try:
-            if self.job is None:
-                self.track()
             if self.p.poll() is None:
                 try:
                     if os.name == "nt":
@@ -158,17 +151,22 @@ class Tree:
         """How many processes of the tree still run (Windows: the job's count)."""
         if self.job:
             return self.job.active()
-        return int(self.p.poll() is None) + len(_descendants(self.p.pid))
+        return int(self.p.poll() is None) + len(_descendants(self.p.pid) or [])
 
 
 TREE_ENV = "TOOLKIT_SUPERVISE_TREE"
 
 
-def _marked(marker: str) -> list:
-    """POSIX: pids whose environment carries TREE_ENV=<marker> (Linux /proc, else `ps eww`)."""
+def _marked(marker: str):
+    """POSIX: pids whose environment carries TREE_ENV=<marker> (Linux /proc, else `ps eww`), or None when
+    the process list itself can not be read."""
     needle, found = f"{TREE_ENV}={marker}", []
     if os.path.isdir("/proc"):
-        for d in os.listdir("/proc"):
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return None
+        for d in entries:
             if not d.isdigit() or int(d) == os.getpid():
                 continue
             try:
@@ -176,14 +174,16 @@ def _marked(marker: str) -> list:
                     if needle.encode() in f.read().split(b"\0"):
                         found.append(int(d))
             except OSError:
-                continue
+                continue                                   # gone meanwhile / not ours to read
         return found
     try:
-        out = subprocess.run(["ps", "-A", "-ww", "-E", "-o", "pid=,command="], capture_output=True, text=True,
-                             timeout=10).stdout
+        r = subprocess.run(["ps", "-A", "-ww", "-E", "-o", "pid=,command="], capture_output=True, text=True,
+                           timeout=10)
     except (OSError, subprocess.SubprocessError):
-        return found
-    for line in out.splitlines():
+        return None
+    if r.returncode != 0:
+        return None
+    for line in r.stdout.splitlines():
         parts = line.strip().split(None, 1)
         if len(parts) == 2 and parts[0].isdigit() and int(parts[0]) != os.getpid() and needle in parts[1].split():
             found.append(int(parts[0]))
@@ -205,20 +205,27 @@ def _reap_adopted(wait: float = 5) -> None:
 
 
 def _kill_until_empty(tree, wait: float = 15) -> list:
-    """POSIX: discover (recorded + below the supervisor + env-marked) and SIGKILL, AGAIN AND AGAIN until a
-    scan finds nothing — a process killed late may have started another child after the previous scan."""
-    deadline, first = time.monotonic() + wait, True
-    while time.monotonic() < deadline:
-        pids = (set(tree.seen) if first else set()) | set(_descendants(os.getpid())) | set(_marked(tree.marker))
-        pids.discard(os.getpid())
-        first = False
-        alive = [pid for pid in pids if _signal(pid, signal.SIGKILL)]
+    """POSIX: discover (below the supervisor + env-marked) and SIGKILL, AGAIN AND AGAIN until a complete
+    scan finds nothing — a process killed late may have started another child after the previous scan.
+    Only processes proven to be OURS are signalled: a recorded pid must still carry the tree's env marker
+    or be below the supervisor (a pid may have been reused — Codex supervise R7 #1). A scan that FAILS
+    (ps / proc unreadable) is not "empty": the survivors list says so and the restart gate stays shut (R7 #2)."""
+    deadline = time.monotonic() + wait
+    while True:
+        below, marked = _descendants(os.getpid()), _marked(tree.marker)
+        if below is None or marked is None:
+            if time.monotonic() >= deadline:
+                return ["không liệt kê được tiến trình (ps / /proc lỗi)"]
+            time.sleep(0.5)
+            continue
+        ours = (set(below) | set(marked)) - {os.getpid()}
+        alive = [pid for pid in ours if _signal(pid, signal.SIGKILL)]
         _reap_adopted(wait=0.2)                            # Linux subreaper: no zombies (R3 #2)
         if not alive:
             return []
+        if time.monotonic() >= deadline:
+            return [str(pid) for pid in sorted(alive)]
         time.sleep(0.1)
-    left = (set(_descendants(os.getpid())) | set(_marked(tree.marker))) - {os.getpid()}
-    return sorted(pid for pid in left if _signal(pid, 0))
 
 
 def _signal(pid: int, sig) -> bool:
@@ -266,14 +273,17 @@ def _become_subreaper() -> None:
         pass
 
 
-def _descendants(pid: int) -> list:
-    """POSIX: every process whose ancestry reaches `pid` (from `ps`, at call time)."""
+def _descendants(pid: int):
+    """POSIX: every process whose ancestry reaches `pid` (from `ps`, at call time), or None when the
+    process list can not be read."""
     try:
-        out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=10).stdout
+        r = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
-        return []
+        return None
+    if r.returncode != 0:
+        return None
     kids = {}
-    for line in out.splitlines():
+    for line in r.stdout.splitlines():
         try:
             c, par = (int(x) for x in line.split())
         except ValueError:
@@ -434,7 +444,6 @@ def run(cmd: list, name: str, reload: bool = True, root: str = "", max_restarts:
                 if tree.poll() is not None:
                     reason = f"thoát mã {tree.returncode}"
                     break
-                tree.track()
                 if reload and time.monotonic() - last_watch >= WATCH_EVERY_S:
                     last_watch = time.monotonic()
                     now = fingerprint(root, seen)
