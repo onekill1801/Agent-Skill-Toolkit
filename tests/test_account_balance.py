@@ -62,6 +62,54 @@ class OrderTest(unittest.TestCase):
         self.assertIsNone(A.load_usage(path + ".missing"))
 
 
+class CacheSafetyTest(unittest.TestCase):                                    # Codex balance R1
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "u.json")
+        self.now = time.time()
+
+    def write(self, doc):
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write(doc if isinstance(doc, str) else json.dumps(doc))
+
+    def test_concurrent_writers_never_leave_partial_json(self):              # R1 #1
+        import threading
+        api = {f"claude@a{i}": {"usage": {"session": {"left": i}}, "at": self.now} for i in range(50)}
+        ts = [threading.Thread(target=A.save_usage, args=(self.path, api, self.now)) for _ in range(20)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        self.assertEqual(len(A.load_usage(self.path, now=self.now)), 50)
+        self.assertEqual([n for n in os.listdir(os.path.dirname(self.path)) if n.endswith(".tmp")], [])
+
+    def test_a_transient_miss_is_reread_soon(self):                          # R1 #2
+        A.save_usage(self.path, {"claude@a": {"error": "network"}, "claude@b": {"error": "expired"}}, self.now)
+        self.assertIsNotNone(A.load_usage(self.path, now=self.now + 30))
+        self.assertIsNone(A.load_usage(self.path, now=self.now + A.TRANSIENT_MAX_AGE_S + 1))
+        A.save_usage(self.path, {"claude@b": {"error": "expired"}}, self.now)   # not transient: kept
+        self.assertIsNotNone(A.load_usage(self.path, now=self.now + 600))
+
+    def test_a_repointed_account_voids_the_cache(self):                      # R1 #3
+        A.save_usage(self.path, {"claude@a": {"usage": {"session": {"left": 90}}, "at": self.now}}, self.now,
+                     ids={"claude@a": "old"})
+        self.assertIsNotNone(A.load_usage(self.path, now=self.now, ids={"claude@a": "old"}))
+        self.assertIsNone(A.load_usage(self.path, now=self.now, ids={"claude@a": "new"}))
+        self.assertIsNone(A.load_usage(self.path, now=self.now, ids={"claude@a": "old", "claude@b": "x"}))
+        ids = tool.account_ids({"accounts": {"claude": {"a": {"env": {"CLAUDE_CONFIG_DIR": "/x/one"}}}}})
+        ids2 = tool.account_ids({"accounts": {"claude": {"a": {"env": {"CLAUDE_CONFIG_DIR": "/x/two"}}}}})
+        self.assertNotEqual(ids, ids2)
+        self.assertNotIn("one", json.dumps(ids))                              # a fingerprint, not the path
+
+    def test_poisoned_values_are_rejected(self):                             # R1 #4
+        for at in (self.now + 10 ** 6, "NaN", float("inf"), True):
+            self.write('{"at": ' + (json.dumps(at) if not isinstance(at, float) else "Infinity")
+                       + ', "accounts": {}}')
+            self.assertIsNone(A.load_usage(self.path, now=self.now), at)
+        self.write('{"at": NaN, "accounts": {}}')
+        self.assertIsNone(A.load_usage(self.path, now=self.now))
+        self.write({"at": self.now, "accounts": {"claude@a": {"left": 999}, "claude@b": {"left": -5}}})
+        got = A.load_usage(self.path, now=self.now)
+        self.assertEqual((got["claude@a"]["left"], got["claude@b"]["left"]), (None, None))
+
+
 class RunnerTest(unittest.TestCase):
     def test_runs_today_by_account(self):
         turns = [{"model": "claude:opus@a"}, {"model": "claude:sonnet@a"}, {"model": "codex@main"}, {"model": ""}]

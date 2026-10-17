@@ -146,7 +146,19 @@ def read_api_usage(cfg: dict, timeout: float = CU.TIMEOUT_S, now: float = None, 
         except concurrent.futures.TimeoutError:
             out[label] = {"error": "network"}              # still running: the next call picks it up
     if out:                                                # numbers only: agent_runner balances on them (F.22)
-        A.save_usage(usage_cache_path(), out, now)
+        A.save_usage(usage_cache_path(), out, now, ids=account_ids(cfg))
+    return out
+
+
+def account_ids(cfg: dict) -> dict:
+    """{"claude@name": non-secret fingerprint of (credentials dir, usage endpoint)} — the same identity
+    the in-process cache uses (_key): a re-pointed account never inherits another's numbers."""
+    import hashlib
+    accts = ((cfg or {}).get("accounts") or {}).get("claude") or {}
+    out = {}
+    for name, a in accts.items():
+        k = _key(name, (a or {}).get("env") or {})
+        out[f"claude@{name}"] = hashlib.sha256("|".join(k[1:]).encode("utf-8")).hexdigest()[:16]
     return out
 
 

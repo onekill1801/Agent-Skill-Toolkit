@@ -153,6 +153,17 @@ USAGE_CACHE = "account_usage.json"     # numbers only (never a token), shared ac
 USAGE_MAX_AGE_S = 900
 
 
+TRANSIENT_MAX_AGE_S = 60               # a network / rate-limit miss is re-read soon, not after 15 min (R1 #2)
+_TRANSIENT = ("network", "tls", "bad_response", "http_429", "http_500", "http_502", "http_503", "http_504")
+
+
+def _pct(x):
+    """A usage percentage, or None when it is not a finite number in 0..100 (R1 #4)."""
+    import math
+    return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) \
+        and 0 <= x <= 100 else None
+
+
 def normalize_readings(api: dict, now: float) -> dict:
     """read_api_usage() result -> {"claude@name": {"left": min(5h, week) % or None, "error": str?}}.
     A window that has reset since the reading counts as full (100)."""
@@ -165,40 +176,67 @@ def normalize_readings(api: dict, now: float) -> dict:
         for k in ("session", "weekly"):
             b = u.get(k)
             if b:
-                lefts.append(100.0 if b.get("reset_passed") else b.get("left"))
-        lefts = [x for x in lefts if isinstance(x, (int, float))]
+                lefts.append(100.0 if b.get("reset_passed") else _pct(b.get("left")))
+        lefts = [x for x in lefts if x is not None]
         out[label] = {"left": min(lefts) if lefts else None}
     return out
 
 
-def save_usage(path: str, api: dict, now: float = None) -> None:
-    """Write the normalized readings atomically (best effort — a failed write only costs a re-read)."""
+def save_usage(path: str, api: dict, now: float = None, ids: dict = None) -> None:
+    """Write the normalized readings atomically — a UNIQUE temp file per write (R1 #1) — with each
+    account's non-secret identity (`ids`: credentials dir + endpoint fingerprint, R1 #3). Best effort."""
     import json
     import os
+    import tempfile
     now = now or time.time()
+    accounts = normalize_readings(api, now)
+    for label, v in accounts.items():
+        v["id"] = (ids or {}).get(label)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = f"{path}.tmp-{os.getpid()}"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"at": now, "accounts": normalize_readings(api, now)}, f)
-        os.replace(tmp, path)
+        fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".", suffix=".tmp", dir=os.path.dirname(path))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({"at": now, "accounts": accounts}, f)
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
     except OSError:
         pass
 
 
-def load_usage(path: str, max_age: float = USAGE_MAX_AGE_S, now: float = None):
-    """{"claude@name": {"left": …}} when the cache is fresh, else None."""
+def load_usage(path: str, max_age: float = USAGE_MAX_AGE_S, now: float = None, ids: dict = None):
+    """{"claude@name": {"left": …}} when the cache is fresh and trustworthy, else None (= read again):
+    the timestamp must be finite and not in the future (R1 #4); a transient miss older than
+    TRANSIENT_MAX_AGE_S, or an account whose identity changed since (`ids`, R1 #3), voids the cache."""
     import json
+    import math
     now = now or time.time()
     try:
         with open(path, encoding="utf-8") as f:
             d = json.load(f)
     except (OSError, ValueError):
         return None
-    if not isinstance(d, dict) or not isinstance(d.get("at"), (int, float)) or now - d["at"] > max_age:
+    at = d.get("at") if isinstance(d, dict) else None
+    if not isinstance(at, (int, float)) or isinstance(at, bool) or not math.isfinite(at) \
+            or at > now + 60 or now - at > max_age:
         return None
     acc = d.get("accounts")
-    return acc if isinstance(acc, dict) else None
+    if not isinstance(acc, dict):
+        return None
+    out = {}
+    for label, v in acc.items():
+        if not isinstance(v, dict):
+            return None
+        if ids is not None and label in ids and v.get("id") != ids[label]:
+            return None                                    # account re-pointed: its old numbers are not its
+        if v.get("error") in _TRANSIENT and now - at > TRANSIENT_MAX_AGE_S:
+            return None
+        out[label] = {"left": _pct(v.get("left")), **({"error": str(v["error"])} if v.get("error") else {})}
+    if ids is not None and any(label not in out for label in ids):
+        return None                                        # an account with no reading at all yet
+    return out
 
 
 def _parse(spec: str) -> tuple:

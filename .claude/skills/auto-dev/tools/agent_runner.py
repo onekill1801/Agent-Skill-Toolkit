@@ -496,10 +496,12 @@ def _balanced(specs: list, cfg: dict) -> list:
     try:
         from agent_skill_toolkit.workflows.execution import accounts as acct_mod
         import accounts as acct_tool                       # auto-dev/tools/accounts.py (same dir)
-        usage = acct_mod.load_usage(acct_tool.usage_cache_path())
+        ids = acct_tool.account_ids(cfg)
+        usage = acct_mod.load_usage(acct_tool.usage_cache_path(), ids=ids)
         if usage is None:
-            acct_tool.read_api_usage(cfg, wait_s=8)        # also refreshes the cache
-            usage = acct_mod.load_usage(acct_tool.usage_cache_path()) or {}
+            # wait the whole request deadline: a reading that arrives late must not be cached as a miss (R1 #2)
+            acct_tool.read_api_usage(cfg, wait_s=acct_tool.API_WAIT_S)     # also refreshes the cache
+            usage = acct_mod.load_usage(acct_tool.usage_cache_path(), ids=ids) or {}
         try:
             min_left = float(config.get("ACCOUNT_MIN_LEFT_PCT", "10") or 10)
         except ValueError:
