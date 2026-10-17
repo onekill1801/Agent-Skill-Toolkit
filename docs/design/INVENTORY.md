@@ -102,9 +102,9 @@
 | atask-automation | `task_resolver.py` |  |  | 746 |
 | atask-automation | `tasks.py` |  |  | 328 |
 | atask-automation | `view.py` |  |  | 167 |
-| auto-dev | `accounts.py` | ✅ |  | 220 |
+| auto-dev | `accounts.py` | ✅ |  | 254 |
 | auto-dev | `agent_init.py` |  | add, apply, check, docs, draft, scan | 1586 |
-| auto-dev | `agent_runner.py` | ✅ |  | 588 |
+| auto-dev | `agent_runner.py` | ✅ |  | 614 |
 | auto-dev | `autopilot.py` |  | run, watch | 197 |
 | auto-dev | `clarify.py` |  | analyze, brief, bundle | 392 |
 | auto-dev | `context_pack.py` |  | build | 346 |
@@ -202,8 +202,9 @@
 | tchat-automation | `ws_client.py` |  |  | 147 |
 | team-registry | `team.py` |  | bootstrap, get, list, match, remove, set | 223 |
 
-## Test: 39 file, 757 hàm test
+## Test: 40 file, 770 hàm test
 
+- `test_account_balance.py`
 - `test_accounts.py`
 - `test_agent_init.py`
 - `test_agentkit.py`

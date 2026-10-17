@@ -183,7 +183,8 @@ python $T/auto-dev/tools/verify.py report <task_id>                       # AC n
 ```bash
 python $T/auto-dev/tools/accounts.py          # bảng: 5h còn / tuần còn / reset / đang làm / số lượt hôm nay
 ```
-- Danh sách tài khoản + thứ tự dùng: `work/agents.json` (5 tài khoản Orca qua `CLAUDE_CONFIG_DIR`, mỗi tài khoản tối đa 2 việc cùng lúc). Tài khoản đầu hết quota/bận → tự chuyển tài khoản kế.
+- Danh sách tài khoản: `work/agents.json` (tài khoản Orca qua `CLAUDE_CONFIG_DIR`, mỗi tài khoản tối đa 2 việc cùng lúc).
+- **Chia đều tải:** mỗi lượt agent, trong cùng một model (vd Opus), tài khoản **còn nhiều dung lượng nhất** được dùng trước; tài khoản còn dưới 10% (5 giờ hoặc tuần) xếp cuối; tài khoản không đọc được số (token hết hạn) ở giữa. Bận/hết quota → tự chuyển tài khoản kế. Tắt: thẻ Cài đặt → "Chia đều tải giữa các tài khoản" = 0 (về thứ tự trong agents.json); ngưỡng: "Ngưỡng dung lượng tối thiểu".
 - Dung lượng **đọc thẳng từ Anthropic** cho từng tài khoản (dùng access token có sẵn trong thư mục tài khoản, tối đa 5 phút/lần) — cột "Cập nhật" ghi `API …`.
 - Tài khoản có access token **đã hết hạn** thì toolkit KHÔNG tự gia hạn (tránh đụng Orca) → hiện số Orca đọc lần cuối + dòng "token hết hạn". Mở tài khoản đó một lần trong Orca là token được gia hạn.
 - `reset?` = đã qua giờ reset sau lần đọc, số mới chưa biết. `--orca-only` = chỉ dùng số của Orca.
