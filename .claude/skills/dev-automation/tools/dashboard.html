@@ -459,13 +459,13 @@ const HELP = {
     [".env (sửa tay)", "token / mật khẩu không sửa ở đây — trang chỉ cho biết đã đặt hay chưa"],
   ],
 };
-const STARTUP = [
-  ["Coordinator", `python -u ${T}/auto-dev/tools/coordinator.py work`, "worker — bắt buộc để việc 'chờ' được chạy"],
-  ["TChat group_watch", `python -u ${T}/tchat-automation/tools/group_watch.py`, "nghe group TChat → xếp review; đăng review đã duyệt"],
-  ["TG bot OPS", `python -u ${T}/remote-control/tools/telegram_bridge.py --bot ops --mode approvals-only`, "nút Duyệt / Từ chối trên Telegram"],
-  ["TG bot CODE", `python -u ${T}/remote-control/tools/telegram_bridge.py`, "nhắn Telegram → Claude chạy lệnh (tuỳ chọn)"],
-  ["MR watch", `python -u ${T}/dev-automation/tools/mr_watch.py --interval 300`, "tự tìm MR gắn tên bạn (tuỳ chọn)"],
-  ["Dashboard", `python ${T}/dev-automation/tools/dashboard.py serve`, "trang này"],
+const STARTUP = [   // each under supervise.py: restarted when it exits or when code / .env change
+  ["Coordinator", `python ${T}/dev-automation/tools/supervise.py --name Coordinator -- python -u ${T}/auto-dev/tools/coordinator.py work`, "worker — bắt buộc để việc 'chờ' được chạy"],
+  ["TChat group_watch", `python ${T}/dev-automation/tools/supervise.py --name group_watch -- python -u ${T}/tchat-automation/tools/group_watch.py`, "nghe group TChat → xếp review; đăng review đã duyệt + báo lại group"],
+  ["TG bot OPS", `python ${T}/dev-automation/tools/supervise.py --name tg_ops -- python -u ${T}/remote-control/tools/telegram_bridge.py --bot ops --mode approvals-only`, "nút Duyệt / Từ chối trên Telegram"],
+  ["TG bot CODE", `python ${T}/dev-automation/tools/supervise.py --name tg_code -- python -u ${T}/remote-control/tools/telegram_bridge.py`, "nhắn Telegram → Claude chạy lệnh (tuỳ chọn)"],
+  ["MR watch", `python ${T}/dev-automation/tools/supervise.py --name mr_watch -- python -u ${T}/dev-automation/tools/mr_watch.py --interval 300`, "tự tìm MR gắn tên bạn (tuỳ chọn)"],
+  ["Dashboard", `python ${T}/dev-automation/tools/supervise.py --name dashboard --no-reload -- python ${T}/dev-automation/tools/dashboard.py serve`, "trang này (key mới mỗi lần chạy lại — mở link mới in ở tab)"],
 ];
 function renderHelp() {
   document.querySelectorAll("[data-help]").forEach((el) => {
@@ -476,7 +476,7 @@ function renderHelp() {
       `</ul></details>`;
   });
   $("startup-body").innerHTML = table(["Tab", "Lệnh", "Làm gì"], STARTUP.map(([n, c, d]) => [`<b>${esc(n)}</b>`, code(c), `<span class="note">${esc(d)}</span>`])) +
-    `<div class="empty">Mỗi daemon chỉ chạy <b>một bản</b>. Dòng khởi động bot Telegram phải in <code>Hub repo: …Agent-Skill-Toolkit</code>. Đổi cài đặt .env → restart tab được ghi bên cạnh.</div>`;
+    `<div class="empty">Bọc bởi <code>supervise.py</code>: daemon thoát/lỗi → tự chạy lại (2 s → 60 s); có commit mới hoặc .env / agents.json đổi → tự chạy lại để dùng code/cấu hình mới. Ctrl+C trong tab = dừng hẳn. Mỗi daemon chỉ chạy <b>một bản</b>. Dòng khởi động bot Telegram phải in <code>Hub repo: …Agent-Skill-Toolkit</code>. Đổi cài đặt .env → restart tab được ghi bên cạnh.</div>`;
 }
 
 // ------------------------------------------------------------------ settings

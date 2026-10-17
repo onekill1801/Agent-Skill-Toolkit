@@ -71,13 +71,17 @@ python $T/dev-automation/tools/config.py     # token GitLab/Azure đã đủ ch�
 
 | Tab | Lệnh | Làm gì |
 |---|---|---|
-| Coordinator | `python -u $T/auto-dev/tools/coordinator.py work` | **worker**: lấy việc `queued` ra chạy (song song tối đa 10) |
-| TChat group_watch | `python -u $T/tchat-automation/tools/group_watch.py` | nghe group TChat → xếp review MR; đăng review đã duyệt + báo lại group |
-| TG bot OPS | `python -u $T/remote-control/tools/telegram_bridge.py --bot ops --mode approvals-only` | nhận nút **Duyệt/Từ chối** trên Telegram |
-| TG bot CODE | `python -u $T/remote-control/tools/telegram_bridge.py` | nhắn Telegram → Claude chạy lệnh (tuỳ chọn) |
-| MR watch (tuỳ chọn) | `python -u $T/dev-automation/tools/mr_watch.py --interval 300` | 5 phút/lần tìm MR gắn tên bạn → xếp review |
-| Dashboard | `python $T/dev-automation/tools/dashboard.py serve` | trang theo dõi + form cài đặt (§4.0) |
+| Coordinator | `python $T/dev-automation/tools/supervise.py --name Coordinator -- python -u $T/auto-dev/tools/coordinator.py work` | **worker**: lấy việc `queued` ra chạy (song song tối đa 10) |
+| TChat group_watch | `python $T/dev-automation/tools/supervise.py --name group_watch -- python -u $T/tchat-automation/tools/group_watch.py` | nghe group TChat → xếp review MR; đăng review đã duyệt + báo lại group |
+| TG bot OPS | `python $T/dev-automation/tools/supervise.py --name tg_ops -- python -u $T/remote-control/tools/telegram_bridge.py --bot ops --mode approvals-only` | nhận nút **Duyệt/Từ chối** trên Telegram |
+| TG bot CODE | `python $T/dev-automation/tools/supervise.py --name tg_code -- python -u $T/remote-control/tools/telegram_bridge.py` | nhắn Telegram → Claude chạy lệnh (tuỳ chọn) |
+| MR watch (tuỳ chọn) | `python $T/dev-automation/tools/supervise.py --name mr_watch -- python -u $T/dev-automation/tools/mr_watch.py --interval 300` | 5 phút/lần tìm MR gắn tên bạn → xếp review |
+| Dashboard | `python $T/dev-automation/tools/supervise.py --name dashboard --no-reload -- python $T/dev-automation/tools/dashboard.py serve` | trang theo dõi + form cài đặt (§4.0) |
 
+**`supervise.py` bọc ngoài mỗi daemon:** daemon thoát hoặc lỗi → tự chạy lại (chờ 2 s, 4 s … tối đa 60 s;
+chạy ổn 5 phút thì về lại 2 s); có **commit mới**, `.env` hoặc `work/agents.json` đổi → tự dừng êm và chạy lại ngay,
+nên tab không bao giờ chạy code/token cũ (`--no-reload` để tắt). Ctrl+C trong tab = dừng hẳn. Mọi lần chạy lại được
+ghi vào `temp/daemon_health.jsonl` (`daemon_common.py status`).
 Kiểm đúng chưa: dòng khởi động bot Telegram phải in `Hub repo: D:\Claude-cli\Agent-Skill-Toolkit`.
 Mỗi daemon chỉ chạy **một bản** (hai bản group_watch = trả lời/đăng trùng). Sửa `.env` (tay hoặc qua thẻ Cài đặt) → restart tab liên quan.
 Tình trạng: `python $T/dev-automation/tools/daemon_common.py status`.
