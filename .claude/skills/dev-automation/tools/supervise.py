@@ -120,12 +120,7 @@ class Tree:
             else:
                 # what the daemon started (recorded while it ran) + every process still below this supervisor
                 # (Linux subreaper: also the orphans of a crashed daemon)
-                for pid in set(self.seen) | set(_descendants(os.getpid())) | set(_marked(self.marker)):
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                    except OSError:
-                        pass
-                _reap_adopted()                                    # Linux subreaper: no zombies (R3 #2)
+                _kill_until_empty(self)                            # repeated until nothing is left (R4 #1)
             if self.p.poll() is None:
                 proc.kill_tree(self.p)
             try:
@@ -185,6 +180,29 @@ def _reap_adopted(wait: float = 5) -> None:
             return
         if pid == 0:
             time.sleep(0.05)
+
+
+def _kill_until_empty(tree, wait: float = 15) -> None:
+    """POSIX: discover (recorded + below the supervisor + env-marked) and SIGKILL, AGAIN AND AGAIN until a
+    scan finds nothing — a process killed late may have started another child after the previous scan."""
+    deadline, first = time.monotonic() + wait, True
+    while time.monotonic() < deadline:
+        pids = (set(tree.seen) if first else set()) | set(_descendants(os.getpid())) | set(_marked(tree.marker))
+        pids.discard(os.getpid())
+        first = False
+        alive = [pid for pid in pids if _signal(pid, signal.SIGKILL)]
+        _reap_adopted(wait=0.2)                            # Linux subreaper: no zombies (R3 #2)
+        if not alive:
+            return
+        time.sleep(0.1)
+
+
+def _signal(pid: int, sig) -> bool:
+    try:
+        os.kill(pid, sig)
+        return True
+    except OSError:
+        return False
 
 
 def _ignore_sigint():
@@ -278,7 +296,9 @@ class _WinJob:
         info = Extended()
         info.Basic.LimitFlags = 0x2000                              # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
         if not k32.SetInformationJobObject(self.h, 9, ctypes.byref(info), ctypes.sizeof(info)):
-            raise OSError(ctypes.get_last_error(), "SetInformationJobObject failed")
+            err = ctypes.get_last_error()
+            self.close()                                           # no handle leak per retry (R4 #2)
+            raise OSError(err, "SetInformationJobObject failed")
 
     def assign(self, p) -> None:
         if not self.k32.AssignProcessToJobObject(self.h, self.ct.c_void_p(int(p._handle))):

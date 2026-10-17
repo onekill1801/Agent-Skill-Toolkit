@@ -130,6 +130,28 @@ class SuperviseTest(unittest.TestCase):
                 S.Tree([os.path.join(tempfile.mkdtemp(), "missing.exe")])
         self.assertEqual(closed, [True])
 
+    @unittest.skipUnless(os.name == "nt", "Windows Job Object")
+    def test_job_setup_failure_closes_the_handle(self):                      # Codex supervise R4 #2
+        k32 = mock.Mock()
+        k32.CreateJobObjectW.return_value = 1234
+        k32.SetInformationJobObject.return_value = 0
+        with mock.patch("ctypes.WinDLL", return_value=k32):
+            with self.assertRaises(OSError):
+                S._WinJob()
+        k32.CloseHandle.assert_called_once_with(1234)
+
+    @unittest.skipIf(os.name == "nt", "POSIX cleanup")
+    def test_a_descendant_spawning_during_shutdown_is_caught(self):          # Codex supervise R4 #1
+        code = ("import subprocess, sys, time\n"
+                "while True:\n"                                       # keeps starting detached children
+                "    subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)\n"
+                "    time.sleep(0.05)\n")
+        tree = S.Tree([sys.executable, "-c", code])
+        time.sleep(1)
+        tree.stop(grace=1)
+        time.sleep(0.5)
+        self.assertEqual(S._marked(tree.marker), [])
+
     def test_git_failure_is_not_a_change(self):                               # Codex supervise R1 #3
         last = ("abc1234", 5.0, 6.0)
         with mock.patch.object(S, "_git_head", return_value=None), \
