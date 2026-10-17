@@ -82,6 +82,10 @@ class Tree:
                 self.marker = f"{os.getpid()}-{time.monotonic_ns()}"
                 env = {**os.environ, TREE_ENV: self.marker}
                 self.p = subprocess.Popen(cmd, env=env, **proc.popen_group_kwargs())
+        except BaseException:
+            if self.interrupted:                           # Ctrl+C during a launch that then failed (R6 #2)
+                raise KeyboardInterrupt from None
+            raise
         finally:
             _restore_sigint(previous)
 
@@ -127,11 +131,15 @@ class Tree:
         uninterruptible I/O ignores even SIGKILL until it returns — the caller must not start a new daemon
         while any is left: R5 #2)."""
         if self.job:
-            self.job.kill_all()                                 # every descendant, wherever its group
-            left = self.job.active()
-            if left:
-                return [f"{left} tiến trình trong job"]
-            self.job.close()
+            if self.job.h:                                      # a closed job = already verified empty
+                try:
+                    self.job.kill_all()                         # every descendant, wherever its group
+                    left = self.job.active()
+                except OSError as e:                            # unknown = not empty: keep the gate closed
+                    return [f"không đọc được job: {e}"]
+                if left:
+                    return [f"{left} tiến trình trong job"]
+                self.job.close()
         else:
             # recorded while it ran + everything below this supervisor (Linux subreaper: also a crashed
             # daemon's orphans) + env-marked; repeated until a scan finds nothing (R4 #1)
@@ -240,7 +248,10 @@ def _restore_sigint(previous) -> None:
 
 def _nt_resume(p) -> None:
     import ctypes
-    if ctypes.WinDLL("ntdll").NtResumeProcess(ctypes.c_void_p(int(p._handle))) != 0:
+    from ctypes import wintypes
+    f = ctypes.WinDLL("ntdll").NtResumeProcess
+    f.argtypes, f.restype = [wintypes.HANDLE], ctypes.c_long
+    if f(int(p._handle)) != 0:
         raise OSError("NtResumeProcess failed")
 
 
@@ -308,7 +319,16 @@ class _WinJob:
                         ("TotalPageFaultCount", wintypes.DWORD), ("TotalProcesses", wintypes.DWORD),
                         ("ActiveProcesses", wintypes.DWORD), ("TotalTerminatedProcesses", wintypes.DWORD)]
         self.Accounting = Accounting
-        k32.CreateJobObjectW.restype = wintypes.HANDLE
+        # full signatures: an undeclared argument is passed as a C int and would cut a 64-bit HANDLE (R6 #1)
+        H, BOOL, DWORD = wintypes.HANDLE, wintypes.BOOL, wintypes.DWORD
+        for fn, args, res in (("CreateJobObjectW", [ctypes.c_void_p, wintypes.LPCWSTR], H),
+                              ("SetInformationJobObject", [H, ctypes.c_int, ctypes.c_void_p, DWORD], BOOL),
+                              ("AssignProcessToJobObject", [H, H], BOOL),
+                              ("TerminateJobObject", [H, wintypes.UINT], BOOL),
+                              ("QueryInformationJobObject", [H, ctypes.c_int, ctypes.c_void_p, DWORD, ctypes.c_void_p], BOOL),
+                              ("CloseHandle", [H], BOOL)):
+            f = getattr(k32, fn)
+            f.argtypes, f.restype = args, res
         self.h = k32.CreateJobObjectW(None, None)
         if not self.h:
             raise OSError(ctypes.get_last_error(), "CreateJobObject failed")
@@ -320,13 +340,15 @@ class _WinJob:
             raise OSError(err, "SetInformationJobObject failed")
 
     def assign(self, p) -> None:
-        if not self.k32.AssignProcessToJobObject(self.h, self.ct.c_void_p(int(p._handle))):
+        if not self.k32.AssignProcessToJobObject(self.h, int(p._handle)):
             raise OSError(self.ct.get_last_error(), "AssignProcessToJobObject failed")
 
     def active(self) -> int:
+        """Processes still in the job. A failed query RAISES — it is never read as an empty job (R6 #1)."""
         acc = self.Accounting()
-        ok = self.k32.QueryInformationJobObject(self.h, 1, self.ct.byref(acc), self.ct.sizeof(acc), None)
-        return int(acc.ActiveProcesses) if ok else 0
+        if not self.k32.QueryInformationJobObject(self.h, 1, self.ct.byref(acc), self.ct.sizeof(acc), None):
+            raise OSError(self.ct.get_last_error(), "QueryInformationJobObject failed")
+        return int(acc.ActiveProcesses)
 
     def kill_all(self, wait: float = 10) -> None:
         self.k32.TerminateJobObject(self.h, 1)

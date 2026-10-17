@@ -197,6 +197,25 @@ class SuperviseTest(unittest.TestCase):
         self.assertEqual(events[1:first_restart], ["cleanup_blocked", "cleanup_blocked"])
         self.assertEqual(self.sleeps.count(5), 2)                            # waited, killed again, then restarted
 
+    def test_ctrl_c_during_a_failed_launch_still_stops(self):               # Codex supervise R6 #2
+        def popen(*a, **k):
+            S.signal.raise_signal(S.signal.SIGINT)                   # Ctrl+C arrives during the launch…
+            raise OSError("launch failed")                           # …which then fails
+        with mock.patch.object(S.subprocess, "Popen", side_effect=popen):
+            self.assertEqual(S.run(["x"], "t", reload=False, max_restarts=5, sleep=self.sleep), 0)
+        self.assertEqual(self.log[-1][1], "supervisor_stopped")
+        self.assertNotIn("restarted", [e[1] for e in self.log])
+
+    @unittest.skipUnless(os.name == "nt", "Windows Job Object")
+    def test_a_failed_job_query_is_not_an_empty_job(self):                   # Codex supervise R6 #1
+        tree = S.Tree(SLEEPER)
+        try:
+            with mock.patch.object(tree.job, "active", side_effect=OSError("query failed")):
+                self.assertTrue(tree.kill_rest())                           # survivors reported, gate stays shut
+        finally:
+            tree.stop(grace=1)
+        self.assertEqual(tree.kill_rest(), [])
+
     def test_git_failure_is_not_a_change(self):                               # Codex supervise R1 #3
         last = ("abc1234", 5.0, 6.0)
         with mock.patch.object(S, "_git_head", return_value=None), \
