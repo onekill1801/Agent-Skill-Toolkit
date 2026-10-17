@@ -152,6 +152,51 @@ class SuperviseTest(unittest.TestCase):
         time.sleep(0.5)
         self.assertEqual(S._marked(tree.marker), [])
 
+    def fake_tree(self, stops, rests=()):
+        """A Tree double: stop() returns stops[i] (survivors) and may flag a Ctrl+C."""
+        test = self
+
+        class Fake:
+            made = []
+
+            def __init__(self, cmd):
+                self.interrupted, self.rest = False, list(rests)
+                Fake.made.append(self)
+
+            def poll(self):
+                return 0
+
+            returncode = 0
+
+            def track(self):
+                pass
+
+            def stop(self, grace=0):
+                out = stops.pop(0)
+                if out == "CTRL_C":
+                    self.interrupted = True
+                    return []
+                return out
+
+            def kill_rest(self):
+                return self.rest.pop(0) if self.rest else []
+        test.Fake = Fake
+        return Fake
+
+    def test_ctrl_c_during_a_stop_is_honoured(self):                         # Codex supervise R5 #1
+        with mock.patch.object(S, "Tree", self.fake_tree(["CTRL_C"])):
+            self.assertEqual(S.run(["x"], "t", reload=False, max_restarts=5, sleep=self.sleep), 0)
+        self.assertEqual(len(self.Fake.made), 1)                             # no new daemon after the Ctrl+C
+        self.assertEqual(self.log[-1][1], "supervisor_stopped")
+
+    def test_no_restart_while_the_old_tree_survives(self):                   # Codex supervise R5 #2
+        with mock.patch.object(S, "Tree", self.fake_tree([["123"], []], rests=[["123"], []])):
+            S.run(["x"], "t", reload=False, max_restarts=1, sleep=self.sleep)
+        events = [e[1] for e in self.log]
+        first_restart = events.index("restarted")
+        self.assertEqual(events[1:first_restart], ["cleanup_blocked", "cleanup_blocked"])
+        self.assertEqual(self.sleeps.count(5), 2)                            # waited, killed again, then restarted
+
     def test_git_failure_is_not_a_change(self):                               # Codex supervise R1 #3
         last = ("abc1234", 5.0, 6.0)
         with mock.patch.object(S, "_git_head", return_value=None), \

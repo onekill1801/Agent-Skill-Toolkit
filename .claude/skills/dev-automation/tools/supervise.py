@@ -58,8 +58,8 @@ class Tree:
         runs (track()), and stop() kills both sets."""
 
     def __init__(self, cmd: list):
-        self.job, self.seen, self.marker = None, set(), ""
-        previous = _ignore_sigint()                                # no Ctrl+C between spawn and containment (R2 #2)
+        self.job, self.seen, self.marker, self.interrupted = None, set(), "", False
+        previous = _catch_sigint(self)              # no Ctrl+C between spawn and containment (R2 #2) — recorded
         try:
             if os.name == "nt":
                 self.job = _WinJob()
@@ -97,9 +97,12 @@ class Tree:
     def returncode(self):
         return self.p.returncode
 
-    def stop(self, grace: float = STOP_GRACE_S) -> None:
-        """Graceful to the daemon, then kill whatever of the tree is left; returns once it is all gone."""
-        previous = _ignore_sigint()                                # a 2nd Ctrl+C must not orphan the tree
+    def stop(self, grace: float = STOP_GRACE_S) -> list:
+        """Graceful to the daemon, then kill whatever of the tree is left. Returns what is STILL alive
+        (empty = all gone). A Ctrl+C during the stop is not lost: it sets `interrupted` (Codex supervise
+        R5 #1) and the stop completes."""
+        self.interrupted = False
+        previous = _catch_sigint(self)
         try:
             if self.job is None:
                 self.track()
@@ -115,22 +118,33 @@ class Tree:
                     self.p.wait(timeout=grace)
                 except subprocess.TimeoutExpired:
                     pass
-            if self.job:
-                self.job.kill_all()                                 # every descendant, wherever its group
-            else:
-                # what the daemon started (recorded while it ran) + every process still below this supervisor
-                # (Linux subreaper: also the orphans of a crashed daemon)
-                _kill_until_empty(self)                            # repeated until nothing is left (R4 #1)
-            if self.p.poll() is None:
-                proc.kill_tree(self.p)
-            try:
-                self.p.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                pass
+            return self.kill_rest()
         finally:
-            if self.job:
-                self.job.close()
             _restore_sigint(previous)
+
+    def kill_rest(self) -> list:
+        """Kill every remaining process of the tree and verify; returns the survivors (a process stuck in
+        uninterruptible I/O ignores even SIGKILL until it returns — the caller must not start a new daemon
+        while any is left: R5 #2)."""
+        if self.job:
+            self.job.kill_all()                                 # every descendant, wherever its group
+            left = self.job.active()
+            if left:
+                return [f"{left} tiến trình trong job"]
+            self.job.close()
+        else:
+            # recorded while it ran + everything below this supervisor (Linux subreaper: also a crashed
+            # daemon's orphans) + env-marked; repeated until a scan finds nothing (R4 #1)
+            survivors = _kill_until_empty(self)
+            if survivors:
+                return [str(pid) for pid in survivors]
+        if self.p.poll() is None:
+            proc.kill_tree(self.p)
+        try:
+            self.p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            return [f"pid {self.p.pid}"]
+        return []
 
     def alive(self) -> int:
         """How many processes of the tree still run (Windows: the job's count)."""
@@ -182,7 +196,7 @@ def _reap_adopted(wait: float = 5) -> None:
             time.sleep(0.05)
 
 
-def _kill_until_empty(tree, wait: float = 15) -> None:
+def _kill_until_empty(tree, wait: float = 15) -> list:
     """POSIX: discover (recorded + below the supervisor + env-marked) and SIGKILL, AGAIN AND AGAIN until a
     scan finds nothing — a process killed late may have started another child after the previous scan."""
     deadline, first = time.monotonic() + wait, True
@@ -193,8 +207,10 @@ def _kill_until_empty(tree, wait: float = 15) -> None:
         alive = [pid for pid in pids if _signal(pid, signal.SIGKILL)]
         _reap_adopted(wait=0.2)                            # Linux subreaper: no zombies (R3 #2)
         if not alive:
-            return
+            return []
         time.sleep(0.1)
+    left = (set(_descendants(os.getpid())) | set(_marked(tree.marker))) - {os.getpid()}
+    return sorted(pid for pid in left if _signal(pid, 0))
 
 
 def _signal(pid: int, sig) -> bool:
@@ -205,10 +221,13 @@ def _signal(pid: int, sig) -> bool:
         return False
 
 
-def _ignore_sigint():
+def _catch_sigint(tree):
+    """During a stop, Ctrl+C is RECORDED on the tree instead of raising (cleanup must finish)."""
+    def flag(*_):
+        tree.interrupted = True
     try:
         previous = signal.getsignal(signal.SIGINT)
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, flag)
         return previous
     except ValueError:
         return None                                                 # not the main thread (tests)
@@ -349,6 +368,27 @@ def fingerprint(root: str, last: tuple = None) -> tuple:
 
 # ----------------------------------------------------------------------------- the loop
 
+def _finish(tree, name: str, sleep, interrupted: bool = False) -> bool:
+    """Stop the tree and do not return while any of it is alive (no new daemon next to a survivor of
+    the old one — R5 #2): survivors are reported and killed again every 5 s. Returns True when the user
+    pressed Ctrl+C (during the stop or the wait): the supervisor must exit (R5 #1)."""
+    left = tree.stop()
+    interrupted = interrupted or getattr(tree, "interrupted", False)
+    while left:
+        msg = "không dừng hẳn được: " + ", ".join(left)[:200]
+        _say(name, msg + (" — thoát (Ctrl+C)" if interrupted else " — thử lại sau 5 s, chưa chạy bản mới"))
+        dc.health_log(name, "cleanup_blocked", msg)
+        if interrupted:
+            break
+        try:
+            sleep(5)
+        except KeyboardInterrupt:
+            interrupted = True
+            continue
+        left = tree.kill_rest()
+    return interrupted
+
+
 def run(cmd: list, name: str, reload: bool = True, root: str = "", max_restarts: int = -1,
         sleep=time.sleep) -> int:
     """Supervise `cmd` until Ctrl+C (or `max_restarts` restarts, for tests). Returns 0."""
@@ -365,6 +405,8 @@ def run(cmd: list, name: str, reload: bool = True, root: str = "", max_restarts:
                 tree = Tree(cmd)
             except OSError as e:                                   # cannot start: same backoff path (R1 #5)
                 reason = f"không khởi động được: {e}"
+            if tree is not None and tree.interrupted:              # Ctrl+C while it was starting
+                raise KeyboardInterrupt
             last_watch = time.monotonic()
             while reason is None:
                 if tree.poll() is not None:
@@ -379,12 +421,14 @@ def run(cmd: list, name: str, reload: bool = True, root: str = "", max_restarts:
                         _say(name, "phát hiện commit mới hoặc .env / agents.json đổi — khởi động lại")
                         break
                 sleep(POLL_S)
-            if tree is not None:
-                tree.stop()                                        # the WHOLE tree, also after a crash (R1 #1)
+            if tree is not None and _finish(tree, name, sleep):  # the WHOLE tree, also after a crash (R1 #1)
+                dc.health_log(name, "supervisor_stopped", "Ctrl+C")
+                return 0
         except KeyboardInterrupt:
             _say(name, "Ctrl+C — dừng")
             if tree is not None:
-                tree.stop()
+                tree.interrupted = True
+                _finish(tree, name, sleep, interrupted=True)
             dc.health_log(name, "supervisor_stopped", "Ctrl+C")
             return 0
         ran = time.monotonic() - started
