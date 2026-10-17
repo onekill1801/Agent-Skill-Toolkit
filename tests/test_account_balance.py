@@ -87,6 +87,19 @@ class CacheSafetyTest(unittest.TestCase):                                    # C
         A.save_usage(self.path, {"claude@b": {"error": "expired"}}, self.now)   # not transient: kept
         self.assertIsNotNone(A.load_usage(self.path, now=self.now + 600))
 
+    def test_a_reused_transient_reading_keeps_its_read_time(self):          # Codex balance R2 #1
+        cfg = {"accounts": {"claude": {"a": {"env": {"CLAUDE_CONFIG_DIR": "/x/a"}}}}}
+        with mock.patch.dict(tool._api_cache, clear=True), mock.patch.dict(tool._inflight, clear=True), \
+             mock.patch.object(tool, "usage_cache_path", return_value=self.path), \
+             mock.patch.object(tool.CU, "usage_for", return_value={"error": "network"}) as fetch:
+            tool.read_api_usage(cfg, now=self.now, wait_s=5)
+            tool.read_api_usage(cfg, now=self.now + 30, wait_s=5)           # in-memory hit, < 60 s
+            self.assertEqual(fetch.call_count, 1)
+            tool.read_api_usage(cfg, now=self.now + 200, wait_s=5)          # transient: re-read, not reused
+            self.assertEqual(fetch.call_count, 2)
+        with open(self.path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["accounts"]["claude@a"]["at"], self.now + 200)
+
     def test_a_repointed_account_voids_the_cache(self):                      # R1 #3
         A.save_usage(self.path, {"claude@a": {"usage": {"session": {"left": 90}}, "at": self.now}}, self.now,
                      ids={"claude@a": "old"})

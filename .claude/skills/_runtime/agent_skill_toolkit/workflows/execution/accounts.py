@@ -154,7 +154,7 @@ USAGE_MAX_AGE_S = 900
 
 
 TRANSIENT_MAX_AGE_S = 60               # a network / rate-limit miss is re-read soon, not after 15 min (R1 #2)
-_TRANSIENT = ("network", "tls", "bad_response", "http_429", "http_500", "http_502", "http_503", "http_504")
+TRANSIENT_ERRORS = ("network", "tls", "bad_response", "http_429", "http_500", "http_502", "http_503", "http_504")
 
 
 def _pct(x):
@@ -182,7 +182,7 @@ def normalize_readings(api: dict, now: float) -> dict:
     return out
 
 
-def save_usage(path: str, api: dict, now: float = None, ids: dict = None) -> None:
+def save_usage(path: str, api: dict, now: float = None, ids: dict = None, read_at: dict = None) -> None:
     """Write the normalized readings atomically — a UNIQUE temp file per write (R1 #1) — with each
     account's non-secret identity (`ids`: credentials dir + endpoint fingerprint, R1 #3). Best effort."""
     import json
@@ -192,6 +192,7 @@ def save_usage(path: str, api: dict, now: float = None, ids: dict = None) -> Non
     accounts = normalize_readings(api, now)
     for label, v in accounts.items():
         v["id"] = (ids or {}).get(label)
+        v["at"] = (read_at or {}).get(label) or now            # when THIS account was read (R2 #1)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".", suffix=".tmp", dir=os.path.dirname(path))
@@ -231,7 +232,11 @@ def load_usage(path: str, max_age: float = USAGE_MAX_AGE_S, now: float = None, i
             return None
         if ids is not None and label in ids and v.get("id") != ids[label]:
             return None                                    # account re-pointed: its old numbers are not its
-        if v.get("error") in _TRANSIENT and now - at > TRANSIENT_MAX_AGE_S:
+        read = v.get("at", at)
+        if not isinstance(read, (int, float)) or isinstance(read, bool) or not math.isfinite(read) \
+                or read > now + 60 or now - read > max_age:
+            return None                                    # this account's reading is too old / invalid
+        if v.get("error") in TRANSIENT_ERRORS and now - read > TRANSIENT_MAX_AGE_S:
             return None
         out[label] = {"left": _pct(v.get("left")), **({"error": str(v["error"])} if v.get("error") else {})}
     if ids is not None and any(label not in out for label in ids):

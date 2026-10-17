@@ -126,14 +126,17 @@ def read_api_usage(cfg: dict, timeout: float = CU.TIMEOUT_S, now: float = None, 
     asked in parallel, at most ONE request per account in flight across threads."""
     now = now or time.time()
     accts = ((cfg or {}).get("accounts") or {}).get("claude") or {}
-    out, waiting = {}, {}
+    out, waiting, read_at = {}, {}, {}
     with _api_lock:
         for name, a in accts.items():
             envd = (a or {}).get("env") or {}
             key = _key(name, envd)
             hit = _api_cache.get(key)
-            if hit and now - hit[0] < API_CACHE_S:
+            # a transient miss (network / 429 / 5xx…) is only reused for TRANSIENT_MAX_AGE_S (R2 #1)
+            max_age = A.TRANSIENT_MAX_AGE_S if (hit and hit[1].get("error") in A.TRANSIENT_ERRORS) else API_CACHE_S
+            if hit and now - hit[0] < max_age:
                 out[f"claude@{name}"] = hit[1]
+                read_at[f"claude@{name}"] = hit[0]          # when it was READ, not now
                 continue
             entry = _inflight.get(key)
             if entry is None or time.monotonic() - entry[1] > STUCK_S:
@@ -146,7 +149,7 @@ def read_api_usage(cfg: dict, timeout: float = CU.TIMEOUT_S, now: float = None, 
         except concurrent.futures.TimeoutError:
             out[label] = {"error": "network"}              # still running: the next call picks it up
     if out:                                                # numbers only: agent_runner balances on them (F.22)
-        A.save_usage(usage_cache_path(), out, now, ids=account_ids(cfg))
+        A.save_usage(usage_cache_path(), out, now, ids=account_ids(cfg), read_at=read_at)
     return out
 
 
