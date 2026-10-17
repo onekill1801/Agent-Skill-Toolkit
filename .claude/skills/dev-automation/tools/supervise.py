@@ -229,11 +229,15 @@ def _kill_until_empty(tree, wait: float = 15) -> list:
 
 
 def _signal(pid: int, sig) -> bool:
+    """True = the process may still be alive (the signal was sent, or could NOT be sent, e.g. EPERM after it
+    changed credentials). Only ESRCH proves it is gone (Codex supervise R8 #1)."""
     try:
         os.kill(pid, sig)
         return True
-    except OSError:
+    except ProcessLookupError:
         return False
+    except OSError:
+        return True
 
 
 def _catch_sigint(tree):

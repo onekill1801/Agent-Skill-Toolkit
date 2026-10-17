@@ -224,6 +224,19 @@ class SuperviseTest(unittest.TestCase):
         self.assertTrue(left)                                               # gate stays shut
         self.assertIn("không liệt kê được", left[0])
 
+    def test_only_esrch_means_gone(self):                                     # Codex supervise R8 #1
+        with mock.patch.object(S.os, "kill", side_effect=ProcessLookupError):
+            self.assertFalse(S._signal(1, 9))
+        with mock.patch.object(S.os, "kill", side_effect=PermissionError):
+            self.assertTrue(S._signal(1, 9))                                  # alive, just not ours to kill
+        tree = mock.Mock(marker="m")
+        with mock.patch.object(S, "_descendants", return_value=[4242]), \
+             mock.patch.object(S, "_marked", return_value=[]), \
+             mock.patch.object(S.os, "kill", side_effect=PermissionError), \
+             mock.patch.object(S, "_reap_adopted"), mock.patch.object(S.time, "sleep"), \
+             mock.patch.object(S.signal, "SIGKILL", 9, create=True):
+            self.assertEqual(S._kill_until_empty(tree, wait=0), ["4242"])      # a survivor: gate stays shut
+
     def test_git_failure_is_not_a_change(self):                               # Codex supervise R1 #3
         last = ("abc1234", 5.0, 6.0)
         with mock.patch.object(S, "_git_head", return_value=None), \
