@@ -193,3 +193,4 @@ Ký hiệu: ✅ xong + Codex đồng thuận · 🔁 đã code, đang review/s�
 | 2026-10-16 | F.20 (`cd247fd`) | 3 | **NO-GO**: 2 MED (tiến trình con chết = có thể đã gửi; lưu 'posted' làm mất người yêu cầu mới) — sửa ở `509a8c9` |
 | 2026-10-16 | F.20 (`509a8c9`) | 4 | **NO-GO**: MED các lần lưu giữa chừng (inline) vẫn ghi đè — sửa ở `38a16fb` |
 | 2026-10-16 | F.20 (`38a16fb`) | 5 | **GO** |
+| 2026-10-17 | Lộ trình sản phẩm (`docs/design/PRODUCT-ROADMAP.md`) | 1→4 | **GO** vòng 4 (v1–v3 GO-WITH-CHANGES: 7→3→1 HIGH; 2 LOW vòng 4 đã đưa vào v4.1) — thiết kế, chưa triển khai |
