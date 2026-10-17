@@ -116,6 +116,20 @@ class SuperviseTest(unittest.TestCase):
         time.sleep(0.5)
         self.assertFalse(_alive(orphan), "the orphan of a crashed daemon survived")
 
+    @unittest.skipUnless(os.name == "nt", "Windows Job Object")
+    def test_a_failed_launch_closes_its_job(self):                           # Codex supervise R3 #3
+        closed = []
+        real = S._WinJob
+
+        class Spy(real):
+            def close(self):
+                closed.append(True)
+                super().close()
+        with mock.patch.object(S, "_WinJob", Spy):
+            with self.assertRaises(OSError):
+                S.Tree([os.path.join(tempfile.mkdtemp(), "missing.exe")])
+        self.assertEqual(closed, [True])
+
     def test_git_failure_is_not_a_change(self):                               # Codex supervise R1 #3
         last = ("abc1234", 5.0, 6.0)
         with mock.patch.object(S, "_git_head", return_value=None), \

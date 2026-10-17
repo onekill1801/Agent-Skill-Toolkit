@@ -58,24 +58,30 @@ class Tree:
         runs (track()), and stop() kills both sets."""
 
     def __init__(self, cmd: list):
-        self.job, self.seen = None, set()
+        self.job, self.seen, self.marker = None, set(), ""
         previous = _ignore_sigint()                                # no Ctrl+C between spawn and containment (R2 #2)
         try:
             if os.name == "nt":
                 self.job = _WinJob()
                 kw = proc.popen_group_kwargs()
                 kw["creationflags"] = kw.get("creationflags", 0) | 0x00000004      # CREATE_SUSPENDED
-                self.p = subprocess.Popen(cmd, **kw)
+                self.p = None
                 try:
+                    self.p = subprocess.Popen(cmd, **kw)
                     self.job.assign(self.p)
                     _nt_resume(self.p)
-                except BaseException:
-                    self.p.kill()
+                except BaseException:                              # incl. Popen itself (R3 #3): no handle leak
+                    if self.p is not None:
+                        self.p.kill()
                     self.job.close()
                     raise
             else:
                 _become_subreaper()
-                self.p = subprocess.Popen(cmd, **proc.popen_group_kwargs())
+                # every descendant inherits this marker in its environment, even after a crashed daemon's
+                # child is re-parented (macOS has no subreaper — R3 #1): stop() finds them by it
+                self.marker = f"{os.getpid()}-{time.monotonic_ns()}"
+                env = {**os.environ, TREE_ENV: self.marker}
+                self.p = subprocess.Popen(cmd, env=env, **proc.popen_group_kwargs())
         finally:
             _restore_sigint(previous)
 
@@ -114,11 +120,12 @@ class Tree:
             else:
                 # what the daemon started (recorded while it ran) + every process still below this supervisor
                 # (Linux subreaper: also the orphans of a crashed daemon)
-                for pid in set(self.seen) | set(_descendants(os.getpid())):
+                for pid in set(self.seen) | set(_descendants(os.getpid())) | set(_marked(self.marker)):
                     try:
                         os.kill(pid, signal.SIGKILL)
                     except OSError:
                         pass
+                _reap_adopted()                                    # Linux subreaper: no zombies (R3 #2)
             if self.p.poll() is None:
                 proc.kill_tree(self.p)
             try:
@@ -135,6 +142,49 @@ class Tree:
         if self.job:
             return self.job.active()
         return int(self.p.poll() is None) + len(_descendants(self.p.pid))
+
+
+TREE_ENV = "TOOLKIT_SUPERVISE_TREE"
+
+
+def _marked(marker: str) -> list:
+    """POSIX: pids whose environment carries TREE_ENV=<marker> (Linux /proc, else `ps eww`)."""
+    needle, found = f"{TREE_ENV}={marker}", []
+    if os.path.isdir("/proc"):
+        for d in os.listdir("/proc"):
+            if not d.isdigit() or int(d) == os.getpid():
+                continue
+            try:
+                with open(f"/proc/{d}/environ", "rb") as f:
+                    if needle.encode() in f.read().split(b"\0"):
+                        found.append(int(d))
+            except OSError:
+                continue
+        return found
+    try:
+        out = subprocess.run(["ps", "-A", "-ww", "-E", "-o", "pid=,command="], capture_output=True, text=True,
+                             timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return found
+    for line in out.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and parts[0].isdigit() and int(parts[0]) != os.getpid() and needle in parts[1].split():
+            found.append(int(parts[0]))
+    return found
+
+
+def _reap_adopted(wait: float = 5) -> None:
+    """Collect exit statuses of children adopted as subreaper (only processes that are already gone)."""
+    if os.name == "nt":
+        return
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if pid == 0:
+            time.sleep(0.05)
 
 
 def _ignore_sigint():
