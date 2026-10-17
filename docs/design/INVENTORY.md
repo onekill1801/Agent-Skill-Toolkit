@@ -86,7 +86,7 @@
 - `('agent_skill_toolkit.workflows.verify.ladder', 'refactor.py')` → `tells the human how to (re)record a snapshot`
 - `('agent_skill_toolkit.workflows.verify.unittest_junit', 'unittest_junit.py')` → `its own argparse prog name`
 
-## Tool của skill (110 file; 15 là vỏ dùng runtime)
+## Tool của skill (111 file; 16 là vỏ dùng runtime)
 
 | Skill | Tool | Vỏ runtime | Lệnh con | Dòng |
 |---|---|---|---|---|
@@ -128,7 +128,7 @@
 | dev-automation | `code_context.py` |  | affected, callers, impact, locate, status, trace | 423 |
 | dev-automation | `config.py` |  |  | 122 |
 | dev-automation | `daemon_common.py` |  | status | 236 |
-| dev-automation | `dashboard.py` | ✅ | serve, snapshot | 447 |
+| dev-automation | `dashboard.py` | ✅ | serve, snapshot | 453 |
 | dev-automation | `dbeaver.py` |  | forwards, list, probe, show | 226 |
 | dev-automation | `doctor.py` |  |  | 142 |
 | dev-automation | `feedback.py` |  | add, recall, stats | 280 |
@@ -154,6 +154,7 @@
 | dev-automation | `run_log.py` |  | ac-add, ac-map, ac-waive, advance, checkpoint, field, get, init, list, note, record-gate, require, stage | 613 |
 | dev-automation | `spring_config.py` |  | read | 244 |
 | dev-automation | `status.py` | ✅ |  | 366 |
+| dev-automation | `supervise.py` | ✅ |  | 509 |
 | dev-automation | `taskstore.py` | ✅ | add, cancel, events, list, show, summary, unblock | 77 |
 | dev-automation | `test_runner.py` |  | detect, run | 344 |
 | dev-automation | `toolkit_settings.py` | ✅ | list, set | 80 |
@@ -165,10 +166,10 @@
 | fork-terminal | `worktree_manager.py` |  | create, remove | 174 |
 | mr-review | `review_common.py` | ✅ |  | 334 |
 | mr-review | `review_flow.py` | ✅ | enqueue, enqueue-text, reconcile, release-quarantine, status, work | 449 |
-| mr-review | `review_post.py` |  | approval-status, approve, post, reject, render, request-approval, sweep, validate | 821 |
+| mr-review | `review_post.py` |  | approval-status, approve, notify, post, reject, render, request-approval, sweep, validate | 1091 |
 | mr-review | `review_queue.py` | ✅ | add, add-text, cancel, list, next, pending, set, show | 229 |
 | mr-review | `review_rules.py` |  |  | 250 |
-| mr-review | `review_ws.py` |  | check-stale, cleanup, diff, gc, prepare | 394 |
+| mr-review | `review_ws.py` |  | check-stale, cleanup, diff, gc, prepare, prune | 456 |
 | new-product | `intake.py` |  | build | 189 |
 | new-product | `registry.py` |  | add, get, list, remove | 169 |
 | new-product | `repo_init.py` |  | create-gitlab, init, push | 224 |
@@ -201,7 +202,7 @@
 | tchat-automation | `ws_client.py` |  |  | 147 |
 | team-registry | `team.py` |  | bootstrap, get, list, match, remove, set | 223 |
 
-## Test: 38 file, 721 hàm test
+## Test: 39 file, 757 hàm test
 
 - `test_accounts.py`
 - `test_agent_init.py`
@@ -234,6 +235,7 @@
 - `test_safety_net.py`
 - `test_settings.py`
 - `test_store_engine.py`
+- `test_supervise.py`
 - `test_task_queue.py`
 - `test_triage.py`
 - `test_usage_throttle.py`
