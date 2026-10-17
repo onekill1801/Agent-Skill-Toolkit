@@ -97,6 +97,12 @@ CATALOG = [
     _s("capacity", "Điều phối", "Số việc chạy song song",
        "giới hạn toàn cục cho worker (tab Coordinator); 0 = không giới hạn (worker chạy 2 luồng); áp dụng ngay",
        "int", str(store_mod.max_running_default()), lo=0, hi=50, store=True),
+    _s("ACCOUNT_BALANCE", "Điều phối", "Chia đều tải giữa các tài khoản",
+       "1 = mỗi lượt agent ưu tiên tài khoản còn NHIỀU dung lượng nhất (cùng model) · 0 = theo thứ tự trong agents.json",
+       "bool", "1", restart=(COORD,)),
+    _s("ACCOUNT_MIN_LEFT_PCT", "Điều phối", "Ngưỡng dung lượng tối thiểu (%)",
+       "tài khoản còn dưới mức này (5 giờ hoặc tuần) bị xếp cuối, chỉ dùng khi các tài khoản khác không được",
+       "int", "10", lo=0, hi=90, restart=(COORD,)),
     _s("daily_agent_runs", "Điều phối", "Trần lượt agent / ngày",
        "0 = không giới hạn; chạm trần thì dừng tới 0 giờ; áp dụng ngay", "int", "0", lo=0, hi=100000, store=True),
 ]

@@ -145,6 +145,25 @@ def read_api_usage(cfg: dict, timeout: float = CU.TIMEOUT_S, now: float = None, 
             out[label] = fut.result(timeout=max(0.0, deadline - time.monotonic()))
         except concurrent.futures.TimeoutError:
             out[label] = {"error": "network"}              # still running: the next call picks it up
+    if out:                                                # numbers only: agent_runner balances on them (F.22)
+        A.save_usage(usage_cache_path(), out, now)
+    return out
+
+
+def usage_cache_path() -> str:
+    from agent_skill_toolkit.core import paths
+    return paths.state_path(A.USAGE_CACHE)
+
+
+def runs_today_by_account(turns: list = None) -> dict:
+    """{"claude@name": turns since local midnight} from the usage table (model = backend:model@account)."""
+    out = {}
+    for t in (read_turns() if turns is None else turns):
+        m = str(t.get("model") or "")
+        if "@" in m:
+            backend = m.split(":", 1)[0].split("@", 1)[0]
+            label = f"{backend}@{m.rsplit('@', 1)[1]}"
+            out[label] = out.get(label, 0) + 1
     return out
 
 

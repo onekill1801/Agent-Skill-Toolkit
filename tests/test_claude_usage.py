@@ -34,6 +34,17 @@ def creds(d, token=TOKEN, exp_s=NOW + 3600):
         json.dump({"claudeAiOauth": {"accessToken": token, "expiresAt": exp_s * 1000, "refreshToken": "r"}}, f)
 
 
+_STATE = mock.patch.dict(os.environ, {"TOOLKIT_STATE_DIR": tempfile.mkdtemp(prefix="usage-test-")})
+
+
+def setUpModule():
+    _STATE.start()          # read_api_usage writes the usage cache (F.22): never into the real temp/
+
+
+def tearDownModule():
+    _STATE.stop()
+
+
 class UsageTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()

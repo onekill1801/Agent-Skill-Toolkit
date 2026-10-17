@@ -143,3 +143,89 @@ def report(cfg: dict, orca: dict, slots: list, turns: list, now: float = None, s
     if other["running"] or other["today"]["runs"]:
         out["unattributed"] = other
     return out
+
+
+# ----------------------------------------------------------------------------- load balancing (F.22)
+# agent_runner used to take a role's candidates in their written order: the first account did every turn
+# until it ran out. order_by_load() re-orders each model group by how much each account has LEFT.
+
+USAGE_CACHE = "account_usage.json"     # numbers only (never a token), shared across processes
+USAGE_MAX_AGE_S = 900
+
+
+def normalize_readings(api: dict, now: float) -> dict:
+    """read_api_usage() result -> {"claude@name": {"left": min(5h, week) % or None, "error": str?}}.
+    A window that has reset since the reading counts as full (100)."""
+    out = {}
+    for label, res in (api or {}).items():
+        if not isinstance(res, dict) or "usage" not in res:
+            out[label] = {"left": None, "error": str((res or {}).get("error") or "unknown")}
+            continue
+        u, lefts = _api_usage(res, now), []
+        for k in ("session", "weekly"):
+            b = u.get(k)
+            if b:
+                lefts.append(100.0 if b.get("reset_passed") else b.get("left"))
+        lefts = [x for x in lefts if isinstance(x, (int, float))]
+        out[label] = {"left": min(lefts) if lefts else None}
+    return out
+
+
+def save_usage(path: str, api: dict, now: float = None) -> None:
+    """Write the normalized readings atomically (best effort — a failed write only costs a re-read)."""
+    import json
+    import os
+    now = now or time.time()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.tmp-{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"at": now, "accounts": normalize_readings(api, now)}, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def load_usage(path: str, max_age: float = USAGE_MAX_AGE_S, now: float = None):
+    """{"claude@name": {"left": …}} when the cache is fresh, else None."""
+    import json
+    now = now or time.time()
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict) or not isinstance(d.get("at"), (int, float)) or now - d["at"] > max_age:
+        return None
+    acc = d.get("accounts")
+    return acc if isinstance(acc, dict) else None
+
+
+def _parse(spec: str) -> tuple:
+    head, _, account = spec.partition("@")
+    backend, _, model = head.partition(":")
+    return backend.strip(), model.strip(), account.strip()
+
+
+def order_by_load(specs: list, usage: dict, runs_today: dict, min_left: float = 10.0) -> list:
+    """Re-order the candidates of each (backend, model) group — the groups themselves keep their written
+    order (all opus before any sonnet, codex last, …). Inside a group:
+      1. accounts known to have >= min_left % left (5 h AND week), most left first,
+      2. accounts with no reading (token expired, not logged in, no cache),
+      3. accounts known to be below min_left — last resort,
+    ties broken by fewer turns today, then the written order. Nothing is dropped."""
+    groups, order = {}, []
+    for i, spec in enumerate(specs):
+        backend, model, account = _parse(spec)
+        g = (backend, model)
+        if g not in groups:
+            groups[g] = []
+            order.append(g)
+        groups[g].append((i, spec, f"{backend}@{account or 'default'}"))
+
+    def key(item):
+        i, _, label = item
+        left = ((usage or {}).get(label) or {}).get("left")
+        tier = 1 if left is None else (0 if left >= min_left else 2)
+        return (tier, -(left or 0), (runs_today or {}).get(label, 0), i)
+    return [spec for g in order for _, spec, _ in sorted(groups[g], key=key)]

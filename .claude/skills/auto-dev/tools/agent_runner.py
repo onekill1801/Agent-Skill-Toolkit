@@ -486,6 +486,29 @@ def usage_tier() -> str:
         return "normal"
 
 
+def _balanced(specs: list, cfg: dict) -> list:
+    """Candidates re-ordered so the account with the most usage LEFT goes first inside each model group
+    (F.22) — the written order used to send every turn to the first account until it ran dry. Readings:
+    the shared cache (accounts.py writes it on every read, e.g. each dashboard refresh); stale -> read
+    once now (parallel, bounded). ACCOUNT_BALANCE=0 keeps the written order; any failure keeps it too."""
+    if (config.get("ACCOUNT_BALANCE", "1") or "1").strip().lower() in ("0", "false", "no", "off"):
+        return specs
+    try:
+        from agent_skill_toolkit.workflows.execution import accounts as acct_mod
+        import accounts as acct_tool                       # auto-dev/tools/accounts.py (same dir)
+        usage = acct_mod.load_usage(acct_tool.usage_cache_path())
+        if usage is None:
+            acct_tool.read_api_usage(cfg, wait_s=8)        # also refreshes the cache
+            usage = acct_mod.load_usage(acct_tool.usage_cache_path()) or {}
+        try:
+            min_left = float(config.get("ACCOUNT_MIN_LEFT_PCT", "10") or 10)
+        except ValueError:
+            min_left = 10.0
+        return acct_mod.order_by_load(specs, usage, acct_tool.runs_today_by_account(), min_left)
+    except Exception:  # noqa: BLE001 — balancing is an optimisation; never block a turn on it
+        return specs
+
+
 def run_role(prompt: str, role: str, *, system: str = None, cwd: str = None,
              timeout: int = CLI_TIMEOUT, avoid: tuple = (), read_only: bool = False) -> dict:
     """Run one turn for `role` using the first usable candidate. Returns
@@ -495,6 +518,7 @@ def run_role(prompt: str, role: str, *, system: str = None, cwd: str = None,
     specs = roles.get(role) or roles.get("default") or ["claude"]
     if isinstance(specs, str):
         specs = [specs]
+    specs = _balanced(specs, cfg)
     tried = []
     for spec in specs:
         c = parse_candidate(spec)
