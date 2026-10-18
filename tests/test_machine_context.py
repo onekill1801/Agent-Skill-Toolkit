@@ -311,6 +311,13 @@ class MachineContextTest(unittest.TestCase):
         with mock.patch.object(mc, "config", mock.Mock(_ENV_PATH=None, get=lambda k, d="": "")):
             self.assertFalse(mc.check_env(self.root)["file_exists"])
 
+    def test_vpn_needs_user(self):
+        os.environ["FORTIVPN_HOST"] = "vpn.example"
+        with mock.patch.object(mc, "check_vpn_client", lambda: {"client": "x", "path": "/x", "ok": True}):
+            self.assertEqual(mc.collect(self.root)["features"]["vpn"]["state"], "partial")
+            os.environ["FORTIVPN_USER"] = "me"
+            self.assertEqual(mc.collect(self.root)["features"]["vpn"]["state"], "ready")
+
     def test_jenkins_needs_user(self):
         os.environ.update({"JENKINS_URL": "u", "JENKINS_TOKEN": "t"})
         self.assertEqual(mc.check_env(self.root)["groups"]["jenkins"]["missing"], ["JENKINS_USER"])

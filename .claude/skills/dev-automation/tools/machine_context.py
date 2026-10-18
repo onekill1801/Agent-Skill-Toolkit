@@ -41,7 +41,7 @@ ENV_GROUPS = {
     "jenkins": ["JENKINS_URL", "JENKINS_USER", "JENKINS_TOKEN"],
     "kafka_ui": ["KAFKA_UI_URL", "KAFKA_UI_USER", "KAFKA_UI_PASSWORD"],
     "db_probe": ["DB_USER", "DB_PASSWORD"],
-    "vpn": ["FORTIVPN_HOST"],
+    "vpn": ["FORTIVPN_HOST", "FORTIVPN_USER"],   # vpn.py up refuses without both
 }
 # keys in agents.json account env that point at a directory holding a login
 ACCOUNT_DIR_KEYS = ("CLAUDE_CONFIG_DIR", "HOME", "USERPROFILE", "CODEX_HOME")
@@ -364,7 +364,7 @@ def features(r: dict) -> dict:
         "podfwd_fetch": _feature({"oc": clis["oc"]}, "install oc (OpenShift CLI)"),
         "dbeaver_probe": _feature({"DBeaver workspace": r["dbeaver"]["ok"], ".env DB_USER/DB_PASSWORD": g["db_probe"]["ok"]},
                                   "copy DBeaverData/workspace6; set DB_USER/DB_PASSWORD"),
-        "vpn": _feature({".env FORTIVPN_HOST": g["vpn"]["ok"], "VPN client": r["vpn_client"]["ok"]},
+        "vpn": _feature({".env FORTIVPN_HOST/FORTIVPN_USER": g["vpn"]["ok"], "VPN client": r["vpn_client"]["ok"]},
                         "install FortiClient/openfortivpn; copy .env"),
         "agent_accounts": _feature({"work/agents.json": not r["agents"].get("error"),
                                     "every account usable (CLI + login dir + credentials)": r["agents"]["ok"],
