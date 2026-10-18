@@ -103,7 +103,8 @@ def collect() -> dict:
             env_report["dev_automation_missing"] = config.validate()  # azure/gitlab keys
         except Exception as e:  # noqa: BLE001
             env_report["error"] = str(e)
-        env_report["jenkins_configured"] = bool(config.get("JENKINS_URL") and config.get("JENKINS_TOKEN"))
+        env_report["jenkins_configured"] = bool(config.get("JENKINS_URL") and config.get("JENKINS_USER")
+                                                and config.get("JENKINS_TOKEN"))
         env_report["kafka_ui_configured"] = bool(config.get("KAFKA_UI_URL") and config.get("KAFKA_UI_USER"))
 
     return {

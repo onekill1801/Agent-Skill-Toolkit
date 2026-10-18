@@ -92,6 +92,11 @@ def _nonempty_file(path: str) -> bool:
         return False
 
 
+def _executable(path: str) -> bool:
+    """Non-empty regular file; on POSIX also the execute bit."""
+    return _nonempty_file(path) and (platform.system() == "Windows" or os.access(path, os.X_OK))
+
+
 # --------------------------------------------------------------------------- checks
 
 def check_env(root: str) -> dict:
@@ -109,9 +114,12 @@ def check_projects(root: str) -> dict:
     data, err = _load_json(path)
     if err:
         return {"path": path, "ok": False, "error": err}
-    projects = {}
+    projects, invalid = {}, []
     for name, entry in data.items():
-        if not isinstance(entry, dict) or name.startswith("_"):
+        if name.startswith("_"):       # metadata keys (_comment, ...)
+            continue
+        if not isinstance(entry, dict):
+            invalid.append(name)
             continue
         clone = entry.get("clone_dir")
         info = {"clone_dir": clone}
@@ -123,16 +131,20 @@ def check_projects(root: str) -> dict:
             info["invalid"] = True
         projects[name] = info
     bad = [n for n, i in projects.items() if i.get("clone_dir") is not None and not i.get("git")]
-    return {"path": path, "ok": not bad, "count": len(projects), "not_cloned": bad, "projects": projects}
+    return {"path": path, "ok": not bad and not invalid, "count": len(projects), "not_cloned": bad,
+            "invalid": invalid, "projects": projects}
 
 
 def _login_evidence(backend: str, env: dict) -> list:
-    """Login files this account would use (existence checked later, never read)."""
+    """Login files this account would use (existence checked later, never read).
+    The runner starts the CLI with the process env + the account's overrides, so inherited
+    CODEX_HOME / CLAUDE_CONFIG_DIR count unless the account overrides them."""
+    eff = {**os.environ, **env}
     home = _expand(env.get("HOME") or env.get("USERPROFILE") or "~")
     if backend == "codex":
-        return [os.path.join(_expand(env.get("CODEX_HOME") or os.path.join(home, ".codex")), "auth.json")]
+        return [os.path.join(_expand(eff.get("CODEX_HOME") or os.path.join(home, ".codex")), "auth.json")]
     if backend == "claude":
-        cfg = env.get("CLAUDE_CONFIG_DIR")
+        cfg = eff.get("CLAUDE_CONFIG_DIR")
         return [os.path.join(_expand(cfg) if cfg else os.path.join(home, ".claude"), ".credentials.json")]
     return []
 
@@ -209,7 +221,9 @@ def find_kubectl() -> str:
     """Same order as k8s.find_kubectl: $KUBECTL_BIN > PATH > Lens bundled binaries."""
     explicit = os.environ.get("KUBECTL_BIN", "")
     if explicit:
-        return explicit if _nonempty_file(_expand(explicit)) or shutil.which(explicit) else ""
+        if _executable(_expand(explicit)):
+            return _expand(explicit)
+        return shutil.which(explicit) or ""
     on_path = shutil.which("kubectl")
     if on_path:
         return on_path
@@ -218,7 +232,8 @@ def find_kubectl() -> str:
         lens = k8s.lens_kubectls() if k8s else {}
     except Exception:  # noqa: BLE001
         lens = {}
-    return list(lens.values())[-1] if lens else ""
+    usable = [p for p in lens.values() if _executable(p)]
+    return usable[-1] if usable else ""
 
 
 def check_kube(root: str) -> dict:
@@ -260,10 +275,13 @@ def check_dbeaver() -> dict:
 
 
 def check_github() -> dict:
-    cands = [os.environ.get("GH_CONFIG_DIR", "")]
-    if platform.system() == "Windows":
+    override = os.environ.get("GH_CONFIG_DIR", "")
+    cands = [_expand(override)] if override else []
+    if not override and platform.system() == "Windows":
         cands.append(os.path.join(_appdata(), "GitHub CLI"))
-    cands.append(os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config"), "gh"))
+    if not override:  # gh uses ONLY $GH_CONFIG_DIR when it is set
+        cands.append(os.path.join(os.environ.get("XDG_CONFIG_HOME")
+                                  or os.path.join(os.path.expanduser("~"), ".config"), "gh"))
     hosts = next((os.path.join(c, "hosts.yml") for c in cands
                   if c and _nonempty_file(os.path.join(c, "hosts.yml"))), None)
     return {"gh": shutil.which("gh"), "hosts_file": hosts, "ok": bool(shutil.which("gh") and hosts)}
@@ -367,7 +385,9 @@ def human(r: dict) -> str:
         lines.append(f"  projects    : {p['error']} — {p['path']}")
     else:
         lines.append(f"  projects    : {p['count']} project"
-                     + (f", chưa clone: {', '.join(p['not_cloned'])}" if p["not_cloned"] else ", đã clone đủ"))
+                     + (f", chưa clone: {', '.join(p['not_cloned'])}" if p["not_cloned"] else "")
+                     + (f", entry sai cấu trúc: {', '.join(p['invalid'])}" if p["invalid"] else "")
+                     + ("" if p["not_cloned"] or p["invalid"] else ", đã clone đủ"))
     a = r["agents"]
     if a.get("error"):
         lines.append(f"  agents.json : {a['error']} — {a['path']}")

@@ -146,12 +146,18 @@ class MachineContextTest(unittest.TestCase):
             self.write(os.path.join(lens, "kubeconfigs", "c1"), "apiVersion: v1")
             self.assertEqual(mc.check_kube(self.root)["lens_kubeconfigs"], {lens: 1})
 
+    def _bin(self, rel, content="bin"):
+        path = self.write(os.path.join(self.home, rel), content)
+        os.chmod(path, 0o755)
+        return path
+
     def test_kubectl_lookup_order(self):
+        lens_bin = self._bin(os.path.join("lens", "binaries", "kubectl", "1.28", "kubectl"))
         fake = mock.Mock(lens_dirs=lambda: [], expand_kubeconfig=mc._expand,
-                         lens_kubectls=lambda: {"1.28": "/lens/kubectl"})
+                         lens_kubectls=lambda: {"1.28": lens_bin})
         with mock.patch.object(mc, "_k8s", lambda: fake), mock.patch.object(mc.shutil, "which", lambda c: None):
-            self.assertEqual(mc.find_kubectl(), "/lens/kubectl")          # Lens binary, no kubeconfig needed
-            kb = self.write(os.path.join(self.home, "kubectl.exe"), "bin")
+            self.assertEqual(mc.find_kubectl(), lens_bin)                # Lens binary, no kubeconfig needed
+            kb = self._bin("kubectl.exe")
             os.environ["KUBECTL_BIN"] = kb
             self.assertEqual(mc.find_kubectl(), kb)
             os.environ["KUBECTL_BIN"] = os.path.join(self.home, "nope")
@@ -164,6 +170,63 @@ class MachineContextTest(unittest.TestCase):
             self.write(os.path.join(lens, "kubeconfigs", "c1"), "apiVersion: v1")
             r = mc.collect(self.root)                                   # kubeconfig only, no kubectl
             self.assertEqual(r["features"]["k8s"]["state"], "partial")
+
+    def test_broken_kubectl_candidates_rejected(self):
+        empty = self._bin(os.path.join("l", "1.27", "kubectl"), "")
+        a_dir = os.path.join(self.home, "l", "1.29", "kubectl")
+        os.makedirs(a_dir)
+        cands = {"1.27": empty, "1.29": a_dir}
+        if os.name != "nt":
+            noexec = self.write(os.path.join(self.home, "l", "1.30", "kubectl"), "bin")
+            os.chmod(noexec, 0o644)
+            cands["1.30"] = noexec
+        fake = mock.Mock(lens_dirs=lambda: [], expand_kubeconfig=mc._expand, lens_kubectls=lambda: cands)
+        with mock.patch.object(mc, "_k8s", lambda: fake), mock.patch.object(mc.shutil, "which", lambda c: None):
+            self.assertEqual(mc.find_kubectl(), "")
+            os.environ["KUBECTL_BIN"] = empty
+            self.assertEqual(mc.find_kubectl(), "")
+
+    def test_inherited_login_env_counts(self):
+        codex_home = os.path.join(self.tmp, "custom-codex")
+        self.write(os.path.join(codex_home, "auth.json"), "t")
+        claude_cfg = os.path.join(self.tmp, "custom-claude")
+        self.write(os.path.join(claude_cfg, ".credentials.json"), "t")
+        os.environ.update({"CODEX_HOME": codex_home, "CLAUDE_CONFIG_DIR": claude_cfg})
+        self.write("work/agents.json", {"accounts": {
+            "codex": {"main": {"env": {}}},
+            "claude": {"inh": {"env": {}},
+                       "own": {"env": {"CLAUDE_CONFIG_DIR": os.path.join(self.tmp, "other")}}}}})
+        with mock.patch.object(mc.shutil, "which", lambda c: f"/bin/{c}"):
+            a = mc.check_agents(self.root)
+        self.assertTrue(a["accounts"]["codex@main"]["ok"])
+        self.assertTrue(a["accounts"]["claude@inh"]["ok"])
+        self.assertFalse(a["accounts"]["claude@own"]["ok"])            # account override wins
+
+    def test_gh_config_dir_override_is_exclusive(self):
+        default = os.path.join(self.home, "cfg", "gh")
+        self.write(os.path.join(default, "hosts.yml"), "github.com: {}")
+        if os.name == "nt":
+            self.write(os.path.join(self.home, "appdata", "GitHub CLI", "hosts.yml"), "github.com: {}")
+        with mock.patch.object(mc.shutil, "which", lambda c: "/bin/gh"):
+            self.assertTrue(mc.check_github()["ok"])
+            os.environ["GH_CONFIG_DIR"] = os.path.join(self.tmp, "fresh-gh")
+            self.assertFalse(mc.check_github()["ok"])
+
+    def test_invalid_project_entry_is_not_ok(self):
+        self.write("work/projects.json", {"_comment": "x", "p": "broken"})
+        p = mc.check_projects(self.root)
+        self.assertEqual(p["invalid"], ["p"])
+        self.assertFalse(p["ok"])
+        self.assertNotIn("đã clone đủ", mc.human(mc.collect(self.root)))
+
+    def test_doctor_jenkins_needs_user(self):
+        import doctor
+        os.environ.update({"JENKINS_URL": "u", "JENKINS_TOKEN": "t"})
+        with mock.patch.object(doctor, "config", mock.Mock(get=lambda k, d="": os.environ.get(k, ""),
+                                                           validate=lambda: [])):
+            report = doctor.collect()
+        self.assertFalse(report["env"]["jenkins_configured"])
+        self.assertIn("Jenkins: chưa cấu hình", doctor._human(report))
 
     def test_env_file_is_the_one_config_loaded(self):
         fake = mock.Mock(_ENV_PATH="/elsewhere/.env", get=lambda k, d="": "")
