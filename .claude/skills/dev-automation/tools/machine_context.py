@@ -149,6 +149,16 @@ def _login_evidence(backend: str, env: dict) -> list:
     return []
 
 
+def _account_which(cli: str, env: dict) -> str:
+    """CLI lookup with the PATH the runner's subprocess gets (process env + account override)."""
+    path = os.environ.get("PATH", "")
+    for k, v in env.items():
+        if k == "PATH" or (platform.system() == "Windows" and k.upper() == "PATH"):
+            path = v
+    found = shutil.which(cli, path=path)
+    return found if found and _executable(found) else ""
+
+
 def account_env(spec) -> dict:
     """Account env exactly as agent_runner._account_env passes it to the CLI: expanduser only,
     no $VAR expansion (no shell), so a "$HOME/x" value is what the CLI really gets."""
@@ -170,9 +180,10 @@ def check_agents(root: str) -> dict:
             missing = [k for k, d in dirs.items() if not os.path.isdir(d)]
             evidence = _login_evidence(backend, env)
             logged_in = any(_nonempty_file(p) for p in evidence) if evidence else None
+            cli = bool(_account_which(backend, env))
             accounts[f"{backend}@{acc}"] = {
-                "backend": backend, "cli": bool(shutil.which(backend)),
-                "ok": not missing and logged_in is True and bool(shutil.which(backend)),
+                "backend": backend, "cli": cli,
+                "ok": not missing and logged_in is True and cli,
                 "missing_dirs": {k: dirs[k] for k in missing}, "logged_in": logged_in}
     bad = [a for a, i in accounts.items() if not i["ok"]]
     return {"path": path, "ok": bool(accounts) and not bad, "count": len(accounts),
@@ -180,7 +191,9 @@ def check_agents(root: str) -> dict:
 
 
 def check_codex_login() -> dict:
-    p = os.path.join(_expand(os.environ.get("CODEX_HOME") or "~/.codex"), "auth.json")
+    # an inherited CODEX_HOME reaches codex verbatim (no shell, no ~/$VAR expansion)
+    home = os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")
+    p = os.path.join(home, "auth.json")
     return {"auth_file": p, "ok": _nonempty_file(p)}
 
 

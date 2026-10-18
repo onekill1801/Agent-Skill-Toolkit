@@ -87,8 +87,8 @@ class MachineContextTest(unittest.TestCase):
                        "y": {"env": {"CLAUDE_CONFIG_DIR": os.path.join(self.tmp, "gone")}},
                        "z": {"env": {}}},                      # falls back to ~/.claude (no creds)
             "codex": {"main": {"env": {"CODEX_HOME": "~/.codex"}}}}})
-        which = lambda c: f"/bin/{c}" if c in ("claude", "codex") else None
-        with mock.patch.object(mc.shutil, "which", which):
+        which = lambda c, env: f"/bin/{c}" if c in ("claude", "codex") else ""
+        with mock.patch.object(mc, "_account_which", which):
             a = mc.check_agents(self.root)
             self.assertEqual(a["count"], 4)
             self.assertEqual(sorted(a["unusable"]), ["claude@y", "claude@z", "codex@main"])
@@ -96,11 +96,11 @@ class MachineContextTest(unittest.TestCase):
             self.assertIn("codex@main", mc.check_agents(self.root)["unusable"])
             self.write(os.path.join(self.home, ".codex", "auth.json"), "t")
             self.assertNotIn("codex@main", mc.check_agents(self.root)["unusable"])
-        with mock.patch.object(mc.shutil, "which", lambda c: "/bin/claude" if c == "claude" else None):
+        with mock.patch.object(mc, "_account_which", lambda c, env: "/bin/claude" if c == "claude" else ""):
             self.assertIn("codex@main", mc.check_agents(self.root)["unusable"])   # codex CLI missing
 
     def test_codex_feature_needs_login(self):
-        with mock.patch.object(mc.shutil, "which", lambda c: f"/bin/{c}"):
+        with mock.patch.object(mc.shutil, "which", lambda c, **k: f"/bin/{c}"):
             self.assertEqual(mc.collect(self.root)["features"]["codex_review"]["state"], "partial")
             self.write(os.path.join(self.home, ".codex", "auth.json"), "t")
             self.assertEqual(mc.collect(self.root)["features"]["codex_review"]["state"], "ready")
@@ -203,8 +203,34 @@ class MachineContextTest(unittest.TestCase):
         # "$HOME/account" is passed literally (no shell) -> a login under the expanded dir must not count
         self.write(os.path.join(self.home, "account", "auth.json"), "t")
         self.write("work/agents.json", {"accounts": {"codex": {"a": spec}}})
-        with mock.patch.object(mc.shutil, "which", lambda c: f"/bin/{c}"):
+        with mock.patch.object(mc, "_account_which", lambda c, env: f"/bin/{c}"):
             self.assertFalse(mc.check_agents(self.root)["accounts"]["codex@a"]["ok"])
+
+    def test_account_cli_uses_account_path(self):
+        bindir = os.path.join(self.tmp, "acctbin")
+        exe = "codex.exe" if os.name == "nt" else "codex"
+        self._bin(os.path.join("..", "acctbin", exe))
+        self.write(os.path.join(self.home, ".codex", "auth.json"), "t")
+        empty = os.path.join(self.tmp, "emptybin")
+        os.makedirs(empty)
+        os.environ["PATH"] = bindir
+        self.write("work/agents.json", {"accounts": {"codex": {
+            "inherit": {"env": {}}, "blank": {"env": {"PATH": empty}}}}})
+        a = mc.check_agents(self.root)["accounts"]
+        self.assertTrue(a["codex@inherit"]["ok"])
+        self.assertFalse(a["codex@blank"]["cli"])                       # account PATH has no codex
+        os.environ["PATH"] = empty
+        self.write("work/agents.json", {"accounts": {"codex": {"own": {"env": {"PATH": bindir}}}}})
+        self.assertTrue(mc.check_agents(self.root)["accounts"]["codex@own"]["cli"])   # only in account PATH
+
+    def test_codex_login_uses_literal_codex_home(self):
+        self.write(os.path.join(self.home, "account", "auth.json"), "t")
+        os.environ["CODEX_HOME"] = "$HOME/account"
+        self.assertFalse(mc.check_codex_login()["ok"])
+        with mock.patch.object(mc.shutil, "which", lambda c, **k: f"/bin/{c}"):
+            self.assertEqual(mc.collect(self.root)["features"]["codex_review"]["state"], "partial")
+        os.environ["CODEX_HOME"] = os.path.join(self.home, "account")
+        self.assertTrue(mc.check_codex_login()["ok"])
 
     def test_inherited_login_env_counts(self):
         codex_home = os.path.join(self.tmp, "custom-codex")
@@ -216,7 +242,7 @@ class MachineContextTest(unittest.TestCase):
             "codex": {"main": {"env": {}}},
             "claude": {"inh": {"env": {}},
                        "own": {"env": {"CLAUDE_CONFIG_DIR": os.path.join(self.tmp, "other")}}}}})
-        with mock.patch.object(mc.shutil, "which", lambda c: f"/bin/{c}"):
+        with mock.patch.object(mc, "_account_which", lambda c, env: f"/bin/{c}"):
             a = mc.check_agents(self.root)
         self.assertTrue(a["accounts"]["codex@main"]["ok"])
         self.assertTrue(a["accounts"]["claude@inh"]["ok"])
