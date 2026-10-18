@@ -237,17 +237,42 @@ def _k8s():
         return None
 
 
-def find_kubectl(want_version: str = "") -> str:
+def _k8s_blocks(projects_path: str) -> list:
+    """Every environments.<E>.k8s dict in projects.json (what k8s.py --project/--env resolves)."""
+    data, err = _load_json(projects_path)
+    found = []
+
+    def walk(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k == "k8s" and isinstance(v, dict):
+                    found.append(v)
+                else:
+                    walk(v)
+        elif isinstance(o, list):
+            for x in o:
+                walk(x)
+    if not err:
+        walk(data)
+    return found
+
+
+def _resolve_bin(name: str) -> str:
+    """How subprocess would run `name`: a path as-is, a bare name via PATH (no ~/$VAR expansion)."""
+    has_dir = os.sep in name or bool(os.altsep and os.altsep in name)
+    if has_dir:
+        return name if _executable(name) else ""
+    found = shutil.which(name)
+    return found if found and _executable(found) else ""
+
+
+def find_kubectl(want_version: str = "", explicit_bin: str = "") -> str:
     """The binary k8s.find_kubectl(want_version) would run — "" if that one is unusable.
     Order: $KUBECTL_BIN > Lens binary of the pinned version > PATH > newest Lens binary."""
-    explicit = os.environ.get("KUBECTL_BIN", "")
+    # registry "kubectl" > $KUBECTL_BIN, both handed to subprocess verbatim (no shell)
+    explicit = explicit_bin or os.environ.get("KUBECTL_BIN", "")
     if explicit:
-        # k8s.py hands $KUBECTL_BIN to subprocess verbatim (no shell): no ~ / $VAR expansion here
-        has_dir = os.sep in explicit or bool(os.altsep and os.altsep in explicit)
-        if has_dir:  # a path: checked as-is; a bare name: resolved on PATH like subprocess does
-            return explicit if _executable(explicit) else ""
-        found = shutil.which(explicit)
-        return found if found and _executable(found) else ""
+        return _resolve_bin(explicit)
     k8s = _k8s()
     try:
         lens = k8s.lens_kubectls() if k8s else {}
@@ -284,8 +309,11 @@ def check_kube(root: str) -> dict:
             registry[ref] = False
     reg_missing = [r for r, ok in registry.items() if not ok]
     usable = bool(existing or lens or any(registry.values()))
-    pinned = {v: find_kubectl(v) for v in _registry_kubeconfigs(
-        os.path.join(_work_dir(root), "projects.json"), "kubectl_version")}
+    pinned = {}  # per registry k8s block: "<version>|<kubectl>" -> binary the runtime would run
+    for b in _k8s_blocks(os.path.join(_work_dir(root), "projects.json")):
+        ver = b.get("kubectl_version") if isinstance(b.get("kubectl_version"), str) else ""
+        exe = b.get("kubectl") if isinstance(b.get("kubectl"), str) else ""
+        pinned[f"{ver or 'default'}|{exe}"] = find_kubectl(ver, exe)
     return {"ok": usable and not reg_missing, "usable": usable, "kubeconfigs": existing,
             "looked_at": candidates, "lens_kubeconfigs": lens,
             "registry_refs": registry, "registry_missing": reg_missing,

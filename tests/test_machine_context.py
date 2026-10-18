@@ -226,6 +226,13 @@ class MachineContextTest(unittest.TestCase):
             self.assertEqual(mc.find_kubectl("1.28"), v28)
             self.assertEqual(mc.find_kubectl(), "")                      # unpinned -> broken newest
             self.assertEqual(mc.collect(self.root)["features"]["k8s"]["state"], "ready")
+            self.write("work/projects.json", {"p": {"environments": {   # mixed: prod not pinned
+                "dev": {"k8s": {"kubectl_version": "1.28"}}, "prod": {"k8s": {"namespace": "x"}}}}})
+            self.assertEqual(mc.collect(self.root)["features"]["k8s"]["state"], "partial")
+            self.write("work/projects.json", {"p": {"environments": {   # prod has its own kubectl
+                "dev": {"k8s": {"kubectl_version": "1.28"}}, "prod": {"k8s": {"kubectl": v28}}}}})
+            self.assertEqual(mc.collect(self.root)["features"]["k8s"]["state"], "ready")
+            self.write("work/projects.json", {"p": {"environments": {"dev": {"k8s": {"kubectl_version": "1.28"}}}}})
             lens.update({"1.28": self._bin(os.path.join("l", "1.28b", "kubectl"), ""),
                          "1.29": self._bin(os.path.join("l", "1.29b", "kubectl"))})
             self.assertEqual(mc.find_kubectl(), lens["1.29"])
