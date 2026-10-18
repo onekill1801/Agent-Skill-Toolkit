@@ -186,6 +186,14 @@ class MachineContextTest(unittest.TestCase):
             os.environ["KUBECTL_BIN"] = empty
             self.assertEqual(mc.find_kubectl(), "")
 
+    def test_kubectl_bin_taken_verbatim(self):
+        self._bin(os.path.join("bin", "kubectl"))
+        fake = mock.Mock(lens_dirs=lambda: [], expand_kubeconfig=mc._expand, lens_kubectls=lambda: {})
+        with mock.patch.object(mc, "_k8s", lambda: fake), mock.patch.object(mc.shutil, "which", lambda c, **k: None):
+            for literal in ("~/bin/kubectl", "$HOME/bin/kubectl", "%USERPROFILE%/bin/kubectl"):
+                os.environ["KUBECTL_BIN"] = literal
+                self.assertEqual(mc.find_kubectl(), "", literal)         # subprocess would not expand it
+
     def test_empty_executable_on_path_rejected(self):
         empty = self._bin(os.path.join("pathbin", "kubectl"), "")
         fake = mock.Mock(lens_dirs=lambda: [], expand_kubeconfig=mc._expand, lens_kubectls=lambda: {})

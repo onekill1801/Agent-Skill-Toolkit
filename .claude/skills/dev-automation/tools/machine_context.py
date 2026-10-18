@@ -240,8 +240,9 @@ def find_kubectl() -> str:
     """Same order as k8s.find_kubectl: $KUBECTL_BIN > PATH > Lens bundled binaries."""
     explicit = os.environ.get("KUBECTL_BIN", "")
     if explicit:
-        if _executable(_expand(explicit)):
-            return _expand(explicit)
+        # k8s.py hands $KUBECTL_BIN to subprocess verbatim (no shell): no ~ / $VAR expansion here
+        if _executable(explicit):
+            return explicit
         found = shutil.which(explicit)
         return found if found and _executable(found) else ""
     on_path = shutil.which("kubectl")
