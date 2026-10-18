@@ -163,6 +163,7 @@ Khi tắt SSL verify → cảnh báo người dùng.
 Toolkit chạy trên cả 3 OS. Kiểm tra mức sẵn sàng của máy:
 ```
 python dev-automation/tools/doctor.py        # (hoặc python3) — báo OS, Python, CLI có/thiếu, feature nào chạy được
+python agentkit.py machine_context [--json]  # bối cảnh máy ngoài git: .env theo nhóm, work/*.json, ~/.ssh, kubeconfig/Lens, DBeaver, gh, tài khoản agent — chỉ kiểm tồn tại, không đọc giá trị bí mật
 ```
 
 - **Python**: `python` (Windows) · `python3` (macOS/Linux). Tool chỉ dùng **stdlib**, không pip.

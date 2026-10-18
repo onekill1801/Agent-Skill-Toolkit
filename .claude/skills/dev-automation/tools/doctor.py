@@ -14,6 +14,9 @@ Zero external dependencies.
 Usage:
     python doctor.py            # human-readable summary
     python doctor.py --json     # machine-readable JSON
+
+Also reports machine-specific context (.env groups, work/ registry, ssh, kubeconfig,
+DBeaver, agent accounts) via machine_context.py — presence only, no secret values.
 """
 
 import argparse
@@ -33,6 +36,11 @@ try:
     import config  # dev-automation config loader (.env)
 except ImportError:
     config = None
+
+try:
+    import machine_context
+except ImportError:
+    machine_context = None
 
 # CLI -> what it unlocks. Optional ones don't block core usage.
 CLI_CHECKS = {
@@ -97,6 +105,7 @@ def collect() -> dict:
         "clis": clis,
         "fork_terminal": _terminal_for_os(),
         "env": env_report,
+        "context": machine_context.collect() if machine_context else None,
     }
 
 
@@ -122,6 +131,8 @@ def _human(report: dict) -> str:
                   f"  dev-automation (Azure/GitLab): {'OK' if not miss else 'thiếu ' + ', '.join(miss)}",
                   f"  Jenkins: {'OK' if env.get('jenkins_configured') else 'chưa cấu hình'}",
                   f"  Kafka UI: {'OK' if env.get('kafka_ui_configured') else 'chưa cấu hình'}"]
+    if report.get("context"):
+        lines += ["", machine_context.human(report["context"])]
     return "\n".join(lines)
 
 

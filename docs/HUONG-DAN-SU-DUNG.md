@@ -39,7 +39,7 @@ Cách A/B: Claude tự chọn tool phía dưới. Phần còn lại của tài l
 ### 3.1 Kiểm máy và cấu hình
 
 ```bash
-python $T/dev-automation/tools/doctor.py     # máy thiếu gì (git, mvn, kubectl, codex...)
+python $T/dev-automation/tools/doctor.py     # máy thiếu gì (git, mvn, kubectl, codex...) + bối cảnh máy (.env, work/, ssh, kube, DBeaver)
 python $T/dev-automation/tools/config.py     # token GitLab/Azure đã đủ chưa
 ```
 
