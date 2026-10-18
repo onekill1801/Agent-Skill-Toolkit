@@ -241,8 +241,9 @@ def find_kubectl() -> str:
     explicit = os.environ.get("KUBECTL_BIN", "")
     if explicit:
         # k8s.py hands $KUBECTL_BIN to subprocess verbatim (no shell): no ~ / $VAR expansion here
-        if _executable(explicit):
-            return explicit
+        has_dir = os.sep in explicit or bool(os.altsep and os.altsep in explicit)
+        if has_dir:  # a path: checked as-is; a bare name: resolved on PATH like subprocess does
+            return explicit if _executable(explicit) else ""
         found = shutil.which(explicit)
         return found if found and _executable(found) else ""
     on_path = shutil.which("kubectl")
@@ -253,8 +254,9 @@ def find_kubectl() -> str:
         lens = k8s.lens_kubectls() if k8s else {}
     except Exception:  # noqa: BLE001
         lens = {}
-    usable = [p for p in lens.values() if _executable(p)]
-    return usable[-1] if usable else ""
+    # runtime takes the newest Lens binary (no fallback) -> judge exactly that one
+    newest = list(lens.values())[-1] if lens else ""
+    return newest if newest and _executable(newest) else ""
 
 
 def check_kube(root: str) -> dict:

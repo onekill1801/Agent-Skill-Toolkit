@@ -194,6 +194,27 @@ class MachineContextTest(unittest.TestCase):
                 os.environ["KUBECTL_BIN"] = literal
                 self.assertEqual(mc.find_kubectl(), "", literal)         # subprocess would not expand it
 
+    @unittest.skipIf(os.name == "nt", "POSIX: bare name never resolves against cwd")
+    def test_kubectl_bin_bare_name_ignores_cwd(self):
+        cwd_bin = self._bin(os.path.join("cwd", "kubectl"))
+        fake = mock.Mock(lens_dirs=lambda: [], expand_kubeconfig=mc._expand, lens_kubectls=lambda: {})
+        old = os.getcwd()
+        os.chdir(os.path.dirname(cwd_bin))
+        try:
+            with mock.patch.object(mc, "_k8s", lambda: fake), mock.patch.object(mc.shutil, "which", lambda c, **k: None):
+                os.environ["KUBECTL_BIN"] = "kubectl"
+                self.assertEqual(mc.find_kubectl(), "")
+        finally:
+            os.chdir(old)
+
+    def test_lens_newest_binary_is_judged(self):
+        good = self._bin(os.path.join("l", "1.27", "kubectl"))
+        broken = self._bin(os.path.join("l", "1.28", "kubectl"), "")
+        fake = mock.Mock(lens_dirs=lambda: [], expand_kubeconfig=mc._expand,
+                         lens_kubectls=lambda: {"1.27": good, "1.28": broken})
+        with mock.patch.object(mc, "_k8s", lambda: fake), mock.patch.object(mc.shutil, "which", lambda c, **k: None):
+            self.assertEqual(mc.find_kubectl(), "")                      # runtime would pick broken 1.28
+
     def test_empty_executable_on_path_rejected(self):
         empty = self._bin(os.path.join("pathbin", "kubectl"), "")
         fake = mock.Mock(lens_dirs=lambda: [], expand_kubeconfig=mc._expand, lens_kubectls=lambda: {})
