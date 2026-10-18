@@ -31,7 +31,7 @@ class MachineContextTest(unittest.TestCase):
                "APPDATA": os.path.join(self.home, "appdata"), "XDG_CONFIG_HOME": os.path.join(self.home, "cfg"),
                "DBEAVER_WORKSPACE": os.path.join(self.home, "dbeaver")}
         clean = {k: v for k, v in os.environ.items()
-                 if k not in {"KUBECONFIG", "GH_CONFIG_DIR", "TOOLKIT_ENV_FILE"}
+                 if k not in {"KUBECONFIG", "GH_CONFIG_DIR", "TOOLKIT_ENV_FILE", "CODEX_HOME", "KUBECTL_BIN", "CLAUDE_CONFIG_DIR"}
                  and not any(k in keys for keys in mc.ENV_GROUPS.values()) and k != "FCHAT_PRIVATE_KEY_PATH"}
         clean.update(env)
         self.env = mock.patch.dict(os.environ, clean, clear=True)
@@ -78,18 +78,104 @@ class MachineContextTest(unittest.TestCase):
         self.assertEqual(p["not_cloned"], ["b"])
         self.assertFalse(p["ok"])
 
-    def test_agents_account_dirs(self):
+    def test_agents_need_cli_dir_and_credentials(self):
         good = os.path.join(self.tmp, "acc1")
         os.makedirs(good)
+        self.write(os.path.join(good, ".credentials.json"), "x")
         self.write("work/agents.json", {"accounts": {
             "claude": {"x": {"env": {"CLAUDE_CONFIG_DIR": good}},
-                       "y": {"env": {"CLAUDE_CONFIG_DIR": os.path.join(self.tmp, "gone")}}},
+                       "y": {"env": {"CLAUDE_CONFIG_DIR": os.path.join(self.tmp, "gone")}},
+                       "z": {"env": {}}},                      # falls back to ~/.claude (no creds)
             "codex": {"main": {"env": {"CODEX_HOME": "~/.codex"}}}}})
-        a = mc.check_agents(self.root)
-        self.assertEqual(a["count"], 3)
-        self.assertEqual(sorted(a["unusable"]), ["claude@y", "codex@main"])
-        os.makedirs(os.path.join(self.home, ".codex"))
-        self.assertEqual(mc.check_agents(self.root)["unusable"], ["claude@y"])
+        which = lambda c: f"/bin/{c}" if c in ("claude", "codex") else None
+        with mock.patch.object(mc.shutil, "which", which):
+            a = mc.check_agents(self.root)
+            self.assertEqual(a["count"], 4)
+            self.assertEqual(sorted(a["unusable"]), ["claude@y", "claude@z", "codex@main"])
+            os.makedirs(os.path.join(self.home, ".codex"))          # dir alone is not a login
+            self.assertIn("codex@main", mc.check_agents(self.root)["unusable"])
+            self.write(os.path.join(self.home, ".codex", "auth.json"), "t")
+            self.assertNotIn("codex@main", mc.check_agents(self.root)["unusable"])
+        with mock.patch.object(mc.shutil, "which", lambda c: "/bin/claude" if c == "claude" else None):
+            self.assertIn("codex@main", mc.check_agents(self.root)["unusable"])   # codex CLI missing
+
+    def test_codex_feature_needs_login(self):
+        with mock.patch.object(mc.shutil, "which", lambda c: f"/bin/{c}"):
+            self.assertEqual(mc.collect(self.root)["features"]["codex_review"]["state"], "partial")
+            self.write(os.path.join(self.home, ".codex", "auth.json"), "t")
+            self.assertEqual(mc.collect(self.root)["features"]["codex_review"]["state"], "ready")
+
+    def test_wrong_schema_json_does_not_crash(self):
+        for bad in ([1], "str", {"accounts": [1]}, {"accounts": {"claude": {"x": "y"}}},
+                    {"accounts": {"claude": {"x": {"env": ["a"]}}}}):
+            self.write("work/agents.json", bad)
+            self.write("work/projects.json", bad)
+            r = mc.collect(self.root)
+            mc.human(r)
+        self.write("work/projects.json", {"p": {"clone_dir": 5}})
+        self.assertEqual(mc.check_projects(self.root)["not_cloned"], ["p"])
+        self.write("work/projects.json", [1])
+        self.assertTrue(mc.check_projects(self.root)["error"].startswith("invalid"))
+
+    def test_doctor_survives_context_failure(self):
+        import doctor
+        with mock.patch.object(doctor.machine_context, "collect", side_effect=RuntimeError("boom")):
+            report = doctor.collect()
+        self.assertIn("boom", report["context"]["error"])
+        self.assertIn("lỗi khi kiểm tra", doctor._human(report))
+
+    def test_empty_files_are_not_evidence(self):
+        self.write(os.path.join(self.home, ".ssh", "id_rsa"), "")
+        self.assertFalse(mc.check_ssh()["ok"])
+        self.write(os.path.join(self.home, ".kube", "config"), "")
+        self.assertFalse(mc.check_kube(self.root)["usable"])
+        os.makedirs(os.path.join(self.home, ".kube", "dir"))
+        os.environ["KUBECONFIG"] = os.path.join(self.home, ".kube", "dir")
+        self.assertFalse(mc.check_kube(self.root)["usable"])
+        self.write(os.path.join(self.home, "dbeaver", "General", ".dbeaver", "data-sources.json"), "")
+        self.assertFalse(mc.check_dbeaver()["ok"])
+        os.environ["FCHAT_PRIVATE_KEY_PATH"] = self.write(os.path.join(self.home, "k.pem"), "")
+        self.assertFalse(mc.check_files()["FCHAT_PRIVATE_KEY_PATH"]["ok"])
+
+    def test_lens_dir_entries_not_counted(self):
+        lens = os.path.join(self.home, "lens")
+        os.makedirs(os.path.join(lens, "kubeconfigs", "subdir"))
+        fake = mock.Mock(lens_dirs=lambda: [lens], expand_kubeconfig=mc._expand, lens_kubectls=lambda: {})
+        with mock.patch.object(mc, "_k8s", lambda: fake):
+            self.assertEqual(mc.check_kube(self.root)["lens_kubeconfigs"], {})
+            self.write(os.path.join(lens, "kubeconfigs", "c1"), "apiVersion: v1")
+            self.assertEqual(mc.check_kube(self.root)["lens_kubeconfigs"], {lens: 1})
+
+    def test_kubectl_lookup_order(self):
+        fake = mock.Mock(lens_dirs=lambda: [], expand_kubeconfig=mc._expand,
+                         lens_kubectls=lambda: {"1.28": "/lens/kubectl"})
+        with mock.patch.object(mc, "_k8s", lambda: fake), mock.patch.object(mc.shutil, "which", lambda c: None):
+            self.assertEqual(mc.find_kubectl(), "/lens/kubectl")          # Lens binary, no kubeconfig needed
+            kb = self.write(os.path.join(self.home, "kubectl.exe"), "bin")
+            os.environ["KUBECTL_BIN"] = kb
+            self.assertEqual(mc.find_kubectl(), kb)
+            os.environ["KUBECTL_BIN"] = os.path.join(self.home, "nope")
+            self.assertEqual(mc.find_kubectl(), "")
+        fake.lens_kubectls = lambda: {}
+        os.environ.pop("KUBECTL_BIN")
+        with mock.patch.object(mc, "_k8s", lambda: fake), mock.patch.object(mc.shutil, "which", lambda c: None):
+            lens = os.path.join(self.home, "lens")
+            fake.lens_dirs = lambda: [lens]
+            self.write(os.path.join(lens, "kubeconfigs", "c1"), "apiVersion: v1")
+            r = mc.collect(self.root)                                   # kubeconfig only, no kubectl
+            self.assertEqual(r["features"]["k8s"]["state"], "partial")
+
+    def test_env_file_is_the_one_config_loaded(self):
+        fake = mock.Mock(_ENV_PATH="/elsewhere/.env", get=lambda k, d="": "")
+        with mock.patch.object(mc, "config", fake):
+            e = mc.check_env(self.root)
+        self.assertEqual((e["file"], e["file_exists"]), ("/elsewhere/.env", True))
+        with mock.patch.object(mc, "config", mock.Mock(_ENV_PATH=None, get=lambda k, d="": "")):
+            self.assertFalse(mc.check_env(self.root)["file_exists"])
+
+    def test_jenkins_needs_user(self):
+        os.environ.update({"JENKINS_URL": "u", "JENKINS_TOKEN": "t"})
+        self.assertEqual(mc.check_env(self.root)["groups"]["jenkins"]["missing"], ["JENKINS_USER"])
 
     def test_ssh_ignores_public_keys(self):
         self.write(os.path.join(self.home, ".ssh", "id_ed25519.pub"), "pub")
@@ -105,6 +191,13 @@ class MachineContextTest(unittest.TestCase):
         k = mc.check_kube(self.root)
         self.assertEqual(k["registry_missing"], ["~/.kube/other"])
         self.assertFalse(k["ok"])
+
+    def test_kube_registry_only_is_usable(self):
+        valid = self.write(os.path.join(self.tmp, "custom", "valid"), "apiVersion: v1")
+        self.write("work/projects.json", {"p": {"environments": {"dev": {"kubeconfig": valid}}}})
+        k = mc.check_kube(self.root)
+        self.assertTrue(k["ok"] and k["usable"])
+        self.assertEqual(k["registry_refs"], {valid: True})
 
     def test_feature_states(self):
         self.assertEqual(mc._feature({"a": True, "b": True}, "h")["state"], "ready")

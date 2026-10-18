@@ -38,7 +38,7 @@ ENV_GROUPS = {
     "atask": ["ATASK_BASE_URL", "ATASK_PAT_TOKEN"],
     "tchat": ["FCHAT_BASE_API_URL", "FCHAT_BEARER_TOKEN"],
     "telegram": ["TELEGRAM_BOT_TOKEN"],
-    "jenkins": ["JENKINS_URL", "JENKINS_TOKEN"],
+    "jenkins": ["JENKINS_URL", "JENKINS_USER", "JENKINS_TOKEN"],
     "kafka_ui": ["KAFKA_UI_URL", "KAFKA_UI_USER", "KAFKA_UI_PASSWORD"],
     "db_probe": ["DB_USER", "DB_PASSWORD"],
     "vpn": ["FORTIVPN_HOST"],
@@ -70,25 +70,38 @@ def _appdata() -> str:
     return os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Roaming")
 
 
-def _load_json(path: str):
+def _load_json(path: str, want=dict):
+    """(data, error). JSON that parses but has the wrong top-level type is an error too."""
     try:
         with open(path, encoding="utf-8") as f:
-            return json.load(f), None
+            data = json.load(f)
     except FileNotFoundError:
         return None, "missing"
     except (OSError, ValueError) as e:
         return None, f"unreadable: {e}"
+    if not isinstance(data, want):
+        return None, f"invalid: top level is {type(data).__name__}, expected {want.__name__}"
+    return data, None
+
+
+def _nonempty_file(path: str) -> bool:
+    """Regular file with size > 0 — metadata only, the content is never opened."""
+    try:
+        return os.path.isfile(path) and os.stat(path).st_size > 0
+    except (OSError, ValueError):
+        return False
 
 
 # --------------------------------------------------------------------------- checks
 
 def check_env(root: str) -> dict:
-    env_file = os.environ.get("TOOLKIT_ENV_FILE") or os.path.join(root, ".env")
     groups = {}
     for name, keys in ENV_GROUPS.items():
         missing = [k for k in keys if not _get(k)]
         groups[name] = {"ok": not missing, "missing": missing}
-    return {"file": env_file, "file_exists": os.path.isfile(env_file), "groups": groups}
+    # report the file config.py really loaded (cwd .env first, then up from the tools dir)
+    loaded = getattr(config, "_ENV_PATH", None) if config is not None else None
+    return {"file": loaded or os.path.join(root, ".env"), "file_exists": bool(loaded), "groups": groups}
 
 
 def check_projects(root: str) -> dict:
@@ -97,18 +110,31 @@ def check_projects(root: str) -> dict:
     if err:
         return {"path": path, "ok": False, "error": err}
     projects = {}
-    for name, entry in (data or {}).items():
+    for name, entry in data.items():
         if not isinstance(entry, dict) or name.startswith("_"):
             continue
         clone = entry.get("clone_dir")
         info = {"clone_dir": clone}
-        if clone:
+        if isinstance(clone, str) and clone:
             d = _expand(clone)
             info["exists"] = os.path.isdir(d)
             info["git"] = os.path.exists(os.path.join(d, ".git"))
+        elif clone is not None:
+            info["invalid"] = True
         projects[name] = info
-    bad = [n for n, i in projects.items() if i.get("clone_dir") and not i.get("git")]
+    bad = [n for n, i in projects.items() if i.get("clone_dir") is not None and not i.get("git")]
     return {"path": path, "ok": not bad, "count": len(projects), "not_cloned": bad, "projects": projects}
+
+
+def _login_evidence(backend: str, env: dict) -> list:
+    """Login files this account would use (existence checked later, never read)."""
+    home = _expand(env.get("HOME") or env.get("USERPROFILE") or "~")
+    if backend == "codex":
+        return [os.path.join(_expand(env.get("CODEX_HOME") or os.path.join(home, ".codex")), "auth.json")]
+    if backend == "claude":
+        cfg = env.get("CLAUDE_CONFIG_DIR")
+        return [os.path.join(_expand(cfg) if cfg else os.path.join(home, ".claude"), ".credentials.json")]
+    return []
 
 
 def check_agents(root: str) -> dict:
@@ -117,15 +143,27 @@ def check_agents(root: str) -> dict:
     if err:
         return {"path": path, "ok": False, "error": err}
     accounts = {}
-    for backend, accs in ((data or {}).get("accounts") or {}).items():
-        for acc, spec in (accs or {}).items():
-            env = (spec or {}).get("env") or {}
+    by_backend = data.get("accounts")
+    for backend, accs in (by_backend.items() if isinstance(by_backend, dict) else ()):
+        for acc, spec in (accs.items() if isinstance(accs, dict) else ()):
+            env = spec.get("env") if isinstance(spec, dict) else None
+            env = {k: v for k, v in (env or {}).items() if isinstance(v, str)} if isinstance(env, dict) else {}
             dirs = {k: _expand(v) for k, v in env.items() if k in ACCOUNT_DIR_KEYS}
             missing = [k for k, d in dirs.items() if not os.path.isdir(d)]
-            accounts[f"{backend}@{acc}"] = {"ok": not missing, "missing_dirs": {k: dirs[k] for k in missing}}
+            evidence = _login_evidence(backend, env)
+            logged_in = any(_nonempty_file(p) for p in evidence) if evidence else None
+            accounts[f"{backend}@{acc}"] = {
+                "backend": backend, "cli": bool(shutil.which(backend)),
+                "ok": not missing and logged_in is True and bool(shutil.which(backend)),
+                "missing_dirs": {k: dirs[k] for k in missing}, "logged_in": logged_in}
     bad = [a for a, i in accounts.items() if not i["ok"]]
     return {"path": path, "ok": bool(accounts) and not bad, "count": len(accounts),
-            "unusable": bad, "accounts": accounts}
+            "usable": len(accounts) - len(bad), "unusable": bad, "accounts": accounts}
+
+
+def check_codex_login() -> dict:
+    p = os.path.join(_expand(os.environ.get("CODEX_HOME") or "~/.codex"), "auth.json")
+    return {"auth_file": p, "ok": _nonempty_file(p)}
 
 
 def check_ssh() -> dict:
@@ -133,11 +171,11 @@ def check_ssh() -> dict:
     keys = []
     if os.path.isdir(d):
         for p in glob.glob(os.path.join(d, "id_*")):
-            if not p.endswith(".pub") and os.path.isfile(p):
+            if not p.endswith(".pub") and _nonempty_file(p):
                 keys.append(os.path.basename(p))
     return {"dir": d, "ok": bool(keys), "private_keys": sorted(keys),
-            "config": os.path.isfile(os.path.join(d, "config")),
-            "known_hosts": os.path.isfile(os.path.join(d, "known_hosts"))}
+            "config": _nonempty_file(os.path.join(d, "config")),
+            "known_hosts": _nonempty_file(os.path.join(d, "known_hosts"))}
 
 
 def _registry_kubeconfigs(projects_path: str) -> list:
@@ -159,28 +197,55 @@ def _registry_kubeconfigs(projects_path: str) -> list:
     return sorted(set(found))
 
 
-def check_kube(root: str) -> dict:
+def _k8s():
     try:
         import k8s
-        lens_dirs, expand = k8s.lens_dirs(), k8s.expand_kubeconfig
+        return k8s
     except Exception:  # noqa: BLE001 — k8s.py optional here
-        lens_dirs, expand = [], _expand
+        return None
+
+
+def find_kubectl() -> str:
+    """Same order as k8s.find_kubectl: $KUBECTL_BIN > PATH > Lens bundled binaries."""
+    explicit = os.environ.get("KUBECTL_BIN", "")
+    if explicit:
+        return explicit if _nonempty_file(_expand(explicit)) or shutil.which(explicit) else ""
+    on_path = shutil.which("kubectl")
+    if on_path:
+        return on_path
+    k8s = _k8s()
+    try:
+        lens = k8s.lens_kubectls() if k8s else {}
+    except Exception:  # noqa: BLE001
+        lens = {}
+    return list(lens.values())[-1] if lens else ""
+
+
+def check_kube(root: str) -> dict:
+    k8s = _k8s()
+    lens_dirs = k8s.lens_dirs() if k8s else []
+    expand = k8s.expand_kubeconfig if k8s else _expand
     env_paths = [p for p in os.environ.get("KUBECONFIG", "").split(os.pathsep) if p]
     default = os.path.join(os.path.expanduser("~"), ".kube", "config")
     candidates = [_expand(p) for p in env_paths] or [default]
-    existing = [p for p in candidates if os.path.isfile(p)]
+    existing = [p for p in candidates if _nonempty_file(p)]
     lens = {}
     for d in lens_dirs:
-        files = glob.glob(os.path.join(d, "kubeconfigs", "*"))
-        if files:
-            lens[d] = len(files)
+        n = sum(1 for f in glob.glob(os.path.join(d, "kubeconfigs", "*")) if _nonempty_file(f))
+        if n:
+            lens[d] = n
     registry = {}
     for ref in _registry_kubeconfigs(os.path.join(_work_dir(root), "projects.json")):
-        registry[ref] = os.path.isfile(expand(ref))
+        try:
+            registry[ref] = _nonempty_file(expand(ref))
+        except Exception:  # noqa: BLE001
+            registry[ref] = False
     reg_missing = [r for r, ok in registry.items() if not ok]
-    return {"ok": bool(existing or lens) and not reg_missing, "kubeconfigs": existing,
+    usable = bool(existing or lens or any(registry.values()))
+    return {"ok": usable and not reg_missing, "usable": usable, "kubeconfigs": existing,
             "looked_at": candidates, "lens_kubeconfigs": lens,
-            "registry_refs": registry, "registry_missing": reg_missing}
+            "registry_refs": registry, "registry_missing": reg_missing,
+            "kubectl": find_kubectl()}
 
 
 def check_dbeaver() -> dict:
@@ -189,7 +254,8 @@ def check_dbeaver() -> dict:
         ws = dbeaver.workspace()
     except Exception:  # noqa: BLE001
         ws = os.environ.get("DBEAVER_WORKSPACE", "")
-    sources = glob.glob(os.path.join(ws, "*", ".dbeaver", "data-sources*.json")) if ws else []
+    sources = [p for p in glob.glob(os.path.join(ws, "*", ".dbeaver", "data-sources*.json"))
+               if _nonempty_file(p)] if ws else []
     return {"workspace": ws, "ok": bool(sources), "data_source_files": len(sources)}
 
 
@@ -199,7 +265,7 @@ def check_github() -> dict:
         cands.append(os.path.join(_appdata(), "GitHub CLI"))
     cands.append(os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config"), "gh"))
     hosts = next((os.path.join(c, "hosts.yml") for c in cands
-                  if c and os.path.isfile(os.path.join(c, "hosts.yml"))), None)
+                  if c and _nonempty_file(os.path.join(c, "hosts.yml"))), None)
     return {"gh": shutil.which("gh"), "hosts_file": hosts, "ok": bool(shutil.which("gh") and hosts)}
 
 
@@ -207,7 +273,7 @@ def check_files() -> dict:
     out = {}
     key_path = _get("FCHAT_PRIVATE_KEY_PATH")
     if key_path:
-        out["FCHAT_PRIVATE_KEY_PATH"] = {"path": key_path, "ok": os.path.isfile(_expand(key_path))}
+        out["FCHAT_PRIVATE_KEY_PATH"] = {"path": key_path, "ok": _nonempty_file(_expand(key_path))}
     return out
 
 
@@ -251,7 +317,7 @@ def features(r: dict) -> dict:
         "telegram": _feature({".env TELEGRAM_BOT_TOKEN": g["telegram"]["ok"]}, "copy .env"),
         "jenkins": _feature({".env JENKINS_*": g["jenkins"]["ok"]}, "copy .env"),
         "kafka_ui": _feature({".env KAFKA_UI_*": g["kafka_ui"]["ok"]}, "copy .env"),
-        "k8s": _feature({"kubectl (PATH or Lens)": clis["kubectl"] or bool(r["kube"]["lens_kubeconfigs"]),
+        "k8s": _feature({"kubectl (KUBECTL_BIN/PATH/Lens)": bool(r["kube"]["kubectl"]),
                          "kubeconfig": r["kube"]["ok"]},
                         "copy ~/.kube/config and/or <Lens>/kubeconfigs; install kubectl or Lens"),
         "podfwd_fetch": _feature({"oc": clis["oc"]}, "install oc (OpenShift CLI)"),
@@ -259,9 +325,12 @@ def features(r: dict) -> dict:
                                   "copy DBeaverData/workspace6; set DB_USER/DB_PASSWORD"),
         "vpn": _feature({".env FORTIVPN_HOST": g["vpn"]["ok"], "VPN client": r["vpn_client"]["ok"]},
                         "install FortiClient/openfortivpn; copy .env"),
-        "agent_accounts": _feature({"work/agents.json": r["agents"]["ok"], "claude CLI": clis["claude"]},
-                                   "copy work/agents.json and fix account dirs; log in to each account (Orca)"),
-        "codex_review": _feature({"codex CLI": clis["codex"]}, "install codex; copy ~/.codex or codex login"),
+        "agent_accounts": _feature({"work/agents.json": not r["agents"].get("error"),
+                                    "every account usable (CLI + login dir + credentials)": r["agents"]["ok"],
+                                    "at least one account usable": bool(r["agents"].get("usable"))},
+                                   "copy work/agents.json and fix account dirs; install the CLI; log in to each account (Orca)"),
+        "codex_review": _feature({"codex CLI": clis["codex"], "codex login": r["codex"]["ok"]},
+                                 "install codex; codex login (or copy ~/.codex/auth.json)"),
         "github": _feature({"gh login": r["github"]["ok"]}, "install gh; gh auth login"),
     }
 
@@ -273,13 +342,14 @@ def collect(root: str = None) -> dict:
         "env": check_env(root),
         "projects": check_projects(root),
         "agents": check_agents(root),
+        "codex": check_codex_login(),
         "ssh": check_ssh(),
         "kube": check_kube(root),
         "dbeaver": check_dbeaver(),
         "github": check_github(),
         "files": check_files(),
         "vpn_client": check_vpn_client(),
-        "clis": {c: bool(shutil.which(c)) for c in ("git", "kubectl") + EXTRA_CLIS},
+        "clis": {c: bool(shutil.which(c)) for c in ("git",) + EXTRA_CLIS},
     }
     r["features"] = features(r)
     return r
@@ -302,12 +372,15 @@ def human(r: dict) -> str:
     if a.get("error"):
         lines.append(f"  agents.json : {a['error']} — {a['path']}")
     else:
-        lines.append(f"  agents.json : {a['count']} tài khoản"
-                     + (f", thiếu thư mục login: {', '.join(a['unusable'])}" if a["unusable"] else ", đủ thư mục login"))
+        lines.append(f"  agents.json : {a['count']} tài khoản, dùng được {a['usable']}"
+                     + (f" — chưa dùng được (thiếu CLI/thư mục/đăng nhập): {', '.join(a['unusable'])}"
+                        if a["unusable"] else ""))
     s = r["ssh"]
     lines.append(f"  ~/.ssh      : {', '.join(s['private_keys']) or 'không có private key'}")
     k = r["kube"]
-    kube_desc = ", ".join(k["kubeconfigs"]) or "không có"
+    kube_desc = ", ".join(k["kubeconfigs"]) or "không có ~/.kube/config"
+    if k["registry_refs"]:
+        kube_desc += f" · registry: {sum(k['registry_refs'].values())}/{len(k['registry_refs'])} file có"
     if k["lens_kubeconfigs"]:
         kube_desc += f" · Lens: {sum(k['lens_kubeconfigs'].values())} file"
     if k["registry_missing"]:

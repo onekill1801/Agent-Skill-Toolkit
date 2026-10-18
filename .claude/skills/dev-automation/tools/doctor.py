@@ -81,6 +81,16 @@ def _terminal_for_os() -> dict:
             "found": term, "ok": term is not None}
 
 
+def _context():
+    """machine_context report; a failing probe must not take the rest of doctor down."""
+    if machine_context is None:
+        return None
+    try:
+        return machine_context.collect()
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
 def collect() -> dict:
     clis = {}
     for name, purpose in CLI_CHECKS.items():
@@ -105,7 +115,7 @@ def collect() -> dict:
         "clis": clis,
         "fork_terminal": _terminal_for_os(),
         "env": env_report,
-        "context": machine_context.collect() if machine_context else None,
+        "context": _context(),
     }
 
 
@@ -131,8 +141,11 @@ def _human(report: dict) -> str:
                   f"  dev-automation (Azure/GitLab): {'OK' if not miss else 'thiếu ' + ', '.join(miss)}",
                   f"  Jenkins: {'OK' if env.get('jenkins_configured') else 'chưa cấu hình'}",
                   f"  Kafka UI: {'OK' if env.get('kafka_ui_configured') else 'chưa cấu hình'}"]
-    if report.get("context"):
-        lines += ["", machine_context.human(report["context"])]
+    ctx = report.get("context")
+    if ctx and ctx.get("error"):
+        lines += ["", f"Bối cảnh máy: lỗi khi kiểm tra — {ctx['error']}"]
+    elif ctx:
+        lines += ["", machine_context.human(ctx)]
     return "\n".join(lines)
 
 

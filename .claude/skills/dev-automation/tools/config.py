@@ -19,6 +19,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 _ENV_LOADED = False
+_ENV_PATH = None  # the .env actually loaded (None = none found); read by machine_context.py
 
 
 def _strip_inline_comment(value: str) -> str:
@@ -34,7 +35,7 @@ def _strip_inline_comment(value: str) -> str:
 
 def _load_dotenv():
     """Parse .env file and inject into os.environ (only once)."""
-    global _ENV_LOADED
+    global _ENV_LOADED, _ENV_PATH
     if _ENV_LOADED:
         return
     _ENV_LOADED = True
@@ -51,6 +52,7 @@ def _load_dotenv():
         else:
             return
 
+    _ENV_PATH = env_path
     with open(env_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
