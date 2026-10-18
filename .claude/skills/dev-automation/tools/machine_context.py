@@ -140,13 +140,20 @@ def _login_evidence(backend: str, env: dict) -> list:
     The runner starts the CLI with the process env + the account's overrides, so inherited
     CODEX_HOME / CLAUDE_CONFIG_DIR count unless the account overrides them."""
     eff = {**os.environ, **env}
-    home = _expand(env.get("HOME") or env.get("USERPROFILE") or "~")
+    home = env.get("HOME") or env.get("USERPROFILE") or os.path.expanduser("~")
     if backend == "codex":
-        return [os.path.join(_expand(eff.get("CODEX_HOME") or os.path.join(home, ".codex")), "auth.json")]
+        return [os.path.join(eff.get("CODEX_HOME") or os.path.join(home, ".codex"), "auth.json")]
     if backend == "claude":
         cfg = eff.get("CLAUDE_CONFIG_DIR")
-        return [os.path.join(_expand(cfg) if cfg else os.path.join(home, ".claude"), ".credentials.json")]
+        return [os.path.join(cfg or os.path.join(home, ".claude"), ".credentials.json")]
     return []
+
+
+def account_env(spec) -> dict:
+    """Account env exactly as agent_runner._account_env passes it to the CLI: expanduser only,
+    no $VAR expansion (no shell), so a "$HOME/x" value is what the CLI really gets."""
+    env = spec.get("env") if isinstance(spec, dict) else None
+    return {k: os.path.expanduser(str(v)) for k, v in env.items()} if isinstance(env, dict) else {}
 
 
 def check_agents(root: str) -> dict:
@@ -158,9 +165,8 @@ def check_agents(root: str) -> dict:
     by_backend = data.get("accounts")
     for backend, accs in (by_backend.items() if isinstance(by_backend, dict) else ()):
         for acc, spec in (accs.items() if isinstance(accs, dict) else ()):
-            env = spec.get("env") if isinstance(spec, dict) else None
-            env = {k: v for k, v in (env or {}).items() if isinstance(v, str)} if isinstance(env, dict) else {}
-            dirs = {k: _expand(v) for k, v in env.items() if k in ACCOUNT_DIR_KEYS}
+            env = account_env(spec)
+            dirs = {k: v for k, v in env.items() if k in ACCOUNT_DIR_KEYS}
             missing = [k for k, d in dirs.items() if not os.path.isdir(d)]
             evidence = _login_evidence(backend, env)
             logged_in = any(_nonempty_file(p) for p in evidence) if evidence else None
@@ -223,9 +229,10 @@ def find_kubectl() -> str:
     if explicit:
         if _executable(_expand(explicit)):
             return _expand(explicit)
-        return shutil.which(explicit) or ""
+        found = shutil.which(explicit)
+        return found if found and _executable(found) else ""
     on_path = shutil.which("kubectl")
-    if on_path:
+    if on_path and _executable(on_path):
         return on_path
     k8s = _k8s()
     try:

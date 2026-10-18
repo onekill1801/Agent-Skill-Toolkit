@@ -186,6 +186,26 @@ class MachineContextTest(unittest.TestCase):
             os.environ["KUBECTL_BIN"] = empty
             self.assertEqual(mc.find_kubectl(), "")
 
+    def test_empty_executable_on_path_rejected(self):
+        empty = self._bin(os.path.join("pathbin", "kubectl"), "")
+        fake = mock.Mock(lens_dirs=lambda: [], expand_kubeconfig=mc._expand, lens_kubectls=lambda: {})
+        with mock.patch.object(mc, "_k8s", lambda: fake), mock.patch.object(mc.shutil, "which", lambda c: empty):
+            self.assertEqual(mc.find_kubectl(), "")                      # PATH hit is empty
+            os.environ["KUBECTL_BIN"] = "kubectl"
+            self.assertEqual(mc.find_kubectl(), "")                      # KUBECTL_BIN resolved via PATH
+
+    def test_account_env_matches_agent_runner(self):
+        sys.path.insert(0, os.path.abspath(os.path.join(_HERE, "..", ".claude", "skills", "auto-dev", "tools")))
+        import agent_runner
+        spec = {"env": {"CODEX_HOME": "$HOME/account", "CLAUDE_CONFIG_DIR": "~/c", "N": 1}}
+        cfg = {"accounts": {"codex": {"a": spec}}}
+        self.assertEqual(mc.account_env(spec), agent_runner._account_env(cfg, "codex", "a"))
+        # "$HOME/account" is passed literally (no shell) -> a login under the expanded dir must not count
+        self.write(os.path.join(self.home, "account", "auth.json"), "t")
+        self.write("work/agents.json", {"accounts": {"codex": {"a": spec}}})
+        with mock.patch.object(mc.shutil, "which", lambda c: f"/bin/{c}"):
+            self.assertFalse(mc.check_agents(self.root)["accounts"]["codex@a"]["ok"])
+
     def test_inherited_login_env_counts(self):
         codex_home = os.path.join(self.tmp, "custom-codex")
         self.write(os.path.join(codex_home, "auth.json"), "t")
