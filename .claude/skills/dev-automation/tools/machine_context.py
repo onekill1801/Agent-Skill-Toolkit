@@ -307,7 +307,10 @@ def check_github() -> dict:
                                   or os.path.join(os.path.expanduser("~"), ".config"), "gh"))
     hosts = next((os.path.join(c, "hosts.yml") for c in cands
                   if c and _nonempty_file(os.path.join(c, "hosts.yml"))), None)
-    return {"gh": shutil.which("gh"), "hosts_file": hosts, "ok": bool(shutil.which("gh") and hosts)}
+    # gh also authenticates from GH_TOKEN / GITHUB_TOKEN (presence only, value never reported)
+    token_env = next((k for k in ("GH_TOKEN", "GITHUB_TOKEN") if os.environ.get(k, "").strip()), None)
+    return {"gh": shutil.which("gh"), "hosts_file": hosts, "token_env": token_env,
+            "ok": bool(shutil.which("gh") and (hosts or token_env))}
 
 
 def check_files() -> dict:

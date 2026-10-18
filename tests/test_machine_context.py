@@ -31,7 +31,7 @@ class MachineContextTest(unittest.TestCase):
                "APPDATA": os.path.join(self.home, "appdata"), "XDG_CONFIG_HOME": os.path.join(self.home, "cfg"),
                "DBEAVER_WORKSPACE": os.path.join(self.home, "dbeaver")}
         clean = {k: v for k, v in os.environ.items()
-                 if k not in {"KUBECONFIG", "GH_CONFIG_DIR", "TOOLKIT_ENV_FILE", "CODEX_HOME", "KUBECTL_BIN", "CLAUDE_CONFIG_DIR"}
+                 if k not in {"KUBECONFIG", "GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN", "TOOLKIT_ENV_FILE", "CODEX_HOME", "KUBECTL_BIN", "CLAUDE_CONFIG_DIR"}
                  and not any(k in keys for keys in mc.ENV_GROUPS.values()) and k != "FCHAT_PRIVATE_KEY_PATH"}
         clean.update(env)
         self.env = mock.patch.dict(os.environ, clean, clear=True)
@@ -286,6 +286,18 @@ class MachineContextTest(unittest.TestCase):
             self.assertTrue(mc.check_github()["ok"])
             os.environ["GH_CONFIG_DIR"] = os.path.join(self.tmp, "fresh-gh")
             self.assertFalse(mc.check_github()["ok"])
+
+    def test_gh_token_env_counts_without_leaking(self):
+        with mock.patch.object(mc.shutil, "which", lambda c, **k: "/bin/gh"):
+            self.assertFalse(mc.check_github()["ok"])
+            for key in ("GH_TOKEN", "GITHUB_TOKEN"):
+                os.environ[key] = "ghp_secretvalue"
+                g = mc.check_github()
+                self.assertTrue(g["ok"])
+                self.assertEqual(g["token_env"], key)
+                r = mc.collect(self.root)
+                self.assertNotIn("ghp_secretvalue", json.dumps(r) + mc.human(r))
+                os.environ.pop(key)
 
     def test_invalid_project_entry_is_not_ok(self):
         self.write("work/projects.json", {"_comment": "x", "p": "broken"})
