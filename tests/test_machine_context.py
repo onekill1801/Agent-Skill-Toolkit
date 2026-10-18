@@ -215,6 +215,30 @@ class MachineContextTest(unittest.TestCase):
         with mock.patch.object(mc, "_k8s", lambda: fake), mock.patch.object(mc.shutil, "which", lambda c, **k: None):
             self.assertEqual(mc.find_kubectl(), "")                      # runtime would pick broken 1.28
 
+    def test_pinned_kubectl_version_follows_runtime(self):
+        v28 = self._bin(os.path.join("l", "1.28", "kubectl"))
+        v29 = self._bin(os.path.join("l", "1.29", "kubectl"), "")
+        lens = {"1.28": v28, "1.29": v29}
+        fake = mock.Mock(lens_dirs=lambda: [], expand_kubeconfig=mc._expand, lens_kubectls=lambda: lens)
+        self.write(os.path.join(self.home, ".kube", "config"), "apiVersion: v1")
+        self.write("work/projects.json", {"p": {"environments": {"dev": {"k8s": {"kubectl_version": "1.28"}}}}})
+        with mock.patch.object(mc, "_k8s", lambda: fake), mock.patch.object(mc.shutil, "which", lambda c, **k: None):
+            self.assertEqual(mc.find_kubectl("1.28"), v28)
+            self.assertEqual(mc.find_kubectl(), "")                      # unpinned -> broken newest
+            self.assertEqual(mc.collect(self.root)["features"]["k8s"]["state"], "ready")
+            lens.update({"1.28": self._bin(os.path.join("l", "1.28b", "kubectl"), ""),
+                         "1.29": self._bin(os.path.join("l", "1.29b", "kubectl"))})
+            self.assertEqual(mc.find_kubectl(), lens["1.29"])
+            self.assertEqual(mc.collect(self.root)["features"]["k8s"]["state"], "partial")   # pinned one broken
+
+    def test_broken_path_kubectl_has_no_lens_fallback(self):
+        broken = self._bin(os.path.join("pb", "kubectl"), "")
+        good = self._bin(os.path.join("l", "1.28", "kubectl"))
+        fake = mock.Mock(lens_dirs=lambda: [], expand_kubeconfig=mc._expand, lens_kubectls=lambda: {"1.28": good})
+        with mock.patch.object(mc, "_k8s", lambda: fake), mock.patch.object(mc.shutil, "which", lambda c, **k: broken):
+            self.assertEqual(mc.find_kubectl(), "")
+            self.assertEqual(mc.find_kubectl("1.28"), good)
+
     def test_empty_executable_on_path_rejected(self):
         empty = self._bin(os.path.join("pathbin", "kubectl"), "")
         fake = mock.Mock(lens_dirs=lambda: [], expand_kubeconfig=mc._expand, lens_kubectls=lambda: {})

@@ -209,14 +209,15 @@ def check_ssh() -> dict:
             "known_hosts": _nonempty_file(os.path.join(d, "known_hosts"))}
 
 
-def _registry_kubeconfigs(projects_path: str) -> list:
+def _registry_kubeconfigs(projects_path: str, key: str = "kubeconfig") -> list:
+    """Every string value of `key` anywhere in projects.json (kubeconfig, kubectl_version)."""
     data, err = _load_json(projects_path)
     found = []
 
     def walk(o):
         if isinstance(o, dict):
             for k, v in o.items():
-                if k == "kubeconfig" and isinstance(v, str):
+                if k == key and isinstance(v, str) and v:
                     found.append(v)
                 else:
                     walk(v)
@@ -236,8 +237,9 @@ def _k8s():
         return None
 
 
-def find_kubectl() -> str:
-    """Same order as k8s.find_kubectl: $KUBECTL_BIN > PATH > Lens bundled binaries."""
+def find_kubectl(want_version: str = "") -> str:
+    """The binary k8s.find_kubectl(want_version) would run — "" if that one is unusable.
+    Order: $KUBECTL_BIN > Lens binary of the pinned version > PATH > newest Lens binary."""
     explicit = os.environ.get("KUBECTL_BIN", "")
     if explicit:
         # k8s.py hands $KUBECTL_BIN to subprocess verbatim (no shell): no ~ / $VAR expansion here
@@ -246,14 +248,16 @@ def find_kubectl() -> str:
             return explicit if _executable(explicit) else ""
         found = shutil.which(explicit)
         return found if found and _executable(found) else ""
-    on_path = shutil.which("kubectl")
-    if on_path and _executable(on_path):
-        return on_path
     k8s = _k8s()
     try:
         lens = k8s.lens_kubectls() if k8s else {}
     except Exception:  # noqa: BLE001
         lens = {}
+    if want_version and want_version in lens:
+        return lens[want_version] if _executable(lens[want_version]) else ""
+    on_path = shutil.which("kubectl")
+    if on_path:  # runtime uses the PATH hit even if broken -> no fallback here either
+        return on_path if _executable(on_path) else ""
     # runtime takes the newest Lens binary (no fallback) -> judge exactly that one
     newest = list(lens.values())[-1] if lens else ""
     return newest if newest and _executable(newest) else ""
@@ -280,10 +284,13 @@ def check_kube(root: str) -> dict:
             registry[ref] = False
     reg_missing = [r for r, ok in registry.items() if not ok]
     usable = bool(existing or lens or any(registry.values()))
+    pinned = {v: find_kubectl(v) for v in _registry_kubeconfigs(
+        os.path.join(_work_dir(root), "projects.json"), "kubectl_version")}
     return {"ok": usable and not reg_missing, "usable": usable, "kubeconfigs": existing,
             "looked_at": candidates, "lens_kubeconfigs": lens,
             "registry_refs": registry, "registry_missing": reg_missing,
-            "kubectl": find_kubectl()}
+            "kubectl": find_kubectl(), "kubectl_pinned": pinned,
+            "kubectl_ok": all(pinned.values()) if pinned else bool(find_kubectl())}
 
 
 def check_dbeaver() -> dict:
@@ -361,7 +368,7 @@ def features(r: dict) -> dict:
         "telegram": _feature({".env TELEGRAM_BOT_TOKEN": g["telegram"]["ok"]}, "copy .env"),
         "jenkins": _feature({".env JENKINS_*": g["jenkins"]["ok"]}, "copy .env"),
         "kafka_ui": _feature({".env KAFKA_UI_*": g["kafka_ui"]["ok"]}, "copy .env"),
-        "k8s": _feature({"kubectl (KUBECTL_BIN/PATH/Lens)": bool(r["kube"]["kubectl"]),
+        "k8s": _feature({"kubectl (KUBECTL_BIN/PATH/Lens, pinned versions)": r["kube"]["kubectl_ok"],
                          "kubeconfig": r["kube"]["ok"]},
                         "copy ~/.kube/config and/or <Lens>/kubeconfigs; install kubectl or Lens"),
         "podfwd_fetch": _feature({"oc": clis["oc"]}, "install oc (OpenShift CLI)"),
