@@ -54,7 +54,8 @@ def _match(rel: str, globs) -> bool:
 # `<secret-ish name> = "value"` / `name: value` / `name=value` anywhere on a line
 _ASSIGNED = re.compile(r"(?i)(\w*(?:password|passwd|pwd|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|"
                        r"credential)s?\w*[\"']?\s*(?:[:=]|=>)\s*)"
-                       r"(\"(?:[^\"\\]|\\.)*(?:\"|\\?$)|'(?:[^'\\]|\\.)*(?:'|\\?$)|[^\s,;)}\]\"']+)")   # escapes (R2 #1, R3 #1)
+                       r"(\"(?:[^\"\\]|\\.)*(?:\"|\\?$)|'(?:[^'\\]|\\.)*(?:'|\\?$)|`(?:[^`\\]|\\.)*(?:`|\\?$)|"
+                       r"[^\s,;)}\]\"'`]+)")   # escapes, template literals (R2 #1, R3 #1, R4 #1)
 
 
 def redact(text: str, spans=None) -> str:
@@ -76,7 +77,7 @@ def redact(text: str, spans=None) -> str:
 
     def value(m):
         v = m.group(2)
-        q = v[0] if v[:1] in "\"'" else ""
+        q = v[0] if v[:1] in "\"'`" else ""
         closed = bool(q) and len(v) > 1 and v.endswith(q) and not v.endswith("\\" + q)
         inner = v[1:-1] if closed else v[1:] if q else v
         if q and not closed:                              # unterminated: masked to the end of the line
@@ -233,13 +234,38 @@ def flatten_config(rel: str, text: str) -> list:
     return out
 
 
-_JSON_PAIR = re.compile(r"\"([\w.\-]+)\"\s*:\s*\"((?:[^\"\\]|\\.)*)\"")
+_JSON_TOKEN = re.compile(r'"((?:[^"\\]|\\.)*)"|([{}\[\]:,])|[^\s{}\[\]:,"]+')
 
 
 def _json_pairs(text: str) -> list:
-    """[(line_no, key, value)] of "key": "string" pairs of a JSON file (key = last segment)."""
-    return [(n, m.group(1), m.group(2)) for n, line in enumerate(text.splitlines(), 1)
-            for m in _JSON_PAIR.finditer(line)]
+    """[(line_no, key, value, parent_key)] of every "key": "string" member of a JSON document, with the key
+    of the object that holds it (structural, per occurrence — Codex security R4 #2). Tolerant: a broken file
+    still yields what can be tokenized."""
+    out, stack, expect_key, key = [], [], False, None      # stack [(kind, name)]
+    line, pos = 1, 0
+    for m in _JSON_TOKEN.finditer(text):
+        line += text.count("\n", pos, m.start())
+        pos = m.start()
+        tok_str, punct = m.group(1), m.group(2)
+        in_obj = bool(stack) and stack[-1][0] == "{"
+        if punct in ("{", "["):
+            stack.append((punct, key if in_obj else (stack[-1][1] if stack else None)))
+            expect_key, key = punct == "{", None
+        elif punct in ("}", "]"):
+            if stack:
+                stack.pop()
+            expect_key, key = False, None
+        elif punct == ",":
+            expect_key, key = in_obj, None
+        elif punct == ":":
+            pass
+        elif tok_str is not None and in_obj and expect_key:
+            key, expect_key = tok_str, False
+        else:
+            if tok_str is not None and in_obj and key is not None:
+                out.append((line, key, tok_str, stack[-1][1]))
+            key = None
+    return out
 
 
 def _is_prod_config(rel: str) -> bool:
@@ -265,31 +291,12 @@ _DEP_SECTIONS = {"dependencies", "devDependencies", "peerDependencies", "optiona
                  "bundledDependencies", "resolutions", "overrides", "require", "require-dev"}
 
 
-def _dependency_entries(text: str) -> set:
-    """{(name, version)} declared in the dependency sections of a manifest (package.json / composer.json…):
-    only those may carry a version range under a secret-looking name. Unparsable JSON exempts nothing."""
-    try:
-        doc = json.loads(text)
-    except ValueError:
-        return set()
-    out = set()
-
-    def walk(node, parent):
-        if isinstance(node, dict):
-            for k, v in node.items():
-                if isinstance(v, str) and parent in _DEP_SECTIONS:
-                    out.add((k, v))
-                walk(v, k)
-    walk(doc, "")
-    return out
-
-
 def _key_findings(rel: str, text: str) -> list:
     out = []
     lines = text.splitlines()
-    pairs = _json_pairs(text) if rel.endswith(".json") else flatten_config(rel, text)
-    deps = _dependency_entries(text) if rel.rsplit("/", 1)[-1] in DEP_MANIFESTS else set()
-    for n, key, value in pairs:
+    manifest = rel.rsplit("/", 1)[-1] in DEP_MANIFESTS
+    pairs = _json_pairs(text) if rel.endswith(".json") else [p + (None,) for p in flatten_config(rel, text)]
+    for n, key, value, parent in pairs:
         for r in R.KEY_RULES:
             if r.prod_only and not _is_prod_config(rel):
                 continue
@@ -300,8 +307,8 @@ def _key_findings(rel: str, text: str) -> list:
             if r.id == "SEC-003":
                 if is_test(rel) or secret_value(value) is None:
                     continue
-                if (key, value) in deps and R.VERSION_RANGE.match(value.strip()):
-                    continue                              # "registry-auth-token": "^3.4.0" (R2 #6, R3 #3)
+                if manifest and parent in _DEP_SECTIONS and R.VERSION_RANGE.match(value.strip()):
+                    continue                              # "registry-auth-token": "^3.4.0" (R2 #6, R3 #3, R4 #2)
             elif not r.value.search(value):
                 continue
             if _ignored(lines, n - 1, r.id):
@@ -315,15 +322,20 @@ def _unless_near(rule, code: list, i: int, m) -> bool:
     """Is THIS match `m` (on code line i) hardened right next to it (same or next 15 lines of code, comments
     stripped) — not anywhere in the file (R1 #11)? A `{var}` exemption applies to the variable this match
     assigned, with the protective value written in the pattern; an unassigned (chained) call is never exempt
-    (R2 #5). Each match of a line is judged on its own (R3 #2)."""
+    (R2 #5). Each match is judged on its own, on the code AFTER it, up to a reassignment of its variable
+    (R3 #2, R4 #3)."""
     if not rule.unless_src:
         return False
-    window = "\n".join(code[i:i + 16])
+    window = "\n".join([code[i][m.start():]] + code[i + 1:i + 16])    # from THIS match on (R4 #3)
     if rule.unless is not None:
         return bool(rule.unless.search(window))
     var = m.groupdict().get("var")
     if not var:
         return False
+    window = window[m.end() - m.start():]
+    again = re.search(r"\b" + re.escape(var) + r"\s*=(?!=)", window)     # reassigned: later hardening is not for it
+    if again:
+        window = window[:again.start()]
     return bool(re.search(rule.unless_src.replace("{var}", re.escape(var)), window, re.I))
 
 

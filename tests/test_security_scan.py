@@ -359,5 +359,33 @@ class CodexRound3Test(Base):
         self.assertEqual([f["text"].split(":")[0] for f in sec], ["password"])
 
 
+class CodexRound4Test(Base):
+    def test_r4_1_template_literal_is_masked(self):
+        self.put("web/a.js", "eval(input); const password = `abc TAILSECRET9`;\n")
+        res = S.scan(self.repo)
+        self.assertIn("JS-001", self.rules_of(res))
+        self.assertNotIn("TAILSECRET", json.dumps(res))
+
+    def test_r4_2_dependency_context_is_per_occurrence(self):
+        self.put("web/package.json",
+                 '{"dependencies": {"auth-token": "1.2.3"},\n "config": {"auth-token": "1.2.3"}}\n')
+        sec = [f["line"] for f in S.scan(self.repo)["findings"] if f["rule"] == "SEC-003"]
+        self.assertEqual(sec, [2])
+        pairs = S._json_pairs('{"a": {"b": "x", "c": [{"d": "y"}]}, "e": "z"}')
+        self.assertEqual([(k, v, p) for _, k, v, p in pairs], [("b", "x", "a"), ("d", "y", "c"), ("e", "z", None)])
+
+    def test_r4_3_hardening_before_a_reassigned_factory_does_not_count(self):
+        self.put("src/main/java/x/X.java",
+                 "class X { void parse(InputStream input) throws Exception { "
+                 "DocumentBuilderFactory f = DocumentBuilderFactory.newInstance(); "
+                 "f.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true); f = DocumentBuilderFactory.newInstance(); "
+                 "f.newDocumentBuilder().parse(input); } }\n")
+        self.assertIn("XXE-001", self.rules_of(S.scan(self.repo)))
+        self.put("src/main/java/x/X.java",
+                 "class X { void parse() { DocumentBuilderFactory f = DocumentBuilderFactory.newInstance();\n"
+                 "  f.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true); } }\n")
+        self.assertNotIn("XXE-001", self.rules_of(S.scan(self.repo)))
+
+
 if __name__ == "__main__":
     unittest.main()
