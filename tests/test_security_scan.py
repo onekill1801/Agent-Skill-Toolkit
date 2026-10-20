@@ -378,15 +378,25 @@ class CodexRound6Test(Base):
         self.assertNotIn("TAILSECRET", json.dumps(res))
         self.assertEqual(S.redact('x.password = "${DB_PASSWORD}";'), 'x.password = "${DB_PASSWORD}";')
         self.assertEqual(S.redact("token: abc"), "token: abc")
-        self.assertEqual(S.redact('password = "Hunter2xyz"; e.printStackTrace();'), 'password = "Hun…')
+        self.assertEqual(S.redact('password = "Hunter2xyz"; e.printStackTrace();'), 'password = "Hun…"')
 
     def test_r7_1_bracket_call_and_flag_forms_are_masked(self):
         self.put("web/a.js", 'eval(input); credentials[ "password" ] = "Hunter2Secret9";\n')
         res = S.scan(self.repo)
         self.assertIn("JS-001", self.rules_of(res))
         self.assertNotIn("Secret9", json.dumps(res))
+        self.put("src/main/java/x/M.java",
+                 'class M { void a() { mailSender.setPassword("Hunter2Secret9"); '
+                 "// TODO security: load password from vault\n } }\n")
+        res = S.scan(self.repo)
+        self.assertIn("GEN-003", self.rules_of(res))
+        self.assertNotIn("Secret9", json.dumps(res))
+        self.assertEqual(S.redact("String p = user.getPassword();"), "String p = user.getPassword();")
         for line in ('credentials["password"] = "Hunter2Secret9";',
                      "creds[ 'token' ]\t=\t'Hunter2Secret9'",
+                     'builder.apiKey ( "Hunter2Secret9" )',
+                     'auth(token -> "Hunter2Secret9")',
+                     'new Creds(user, /* password */ "Hunter2Secret9")',
                      'm.put( "password" , "Hunter2Secret9" )',
                      "cfg['api_key'] = 'Hunter2Secret9'",
                      'headers.put("X-Auth-Token", "Hunter2Secret9");',

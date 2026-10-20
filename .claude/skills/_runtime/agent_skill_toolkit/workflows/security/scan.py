@@ -55,9 +55,12 @@ def _match(rel: str, globs) -> bool:
 # value as far as showing goes — parsing the expression (escapes, templates, concatenation…) kept leaking
 # (Codex security R2–R6), so the rest of the line is masked unless it is only one bare `${NAME}` / ≤3 chars
 _SECRET_WORD = r"(?:password|passwd|pwd|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|credential)"
-# name forms: x.password = · obj["password"] = · password: · "password", "v" (put/set/header) · --password v
-_ASSIGNED = re.compile(r"(?i)((?:[\w.\-]*" + _SECRET_WORD + r"[\w.\-]*(?:\s*[\"'`\])])*\s*(?:[:=]|=>|,)|"
+# name forms: x.password = · obj["password"] = · password: · "password", "v" (put/set/header) ·
+# setPassword("v") (R9 #1) · --password v
+_ASSIGNED = re.compile(r"(?i)((?:[\w.\-]*" + _SECRET_WORD + r"[\w.\-]*(?:\s*[\"'`\])])*\s*(?:[:=]|=>|,|\()|"
                        r"--?[\w-]*" + _SECRET_WORD + r"[\w-]*(?:\s+|=))\s*)(\S.*)$")   # (R7 #1)
+_SECRET_WORD_RE = re.compile(_SECRET_WORD, re.I)
+_LITERAL = re.compile(r"([\"'`])((?:(?!\1)[^\\]|\\.)*)(?:\1|\\?$)")
 _HARMLESS = re.compile(r"([\"'`]?)(?:\$\{[\w.\-]+\}|[^\"'`\s]{0,3})\1\s*[;,)}\]]*\s*")
 
 
@@ -84,7 +87,14 @@ def redact(text: str, spans=None) -> str:
             return m.group(0)
         q = v[0] if v[0] in "\"'`" else ""
         return m.group(1) + v[:len(q) + 3] + "…"
-    return _ASSIGNED.sub(value, out)
+    out = _ASSIGNED.sub(value, out)
+    # belt and braces, whatever the syntax: after a secret word, every string literal > 3 chars keeps 3
+    w = _SECRET_WORD_RE.search(out)
+    if w:
+        out = out[:w.end()] + _LITERAL.sub(lambda s: s.group(0)
+                                           if len(s.group(2)) <= 3 or re.fullmatch(r"\$\{[\w.\-]+\}", s.group(2))
+                                           else s.group(1) + s.group(2)[:3] + "…" + s.group(1), out[w.end():])
+    return out
 
 
 def fingerprint(rule: str, rel: str, text: str, occurrence: int = 0) -> str:
