@@ -380,6 +380,16 @@ class CodexRound6Test(Base):
         self.assertEqual(S.redact("token: abc"), "token: abc")
         self.assertEqual(S.redact('password = "Hunter2xyz"; e.printStackTrace();'), 'password = "Hun…')
 
+    def test_r7_1_bracket_call_and_flag_forms_are_masked(self):
+        for line in ('credentials["password"] = "Hunter2Secret9";',
+                     "cfg['api_key'] = 'Hunter2Secret9'",
+                     'headers.put("X-Auth-Token", "Hunter2Secret9");',
+                     "props.setProperty(\"db.password\", \"Hunter2Secret9\");",
+                     "mysql --password Hunter2Secret9 -h db",
+                     "run --client-secret=Hunter2Secret9",
+                     "this.password = 'Hunter2Secret9'"):
+            self.assertNotIn("Secret9", S.redact(line), line)
+
     def test_r4_2_dependency_context_is_per_occurrence(self):
         self.put("web/package.json",
                  '{"dependencies": {"auth-token": "1.2.3"},\n "config": {"auth-token": "1.2.3"}}\n')
