@@ -188,5 +188,107 @@ class HistoryAndBaselineTest(Base):
         self.assertEqual(T.main(["scan", "--repo", os.path.join(self.repo, "nope")]), 2)
 
 
+class CodexRound1Test(Base):
+    """Regressions of Codex security review round 1 (one test per finding)."""
+
+    def test_r1_1_any_finding_text_is_redacted(self):
+        self.put("src/main/java/x/A.java",
+                 'class A { void a(){ String password = "Hunter2Abc9"; e.printStackTrace(); } }\n')
+        res = S.scan(self.repo)
+        self.assertIn("GEN-002", self.rules_of(res))
+        self.assertNotIn("Hunter2Abc9", json.dumps(res, ensure_ascii=False))
+
+    def test_r1_2_history_failure_is_a_gap_not_clean(self):
+        self.put("src/main/java/x/A.java", "class A {}\n")          # not a git repo
+        res = S.scan(self.repo, history=True)
+        self.assertTrue(res["gaps"])
+        self.assertEqual(T.main(["scan", "--repo", self.repo, "--history"]), 3)
+
+    def test_r1_3_long_lines_chunked_and_oversized_is_a_gap(self):
+        self.put("dist2/app.js", "x" * 9000 + " k='" + GL + "' " + "y" * 3000 + "\n")
+        res = S.scan(self.repo)
+        self.assertIn("SEC-002", self.rules_of(res))
+        self.assertNotIn(GL, json.dumps(res))
+        old = S.MAX_FILE
+        S.MAX_FILE = 100
+        try:
+            res = S.scan(self.repo)
+        finally:
+            S.MAX_FILE = old
+        self.assertTrue(any(g["path"] == "dist2/app.js" for g in res["gaps"]))
+        self.assertEqual(T.main(["scan", "--repo", self.repo]), 1)   # the long-line token, high
+
+    def test_r1_4_env_and_json_credentials(self):
+        self.put("deploy/.env." + "prod", "export DB_PASSWORD=RealPass123\n")
+        self.put("config/creds.json", '{\n  "client_secret": "S3cr3tValue99"\n}\n')
+        res = S.scan(self.repo)
+        files = {f["file"] for f in res["findings"] if f["rule"] == "SEC-003"}
+        self.assertEqual(files, {"deploy/.env.prod", "config/creds.json"})
+        self.put("package-lock.json", '{\n  "requires": {\n    "registry-auth-token": "^3.4.0"\n  }\n}\n')
+        self.put("config/deps.json", '{\n  "auth-token": "^3.4.0"\n}\n')
+        res = S.scan(self.repo)
+        files = {f["file"] for f in res["findings"] if f["rule"] == "SEC-003"}
+        self.assertEqual(files, {"deploy/.env.prod", "config/creds.json"})       # lockfile / version: not secrets
+        blob = json.dumps(res)
+        self.assertNotIn("RealPass123", blob)
+        self.assertNotIn("S3cr3tValue99", blob)
+
+    def test_r1_5_placeholder_default_is_evaluated(self):
+        self.put("src/main/resources/config/application.yml",
+                 "spring:\n  datasource:\n    password: ${DB_PASSWORD:RealDefault9}\n"
+                 "    username: ${DB_USER}\napp:\n  token: ${APP_TOKEN:}\n")
+        sec = [f for f in S.scan(self.repo)["findings"] if f["rule"] == "SEC-003"]
+        self.assertEqual(len(sec), 1)
+        self.assertNotIn("RealDefault9", json.dumps(sec))
+
+    def test_r1_6_any_method_mapping_judged_per_method(self):
+        self.put("src/main/java/x/SecurityConfiguration.java",
+                 'class SecurityConfiguration { void c(HttpSecurity http) { http.authorizeRequests()\n'
+                 '  .antMatchers(HttpMethod.POST, "/api/hook/**").permitAll()\n'
+                 '  .antMatchers("/api/**").authenticated(); } }\n')
+        self.put("src/main/java/x/HookResource.java",
+                 '@RestController\npublic class HookResource {\n'
+                 '    @RequestMapping("/api/hook/run")\n    public void run() { }\n}\n')
+        res = S.scan(self.repo)
+        authz = [f for f in res["findings"] if f["rule"].startswith("AUTHZ")]
+        self.assertEqual([f["rule"] for f in authz], ["AUTHZ-004"])     # its POST is public
+        self.assertIn("POST", authz[0]["detail"])
+
+    def test_r1_7_identical_lines_get_distinct_fingerprints(self):
+        self.put("src/main/java/x/A.java",
+                 "class A {\n void a(){ e.printStackTrace(); }\n void b(){ e.printStackTrace(); }\n}\n")
+        fps = [f["fp"] for f in S.scan(self.repo)["findings"] if f["rule"] == "GEN-002"]
+        self.assertEqual(len(set(fps)), 2)
+
+    def test_r1_8_yaml_lists_and_block_scalars(self):
+        flat = S.flatten_config("a.yml", "a:\n  list:\n    - x\n    - y\n  s: |\n    l1\n    l2\n"
+                                         "users:\n  - name: u\n    password: Pw12345678\nb: [1, 2]\n")
+        self.assertEqual([(k, v) for _, k, v in flat],
+                         [("a.list", "x"), ("a.list", "y"), ("a.s", "l1 l2"), ("users.name", "u"),
+                          ("users.password", "Pw12345678"), ("b", "1"), ("b", "2")])
+
+    def test_r1_9_prod_region_profile_is_prod(self):
+        self.assertTrue(S._is_prod_config("src/main/resources/config/application-prod-us.yml"))
+        self.assertFalse(S._is_prod_config("src/main/resources/config/application-dev.yml"))
+
+    def test_r1_10_tls_flag_polarity(self):
+        self.put("src/main/resources/config/application.yml",
+                 "a:\n  verify-ssl: false\nb:\n  insecure-skip-tls-verify: true\n"
+                 "c:\n  insecure-skip-tls-verify: false\nd:\n  verify-ssl: true\n")
+        hits = sorted((f["rule"], f["line"]) for f in S.scan(self.repo)["findings"]
+                      if f["rule"] in ("CFG-007", "CFG-009"))
+        self.assertEqual(hits, [("CFG-007", 2), ("CFG-009", 4)])
+
+    def test_r1_11_xxe_hardening_must_be_near_the_factory(self):
+        far = "\n".join(["    void pad%d() { }" % i for i in range(30)])
+        self.put("src/main/java/x/X.java",
+                 "class X {\n  void a() { DocumentBuilderFactory f = DocumentBuilderFactory.newInstance(); }\n"
+                 + far + '\n  void b(DocumentBuilderFactory g) { g.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true); }\n'
+                 "  void c() { SAXParserFactory s = SAXParserFactory.newInstance();\n"
+                 '    s.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true); }\n}\n')
+        xxe = [f["line"] for f in S.scan(self.repo)["findings"] if f["rule"] == "XXE-001"]
+        self.assertEqual(xxe, [2])
+
+
 if __name__ == "__main__":
     unittest.main()

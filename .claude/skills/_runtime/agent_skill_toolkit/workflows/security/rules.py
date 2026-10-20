@@ -1,7 +1,7 @@
 """Line rules of the security standard (security-audit/cookbook/standard.md — same ids).
 
-A rule matches ONE line (regex) of files selected by glob; `unless` (regex) on the same FILE cancels it
-(e.g. an XML parser factory in a file that also sets the secure-processing feature). Severities:
+A rule matches ONE line (regex) of files selected by glob; `unless` (regex) within the matched line and
+the next 15 code lines cancels it (e.g. an XML parser factory hardened right after it is created). Severities:
 high (exploitable / secret exposed) · medium (likely weakness, needs a fix or a reason) · low (hygiene) ·
 info (inventory for a human / the agent audit — never fails a scan).
 
@@ -170,7 +170,7 @@ class KeyRule:
 
 # a value that is NOT a real secret: empty, a placeholder / env reference, an obvious dummy
 NOT_A_SECRET = re.compile(r"^\s*$|^\$\{|^<.*>$|^(?:null|none|~|changeit|xxx+|\*+|your[-_].*|example.*|dummy)$|"
-                          r"^ENC\(", re.I)
+                          r"^ENC\(|^[\^~>=<]*\d+(?:\.[\dx*]+)+(?:[-+][\w.]+)?$", re.I)   # ... or a version range
 
 KEY_RULES = [
     KeyRule("SEC-003", "high", "secret", "Mật khẩu / secret ghi thẳng trong file cấu hình",
@@ -194,8 +194,11 @@ KEY_RULES = [
             r"^logging\.level(?:\.[\w.-]+)?$", r"^\s*['\"]?(?:DEBUG|TRACE)\b",
             "Dùng INFO/WARN ở prod (log DEBUG thường chứa dữ liệu nhạy cảm).", prod_only=True),
     KeyRule("CFG-007", "medium", "config", "Tắt kiểm chứng chỉ TLS",
-            r"(?:verify[-_]?ssl|ssl[-_]?verify|verify[-_]?certs?|insecure[-_]?skip[-_]?tls[-_]?verify)$",
+            r"(?:verify[-_]?ssl|ssl[-_]?verify|verify[-_]?certs?)$",
             r"^\s*['\"]?false\b", "Bật kiểm chứng; dùng truststore nội bộ cho CA riêng."),
+    KeyRule("CFG-009", "medium", "config", "Cờ 'insecure' bật: bỏ kiểm chứng chỉ TLS",
+            r"(?:insecure[-_]?skip[-_]?tls[-_]?verify|insecure[-_]?ssl|tls[-_]?insecure|(?:^|\.)insecure)$",
+            r"^\s*['\"]?true\b", "Tắt cờ insecure; dùng truststore nội bộ cho CA riêng."),
     KeyRule("CFG-008", "medium", "config", "CORS cho phép mọi origin",
             r"cors\.allowed[-_]?origins?(?:-patterns)?$", r"^\s*['\"]?\*",
             "Liệt kê origin cụ thể; không dùng * cùng allow-credentials."),

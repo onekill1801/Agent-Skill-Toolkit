@@ -165,33 +165,58 @@ def _ant(pattern: str):
     return re.compile("^" + p + "$")
 
 
+_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
+_WORST = {"AUTHZ-002": 0, "AUTHZ-004": 1, "AUTHZ-001": 2, "AUTHZ-003": 3, None: 9}
+
+
+def _first_rule(compiled, method, sample):
+    for r, pats in compiled:
+        if r["methods"] and method not in r["methods"]:
+            continue
+        if any(p.match(sample) for p in pats):
+            return r
+    return None
+
+
+def _outcome(ep, method, hit):
+    if hit is None:
+        return "AUTHZ-002", "không rule HttpSecurity nào khớp"
+    if hit["access"] in ("permitAll", "anonymous"):
+        write = method in ("POST", "PUT", "PATCH", "DELETE")
+        return ("AUTHZ-004" if write and not ep["method_auth"] else "AUTHZ-001"), \
+            f"permitAll tại {hit['file']}:{hit['line']}"
+    if hit["access"] in ("authenticated", "fullyAuthenticated", "rememberMe") and ep["id_params"] \
+            and not ep["method_auth"]:
+        return "AUTHZ-003", "tham số id: " + ", ".join(ep["id_params"])
+    return None, ""
+
+
 def classify(eps: list, rules: list) -> tuple:
-    """(endpoints with their access, findings). An endpoint path that is a constant is not matched."""
+    """(endpoints with their access, findings). An endpoint path that is a constant is not matched.
+    A mapping without a method (ANY) is judged once per HTTP method and keeps the WORST outcome: a rule
+    scoped to GET must not make its POST look protected (Codex security R1 #6)."""
     compiled = [(r, [_ant(p) for p in r["patterns"]]) for r in rules]
     findings = []
     for ep in eps:
         sample = _PATH_VAR.sub("x", ep["path"])
-        hit = None
-        if not sample.startswith("/${"):
-            for r, pats in compiled:
-                if r["methods"] and ep["method"] not in r["methods"] and ep["method"] != "ANY":
-                    continue
-                if any(p.match(sample) for p in pats):
-                    hit = r
-                    break
-        ep["access"] = (hit["access"] + (f"({hit['arg']})" if hit and hit.get("arg") else "")) if hit else None
-        ep["rule_at"] = f"{hit['file']}:{hit['line']}" if hit else None
-        where = {"file": ep["file"], "line": ep["line"],
-                 "text": f"{ep['method']} {ep['path']} -> {ep['handler']}()"}
         if sample.startswith("/${"):
+            ep["access"], ep["rule_at"] = None, None
             continue                                       # path from a constant: not resolvable offline
-        if hit is None:
-            findings.append({"rule": "AUTHZ-002", **where, "detail": "không rule HttpSecurity nào khớp"})
-        elif hit["access"] in ("permitAll", "anonymous"):
-            write = ep["method"] in ("POST", "PUT", "PATCH", "DELETE", "ANY")
-            findings.append({"rule": "AUTHZ-004" if write and not ep["method_auth"] else "AUTHZ-001", **where,
-                             "detail": f"permitAll tại {ep['rule_at']}"})
-        elif hit["access"] in ("authenticated", "fullyAuthenticated", "rememberMe") and ep["id_params"] \
-                and not ep["method_auth"]:
-            findings.append({"rule": "AUTHZ-003", **where, "detail": "tham số id: " + ", ".join(ep["id_params"])})
+        methods = _METHODS if ep["method"] == "ANY" else (ep["method"],)
+        per = []
+        for m in methods:
+            hit = _first_rule(compiled, m, sample)
+            rid, detail = _outcome(ep, m, hit)
+            per.append((_WORST[rid], m, hit, rid, detail))
+        _, m, hit, rid, detail = min(per, key=lambda x: x[0])
+        label = lambda h: (h["access"] + (f"({h['arg']})" if h.get("arg") else "")) if h else None
+        accesses = {label(h) for _, _, h, _, _ in per}
+        ep["access"] = label(hit) if len(accesses) == 1 else \
+            "; ".join(f"{mm}={label(h)}" for _, mm, h, _, _ in per)
+        ep["rule_at"] = f"{hit['file']}:{hit['line']}" if hit else None
+        if rid:
+            if ep["method"] == "ANY":
+                detail += f" (method {m})"
+            findings.append({"rule": rid, "file": ep["file"], "line": ep["line"],
+                             "text": f"{ep['method']} {ep['path']} -> {ep['handler']}()", "detail": detail})
     return eps, findings

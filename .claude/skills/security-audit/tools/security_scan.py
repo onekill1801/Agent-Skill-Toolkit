@@ -7,7 +7,8 @@
     python security_scan.py endpoints --repo work/etask [--format text|json] [--public|--unprotected|--ids]
     python security_scan.py rules                                       # the catalog (ids = the standard)
 
-Exit code of `scan`: 0 = no NEW finding at/above --fail-on (default high) · 1 = there are · 2 = error.
+Exit code of `scan`: 0 = no NEW finding at/above --fail-on (default high) · 1 = there are · 2 = error ·
+3 = no failing finding but the scan is INCOMPLETE (a file or the git history could not be analysed).
 Baseline: <repo>/.agent/security-baseline.json (fingerprints of accepted findings; a moved line keeps its
 fingerprint). Nothing is sent anywhere; credential values are masked in every output.
 """
@@ -73,8 +74,20 @@ def render_text(res: dict, include_info: bool) -> str:
     hidden = sum(1 for f in res["findings"] if f["severity"] == "info")
     if hidden and not include_info:
         lines.append(f"(+{hidden} mục info — endpoint nhận id cần kiểm quyền sở hữu, CSRF tắt… — thêm --include-info)")
+    lines += render_gaps(res)
     lines.append("Cách sửa từng mã: .claude/skills/security-audit/cookbook/standard.md")
     return "\n".join(lines)
+
+
+def render_gaps(res: dict) -> list:
+    gaps = res.get("gaps") or []
+    if not gaps:
+        return []
+    out = [f"⚠ QUÉT CHƯA ĐỦ — {len(gaps)} chỗ không phân tích được (kết quả KHÔNG có nghĩa là sạch):"]
+    out += [f"  {g['path']}: {g['reason']}" for g in gaps[:30]]
+    if len(gaps) > 30:
+        out.append(f"  … +{len(gaps) - 30}")
+    return out + [""]
 
 
 def render_md(res: dict, include_info: bool) -> str:
@@ -90,7 +103,8 @@ def render_md(res: dict, include_info: bool) -> str:
               (f" ({f['detail']})" if f.get("detail") else "")
         lines.append(f"| {SEV_ICON[f['severity']]} {f['severity']}{'' if f.get('status') == 'new' else ' (đã biết)'} "
                      f"| {f['rule']} | {loc} | {txt} | {f['fix']} |")
-    return "\n".join(lines)
+    gaps = render_gaps(res)
+    return "\n".join(lines + ([""] + gaps if gaps else []))
 
 
 def render_endpoints(eps: list, which: str) -> str:
@@ -159,7 +173,8 @@ def main(argv=None) -> int:
         with open(path, "w", encoding="utf-8", newline="\n") as f:
             json.dump(doc, f, ensure_ascii=False, indent=2)
             f.write("\n")
-        print(json.dumps({"baseline": path, "accepted": len(doc["accepted"])}, ensure_ascii=False))
+        print(json.dumps({"baseline": path, "accepted": len(doc["accepted"]), "gaps": len(res["gaps"])},
+                         ensure_ascii=False))
         return 0
     S.apply_baseline(res["findings"], load_baseline(path))
     failing = S.gate(res["findings"], a.fail_on)
@@ -173,10 +188,11 @@ def main(argv=None) -> int:
     if a.out:
         with open(a.out, "w", encoding="utf-8") as f:
             f.write(out + "\n")
-        print(f"Đã ghi báo cáo: {a.out} · {len(failing)} vấn đề MỚI mức ≥ {a.fail_on}")
+        print(f"Đã ghi báo cáo: {a.out} · {len(failing)} vấn đề MỚI mức ≥ {a.fail_on}"
+              + (f" · QUÉT CHƯA ĐỦ ({len(res['gaps'])} chỗ)" if res["gaps"] else ""))
     else:
         print(out)
-    return 1 if failing else 0
+    return 1 if failing else 3 if res["gaps"] else 0
 
 
 if __name__ == "__main__":

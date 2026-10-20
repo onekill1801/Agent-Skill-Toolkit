@@ -20,9 +20,11 @@ python $T/security_scan.py baseline --repo work/etask --note "hiện trạng 202
 python $T/security_scan.py rules                                     # danh sách mã
 ```
 - **Baseline** (`<repo>/.agent/security-baseline.json`): lưu dấu vân tay các lỗi đã biết → các lần sau chỉ
-  chặn lỗi **mới**. Dấu vân tay = mã + file + nội dung dòng (dời dòng không mất). Nên commit file này.
+  chặn lỗi **mới**. Dấu vân tay = mã + file + nội dung dòng + thứ tự xuất hiện của dòng giống hệt (dời dòng không mất; thêm một
+  dòng y hệt = lỗi mới). Nên commit file này.
 - **Bỏ qua có lý do** ngay tại dòng: `// security-audit: ignore INJ-001 tên bảng lấy từ enum cố định`.
-- Không gửi gì ra ngoài; secret luôn bị che trong báo cáo (giữ 3 ký tự đầu).
+- Không gửi gì ra ngoài; secret luôn bị che trong báo cáo (giữ 3 ký tự đầu) — ở **mọi** mã lỗi, không chỉ mã secret.
+- Endpoint `@RequestMapping` không ghi method được xét **từng method** (GET/POST/PUT/PATCH/DELETE), lấy kết quả xấu nhất.
 
 ## Quy trình soát một project
 1. `scan` → sửa mọi 🔴. Secret đã commit: **đổi/thu hồi trước**, xoá code sau (đã lộ là lộ).
@@ -30,7 +32,8 @@ python $T/security_scan.py rules                                     # danh sác
 3. `endpoints --public` → mỗi endpoint công khai phải có lý do + cơ chế xác thực khác (PAT, chữ ký webhook…).
 4. `endpoints --ids` → với mỗi endpoint nhận id: đọc service, xác nhận có kiểm quyền trên **đúng đối tượng**.
 5. Xử lý 🟡 hoặc ghi `security-audit: ignore` kèm lý do; chạy `baseline` khi đã chốt hiện trạng.
-6. Từ đó: `scan` trước mỗi MR (exit 1 = có lỗi mới mức ≥ `--fail-on`).
+6. Từ đó: `scan` trước mỗi MR (exit 1 = có lỗi mới mức ≥ `--fail-on`; exit 3 = **quét chưa đủ** — file quá lớn/
+   không đọc được hoặc `git log` lỗi: KHÔNG được coi là sạch; exit 2 = lỗi).
 
 ---
 
@@ -52,7 +55,7 @@ quyền), **export/download/attachment** (thường quên), và **id trong body*
 |---|---|---|---|
 | SEC-001 | 🔴 | Private key trong repo | Thu hồi key, xoá khỏi repo + lịch sử, nạp từ vault/biến môi trường |
 | SEC-002 | 🔴 | Token dạng đã biết (GitLab `glpat-`, GitHub, AWS `AKIA`, Slack, Google, OpenAI, **JWT `eyJ…`**) — kể cả trong Postman collection / tài liệu | Thu hồi; tài liệu dùng `{{token}}` |
-| SEC-003 | 🔴 | Khoá cấu hình `*password*/*secret*/*token*/*api-key*…` có giá trị thật | `${ENV_VAR}`, Spring Cloud Config, Jasypt `ENC(...)`; đổi giá trị đã commit |
+| SEC-003 | 🔴 | Khoá cấu hình `*password*/*secret*/*token*/*api-key*…` có giá trị thật (YAML/properties/`.env`/JSON; **kể cả giá trị mặc định** trong `${VAR:mặc-định}`) | `${ENV_VAR}` không mặc định, Spring Cloud Config, Jasypt `ENC(...)`; đổi giá trị đã commit |
 | SEC-004 | 🟡 | Secret gán cứng trong code Java/TS | Đọc từ cấu hình |
 | SEC-005 | 🔴 | Hash mật khẩu mặc định JHipster (`admin/admin`, `user/user`) | Đổi mật khẩu / xoá user mẫu khỏi changelog chạy ở prod |
 | HIST-* | 🔴 | Secret xuất hiện trong **lịch sử git** (`--history`) | Đổi/thu hồi; xoá lịch sử (`git filter-repo`) nếu repo được chia sẻ |
@@ -77,6 +80,7 @@ mở cho mọi user, gateway route thử, file `*.http`/Postman chứa token th�
 | CFG-003 | 🟡 | Swagger / api-docs bật ở prod | Tắt hoặc chỉ ADMIN |
 | CFG-008 / CFG-005 | 🟡 | CORS `*` (YAML / Java) | Liệt kê origin; không `*` cùng credentials |
 | CFG-007 | 🟡 | Tắt kiểm chứng chỉ TLS (`verify-ssl: false`…) | Truststore có CA nội bộ |
+| CFG-009 | 🟡 | Cờ insecure bật (`insecure-skip-tls-verify: true`…) | Tắt cờ; truststore có CA nội bộ |
 | CFG-004 | 🔵 | `show-sql: true` ở prod | Tắt |
 | CFG-006 | 🔵 | Log `DEBUG/TRACE` ở prod | INFO/WARN |
 
