@@ -64,6 +64,7 @@ SPAWNERS = {
     "agent_skill_toolkit.workflows.proposal.scan": "git log for hotspots",
     "agent_skill_toolkit.workflows.proposal.flow": "git rev-parse for the input key",
     "agent_skill_toolkit.workflows.execution.agent_call": "agent_runner",
+    "agent_skill_toolkit.workflows.security.scan": "git log -p for secrets in history (security audit)",
 }
 SPAWN_CALLS = {"subprocess.run", "subprocess.Popen", "subprocess.call", "subprocess.check_call",
                "subprocess.check_output", "os.system", "os.popen", "proc.run", "ctx.run", "os.startfile"}
