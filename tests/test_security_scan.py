@@ -381,7 +381,8 @@ class CodexRound6Test(Base):
         self.assertEqual(S.redact('password = "Hunter2xyz"; e.printStackTrace();'), 'password = "Hun…"')
 
     def test_r7_1_bracket_call_and_flag_forms_are_masked(self):
-        self.put("web/a.js", 'eval(input); credentials[ "password" ] = "Hunter2Secret9";\n')
+        self.put("web/a.js", 'eval(input); credentials[ "password" ] = "Hunter2Secret9";\n'
+                             'eval(input); const value = name === "password" ? "Hunter2Secret9" : "";\n')
         res = S.scan(self.repo)
         self.assertIn("JS-001", self.rules_of(res))
         self.assertNotIn("Secret9", json.dumps(res))

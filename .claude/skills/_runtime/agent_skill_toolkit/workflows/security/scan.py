@@ -89,11 +89,15 @@ def redact(text: str, spans=None) -> str:
         return m.group(1) + v[:len(q) + 3] + "…"
     out = _ASSIGNED.sub(value, out)
     # belt and braces, whatever the syntax: after a secret word, every string literal > 3 chars keeps 3
+    # (literals tokenized from the START of the line so quote context is right — R10 #1)
     w = _SECRET_WORD_RE.search(out)
     if w:
-        out = out[:w.end()] + _LITERAL.sub(lambda s: s.group(0)
-                                           if len(s.group(2)) <= 3 or re.fullmatch(r"\$\{[\w.\-]+\}", s.group(2))
-                                           else s.group(1) + s.group(2)[:3] + "…" + s.group(1), out[w.end():])
+        def lit(s):
+            body = s.group(2)
+            if s.end() <= w.start() or len(body) <= 3 or re.fullmatch(r"\$\{[\w.\-]+\}", body):
+                return s.group(0)
+            return s.group(1) + body[:3] + "…" + s.group(1)
+        out = _LITERAL.sub(lit, out)
     return out
 
 
