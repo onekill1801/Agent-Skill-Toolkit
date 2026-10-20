@@ -368,6 +368,18 @@ class CodexRound4Test(Base):
         self.assertNotIn("TAILSECRET", json.dumps(res))
         self.assertEqual(S.redact('password: "${DB_PASSWORD}"'), 'password: "${DB_PASSWORD}"')
 
+
+class CodexRound6Test(Base):
+    def test_r6_1_whole_assigned_expression_is_masked(self):
+        self.put("web/a.js", 'eval(input); const password = "abc" + "TAILSECRET9";\n'
+                             "eval(input); const apiKey = cfg.k || 'TAILSECRET8' + x;\n")
+        res = S.scan(self.repo)
+        self.assertEqual(self.rules_of(res).count("JS-001"), 2)
+        self.assertNotIn("TAILSECRET", json.dumps(res))
+        self.assertEqual(S.redact('x.password = "${DB_PASSWORD}";'), 'x.password = "${DB_PASSWORD}";')
+        self.assertEqual(S.redact("token: abc"), "token: abc")
+        self.assertEqual(S.redact('password = "Hunter2xyz"; e.printStackTrace();'), 'password = "Hun…')
+
     def test_r4_2_dependency_context_is_per_occurrence(self):
         self.put("web/package.json",
                  '{"dependencies": {"auth-token": "1.2.3"},\n "config": {"auth-token": "1.2.3"}}\n')

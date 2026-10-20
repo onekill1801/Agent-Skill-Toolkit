@@ -51,11 +51,12 @@ def _match(rel: str, globs) -> bool:
 
 # ----------------------------------------------------------------------------- redaction
 
-# `<secret-ish name> = "value"` / `name: value` / `name=value` anywhere on a line
+# `<secret-ish name> = …` / `name: …` / `name=…` anywhere on a line: EVERYTHING after the operator is the
+# value as far as showing goes — parsing the expression (escapes, templates, concatenation…) kept leaking
+# (Codex security R2–R6), so the rest of the line is masked unless it is only one bare `${NAME}` / ≤3 chars
 _ASSIGNED = re.compile(r"(?i)(\w*(?:password|passwd|pwd|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|"
-                       r"credential)s?\w*[\"']?\s*(?:[:=]|=>)\s*)"
-                       r"(\"(?:[^\"\\]|\\.)*(?:\"|\\?$)|'(?:[^'\\]|\\.)*(?:'|\\?$)|`(?:[^`\\]|\\.)*(?:`|\\?$)|"
-                       r"[^\s,;)}\]\"'`]+)")   # escapes, template literals (R2 #1, R3 #1, R4 #1)
+                       r"credential)s?\w*[\"']?\s*(?:[:=]|=>)\s*)(\S.*)$")
+_HARMLESS = re.compile(r"([\"'`]?)(?:\$\{[\w.\-]+\}|[^\"'`\s]{0,3})\1\s*[;,)}\]]*\s*")
 
 
 def redact(text: str, spans=None) -> str:
@@ -77,14 +78,10 @@ def redact(text: str, spans=None) -> str:
 
     def value(m):
         v = m.group(2)
-        q = v[0] if v[:1] in "\"'`" else ""
-        closed = bool(q) and len(v) > 1 and v.endswith(q) and not v.endswith("\\" + q)
-        inner = v[1:-1] if closed else v[1:] if q else v
-        if q and not closed:                              # unterminated: masked to the end of the line
-            return m.group(1) + q + inner[:3] + "…"
-        if len(inner) <= 3 or re.fullmatch(r"\$\{[\w.\-]+\}", inner):   # ONE bare placeholder only (R5 #1)
+        if _HARMLESS.fullmatch(v):
             return m.group(0)
-        return m.group(1) + q + inner[:3] + "…" + q
+        q = v[0] if v[0] in "\"'`" else ""
+        return m.group(1) + v[:len(q) + 3] + "…"
     return _ASSIGNED.sub(value, out)
 
 
