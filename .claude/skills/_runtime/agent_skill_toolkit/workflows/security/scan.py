@@ -88,16 +88,16 @@ def redact(text: str, spans=None) -> str:
         q = v[0] if v[0] in "\"'`" else ""
         return m.group(1) + v[:len(q) + 3] + "…"
     out = _ASSIGNED.sub(value, out)
-    # belt and braces, whatever the syntax: after a secret word, every string literal > 3 chars keeps 3
-    # (literals tokenized from the START of the line so quote context is right — R10 #1)
-    w = _SECRET_WORD_RE.search(out)
-    if w:
-        def lit(s):
-            body = s.group(2)
-            if s.end() <= w.start() or len(body) <= 3 or re.fullmatch(r"\$\{[\w.\-]+\}", body):
-                return s.group(0)
-            return s.group(1) + body[:3] + "…" + s.group(1)
-        out = _LITERAL.sub(lit, out)
+    # belt and braces, whatever the syntax: a line that names a secret is cut at its first quote character
+    # unless every literal on it is harmless (≤3 chars / one bare ${NAME}) — tokenizing literals of arbitrary
+    # code (regex literals, templates, nesting…) cannot be done reliably by regex (Codex security R9–R11)
+    if _SECRET_WORD_RE.search(out):
+        lits = list(_LITERAL.finditer(out))
+        harmless = all(len(s.group(2)) <= 3 or re.fullmatch(r"\$\{[\w.\-]+\}", s.group(2)) for s in lits)
+        if not harmless or re.search(r"[\"'`]", _LITERAL.sub("", out)):
+            q = re.search(r"[\"'`]", out)
+            if q:
+                out = out[:q.end()] + "…"
     return out
 
 
