@@ -82,7 +82,7 @@ def redact(text: str, spans=None) -> str:
         inner = v[1:-1] if closed else v[1:] if q else v
         if q and not closed:                              # unterminated: masked to the end of the line
             return m.group(1) + q + inner[:3] + "…"
-        if len(inner) <= 3 or inner.startswith("${") and inner.endswith("}") and ":" not in inner:
+        if len(inner) <= 3 or re.fullmatch(r"\$\{[\w.\-]+\}", inner):   # ONE bare placeholder only (R5 #1)
             return m.group(0)
         return m.group(1) + q + inner[:3] + "…" + q
     return _ASSIGNED.sub(value, out)

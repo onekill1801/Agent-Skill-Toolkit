@@ -361,10 +361,12 @@ class CodexRound3Test(Base):
 
 class CodexRound4Test(Base):
     def test_r4_1_template_literal_is_masked(self):
-        self.put("web/a.js", "eval(input); const password = `abc TAILSECRET9`;\n")
+        self.put("web/a.js", "eval(input); const password = `abc TAILSECRET9`;\n"
+                             "eval(input); const token = `${prefix}TAILSECRET8${suffix}`;\n")
         res = S.scan(self.repo)
         self.assertIn("JS-001", self.rules_of(res))
         self.assertNotIn("TAILSECRET", json.dumps(res))
+        self.assertEqual(S.redact('password: "${DB_PASSWORD}"'), 'password: "${DB_PASSWORD}"')
 
     def test_r4_2_dependency_context_is_per_occurrence(self):
         self.put("web/package.json",
