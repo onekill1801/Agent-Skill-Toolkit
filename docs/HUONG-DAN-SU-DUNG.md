@@ -307,6 +307,22 @@ python $T/dev-automation/tools/dbeaver.py probe "Folder/Tên kết nối" --sql 
 ```
 `probe_db`: MySQL (`mysql_native_password`) / PostgreSQL, không TLS — DB bắt buộc TLS thì dùng DBeaver. PROD chỉ đọc.
 
+### 4.12 Kiểm bảo mật một project (quy chuẩn + máy quét, offline)
+
+Quy chuẩn: `.claude/skills/security-audit/cookbook/standard.md` (mỗi lỗi có mã, mức, cách sửa). Máy quét chỉ đọc
+file + `git log`, **không gửi gì ra ngoài**, secret luôn bị che trong báo cáo.
+```bash
+python agentkit.py security_scan scan --repo work/etask                       # báo cáo text
+python agentkit.py security_scan scan --repo work/etask --format md --out temp/etask-security.md
+python agentkit.py security_scan scan --repo work/etask --history             # + secret trong 300 commit gần nhất
+python agentkit.py security_scan endpoints --repo work/etask --public         # endpoint công khai (permitAll)
+python agentkit.py security_scan endpoints --repo work/etask --ids            # nhận id, chỉ cần đăng nhập → soát BOLA
+python agentkit.py security_scan baseline --repo work/etask --note "hiện trạng"   # chấp nhận lỗi cũ → chỉ chặn lỗi MỚI
+```
+Mã thoát: `0` sạch (so với baseline) · `1` có lỗi MỚI mức ≥ `--fail-on` (mặc định high) · `2` lỗi · `3` **quét chưa
+đủ** (file quá lớn / không đọc được / git lỗi — đừng coi là sạch). Bỏ qua có lý do ngay tại dòng:
+`// security-audit: ignore INJ-001 tên bảng lấy từ enum`. Secret đã commit: **đổi/thu hồi trước**, xoá sau.
+
 ## 5. Gỡ rối
 
 | Hiện tượng | Nguyên nhân thường gặp | Làm gì |

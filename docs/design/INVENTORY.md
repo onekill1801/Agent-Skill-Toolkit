@@ -40,6 +40,10 @@
 | `agent_skill_toolkit.workflows.refactor.program` | workflows.refactor |
 | `agent_skill_toolkit.workflows.refactor.ratchet` | workflows.refactor |
 | `agent_skill_toolkit.workflows.refactor.survey` | workflows.refactor |
+| `agent_skill_toolkit.workflows.security` | workflows.security |
+| `agent_skill_toolkit.workflows.security.rules` | workflows.security |
+| `agent_skill_toolkit.workflows.security.scan` | workflows.security |
+| `agent_skill_toolkit.workflows.security.spring` | workflows.security |
 | `agent_skill_toolkit.workflows.settings` | workflows.settings |
 | `agent_skill_toolkit.workflows.verify` | workflows.verify |
 | `agent_skill_toolkit.workflows.verify.ladder` | workflows.verify |
@@ -86,7 +90,7 @@
 - `('agent_skill_toolkit.workflows.verify.ladder', 'refactor.py')` → `tells the human how to (re)record a snapshot`
 - `('agent_skill_toolkit.workflows.verify.unittest_junit', 'unittest_junit.py')` → `its own argparse prog name`
 
-## Tool của skill (111 file; 16 là vỏ dùng runtime)
+## Tool của skill (113 file; 17 là vỏ dùng runtime)
 
 | Skill | Tool | Vỏ runtime | Lệnh con | Dòng |
 |---|---|---|---|---|
@@ -126,11 +130,11 @@
 | dev-automation | `cg.py` |  | analyze, prepare, status | 331 |
 | dev-automation | `claude_account_rotation.py` |  |  | 408 |
 | dev-automation | `code_context.py` |  | affected, callers, impact, locate, status, trace | 423 |
-| dev-automation | `config.py` |  |  | 122 |
+| dev-automation | `config.py` |  |  | 124 |
 | dev-automation | `daemon_common.py` |  | status | 236 |
 | dev-automation | `dashboard.py` | ✅ | serve, snapshot | 453 |
 | dev-automation | `dbeaver.py` |  | forwards, list, probe, show | 226 |
-| dev-automation | `doctor.py` |  |  | 142 |
+| dev-automation | `doctor.py` |  |  | 167 |
 | dev-automation | `feedback.py` |  | add, recall, stats | 280 |
 | dev-automation | `flow_check.py` |  |  | 247 |
 | dev-automation | `gitlab_api.py` |  |  | 366 |
@@ -138,6 +142,7 @@
 | dev-automation | `k8s.py` |  | access, contexts, deploys, describe, doctor, events, forwards, get, logs, pods | 673 |
 | dev-automation | `kafka_ui.py` |  | clusters, login-check, messages, produce, topic, topics | 347 |
 | dev-automation | `local_app.py` |  | logs, prep-java, start, status, stop, wait-health | 331 |
+| dev-automation | `machine_context.py` |  |  | 494 |
 | dev-automation | `mr_watch.py` |  |  | 358 |
 | dev-automation | `mysql_client.py` |  |  | 267 |
 | dev-automation | `notifier.py` |  |  | 128 |
@@ -182,6 +187,7 @@
 | remote-control | `telegram_approve.py` |  |  | 159 |
 | remote-control | `telegram_bridge.py` |  |  | 615 |
 | remote-control | `tg_api.py` |  |  | 278 |
+| security-audit | `security_scan.py` | ✅ | baseline, endpoints, rules, scan | 200 |
 | tchat-automation | `auth.py` |  |  | 105 |
 | tchat-automation | `client.py` |  |  | 115 |
 | tchat-automation | `common.py` |  |  | 63 |
@@ -202,7 +208,7 @@
 | tchat-automation | `ws_client.py` |  |  | 147 |
 | team-registry | `team.py` |  | bootstrap, get, list, match, remove, set | 223 |
 
-## Test: 40 file, 770 hàm test
+## Test: 42 file, 838 hàm test
 
 - `test_account_balance.py`
 - `test_accounts.py`
@@ -226,6 +232,7 @@
 - `test_isolation_guard.py`
 - `test_k8s.py`
 - `test_layering.py`
+- `test_machine_context.py`
 - `test_mr_review.py`
 - `test_orca_adapter.py`
 - `test_proposals.py`
@@ -234,6 +241,7 @@
 - `test_review_flow.py`
 - `test_run_log.py`
 - `test_safety_net.py`
+- `test_security_scan.py`
 - `test_settings.py`
 - `test_store_engine.py`
 - `test_supervise.py`

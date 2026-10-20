@@ -16,6 +16,7 @@ Mục tiêu: giải phóng người dùng khỏi công việc lặp lại (đọ
     atask-automation/       # aTask: task/sprint/checklist/analytics (PAT auth)
     fork-terminal/          # Spawn agent khác (Claude/Codex/Gemini) ra terminal mới
     skill-scaffold/         # Meta-skill: trích tool từ app khác → sinh skill mới
+    security-audit/         # Quy chuẩn bảo mật + máy quét offline repo sản phẩm (endpoint, secret, cấu hình prod…)
     mr-review/              # Hàng đợi review MR: worktree đúng diff_refs → review.json → DUYỆT → đăng
   hooks/guard_write.py      # PreToolUse: lệnh ghi/notify/đọc secret → hỏi (headless → chặn)
 .claude-plugin/ .codex-plugin/   # manifest plugin (Orca/Claude/Codex nhận skill ở .claude/skills)
@@ -163,6 +164,7 @@ Khi tắt SSL verify → cảnh báo người dùng.
 Toolkit chạy trên cả 3 OS. Kiểm tra mức sẵn sàng của máy:
 ```
 python dev-automation/tools/doctor.py        # (hoặc python3) — báo OS, Python, CLI có/thiếu, feature nào chạy được
+python agentkit.py security_scan scan --repo work/etask [--history] [--format md --out F] | baseline | endpoints --public|--ids   # KIỂM BẢO MẬT offline theo security-audit/cookbook/standard.md (secret luôn che; exit 1 = lỗi MỚI, 3 = quét chưa đủ)
 python agentkit.py machine_context [--json]  # bối cảnh máy ngoài git: .env theo nhóm, work/*.json, ~/.ssh, kubeconfig/Lens, DBeaver, gh, tài khoản agent — chỉ kiểm tồn tại, không đọc giá trị bí mật
 ```
 

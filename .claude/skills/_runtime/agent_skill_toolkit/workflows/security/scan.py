@@ -1,4 +1,4 @@
-"""Offline security scan of a product repo (checklist F.23) — rules.py + spring.py + a baseline.
+"""Offline security scan of a product repo (checklist F.24) — rules.py + spring.py + a baseline.
 
     scan(repo, history=False) -> {"findings": [...], "endpoints": [...], "stats": {...}, "gaps": [...]}
     apply_baseline(findings, baseline) -> marks each finding new / known

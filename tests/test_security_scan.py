@@ -1,4 +1,4 @@
-"""F.23 security audit: rules, Spring authorization inventory, config flattening, masking, baseline."""
+"""F.24 security audit: rules, Spring authorization inventory, config flattening, masking, baseline."""
 
 import json
 import os
