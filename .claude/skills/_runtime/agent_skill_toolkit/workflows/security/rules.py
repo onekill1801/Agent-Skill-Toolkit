@@ -24,7 +24,8 @@ class Rule:
         self.id, self.severity, self.category, self.title, self.fix = rid, severity, category, title, fix
         self.pattern = re.compile(pattern, flags)
         self.files = files
-        self.unless = re.compile(unless, re.I) if unless else None
+        self.unless_src = unless or ""      # may contain {var}: the receiver captured by group "var" of pattern
+        self.unless = re.compile(unless, re.I) if unless and "{var}" not in unless else None
         self.main_only = main_only          # skip test sources / fixtures
         self.secret = secret                # the matched text is a credential: always masked in reports
 
@@ -107,11 +108,17 @@ RULES = [
          r"new\s+URL\(\s*[a-z]\w*\s*\)|(?:restTemplate|webClient|httpClient)\.\w+\(\s*[a-z]\w*(?:Url|URL|Uri|URI)\b",
          JAVA, "Chỉ gọi host trong whitelist; không cho người dùng chỉ định URL đích.", main_only=True),
     Rule("XXE-001", "medium", "injection", "XML parser chưa tắt DTD/entity ngoài",
+         r"(?:\b(?P<var>\w+)\s*=\s*)?"
          r"(?:DocumentBuilderFactory|SAXParserFactory|XMLInputFactory|TransformerFactory|SchemaFactory)"
          r"\.newInstance\(", JAVA,
          "Bật FEATURE_SECURE_PROCESSING, disallow-doctype-decl, tắt external entities.",
-         unless=r"FEATURE_SECURE_PROCESSING|disallow-doctype-decl|SUPPORT_DTD|ACCESS_EXTERNAL_DTD", flags=0,
-         main_only=True),
+         # protective setting on THAT factory variable with the protective value (Codex security R2 #5)
+         unless=r"\b{var}\.setFeature\([^,;]*(?:FEATURE_SECURE_PROCESSING|disallow-doctype-decl)[^,;]*,\s*"
+                r"(?:true|Boolean\.TRUE)\s*\)|"
+                r"\b{var}\.setAttribute\([^,;]*ACCESS_EXTERNAL_(?:DTD|SCHEMA|STYLESHEET)[^,;]*,\s*\"\"\s*\)|"
+                r"\b{var}\.setProperty\([^,;]*(?:SUPPORT_DTD|IS_SUPPORTING_EXTERNAL_ENTITIES)[^,;]*,\s*"
+                r"(?:false|Boolean\.FALSE)\s*\)",
+         flags=0, main_only=True),
     Rule("DESER-001", "high", "deserialization", "Deserialize kiểu Java / Jackson default typing",
          r"new\s+ObjectInputStream\(|enableDefaultTyping\(|activateDefaultTyping\(|@JsonTypeInfo\(\s*use\s*=\s*"
          r"JsonTypeInfo\.Id\.CLASS", JAVA, "Không deserialize dữ liệu không tin cậy theo kiểu lớp; dùng DTO cố định.",
@@ -170,7 +177,9 @@ class KeyRule:
 
 # a value that is NOT a real secret: empty, a placeholder / env reference, an obvious dummy
 NOT_A_SECRET = re.compile(r"^\s*$|^\$\{|^<.*>$|^(?:null|none|~|changeit|xxx+|\*+|your[-_].*|example.*|dummy)$|"
-                          r"^ENC\(|^[\^~>=<]*\d+(?:\.[\dx*]+)+(?:[-+][\w.]+)?$", re.I)   # ... or a version range
+                          r"^ENC\(", re.I)
+# a dependency version range — only exempt inside dependency manifests (package.json…), never a password
+VERSION_RANGE = re.compile(r"^[\^~>=<]*\d+(?:\.[\dx*]+)+(?:[-+][\w.]+)?$", re.I)
 
 KEY_RULES = [
     KeyRule("SEC-003", "high", "secret", "Mật khẩu / secret ghi thẳng trong file cấu hình",

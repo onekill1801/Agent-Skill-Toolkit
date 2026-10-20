@@ -204,7 +204,7 @@ class CodexRound1Test(Base):
         self.assertTrue(res["gaps"])
         self.assertEqual(T.main(["scan", "--repo", self.repo, "--history"]), 3)
 
-    def test_r1_3_long_lines_chunked_and_oversized_is_a_gap(self):
+    def test_r1_3_long_lines_scanned_and_oversized_is_a_gap(self):
         self.put("dist2/app.js", "x" * 9000 + " k='" + GL + "' " + "y" * 3000 + "\n")
         res = S.scan(self.repo)
         self.assertIn("SEC-002", self.rules_of(res))
@@ -225,7 +225,7 @@ class CodexRound1Test(Base):
         files = {f["file"] for f in res["findings"] if f["rule"] == "SEC-003"}
         self.assertEqual(files, {"deploy/.env.prod", "config/creds.json"})
         self.put("package-lock.json", '{\n  "requires": {\n    "registry-auth-token": "^3.4.0"\n  }\n}\n')
-        self.put("config/deps.json", '{\n  "auth-token": "^3.4.0"\n}\n')
+        self.put("web/package.json", '{\n  "dependencies": {"auth-token": "^3.4.0"}\n}\n')
         res = S.scan(self.repo)
         files = {f["file"] for f in res["findings"] if f["rule"] == "SEC-003"}
         self.assertEqual(files, {"deploy/.env.prod", "config/creds.json"})       # lockfile / version: not secrets
@@ -288,6 +288,52 @@ class CodexRound1Test(Base):
                  '    s.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true); }\n}\n')
         xxe = [f["line"] for f in S.scan(self.repo)["findings"] if f["rule"] == "XXE-001"]
         self.assertEqual(xxe, [2])
+
+
+class CodexRound2Test(Base):
+    def test_r2_1_escaped_quote_does_not_leak_the_tail(self):
+        self.put("src/main/java/x/A.java",
+                 'class A { void a(){ String password = "abc\\"TAILSECRET9"; e.printStackTrace(); } }\n')
+        res = S.scan(self.repo)
+        self.assertIn("GEN-002", self.rules_of(res))
+        self.assertNotIn("TAILSECRET", json.dumps(res))
+        self.assertNotIn("XYZSECRET", S.redact('token = "abcXYZSECRET unterminated'))
+
+    def test_r2_2_overlapping_spans_are_merged(self):
+        self.assertEqual(S.redact("k=" + "A" * 20 + "B" * 20, [(2, 30), (10, 42)]), "k=AAA…")
+
+    def test_r2_3_r2_4_very_long_lines_are_matched_whole(self):
+        pad = "p" * 20000
+        self.put("config/big.json", '{"pad": "' + pad + '", "password": "RealPass987"}\n')
+        self.put("src/main/java/x/Q.java",
+                 'class Q { void a(){ em.createQuery("select t from T t where ' + "x" * 4500
+                 + '" + request.getParameter("q")); } }\n')
+        self.put("web/app.js", "var k = '" + "glpat-" + "Z" * 5000 + "';\n")
+        res = S.scan(self.repo)
+        rules = self.rules_of(res)
+        self.assertIn("SEC-003", rules)
+        self.assertIn("INJ-004", rules)
+        self.assertIn("SEC-002", rules)
+        blob = json.dumps(res)
+        self.assertNotIn("RealPass987", blob)
+        self.assertNotIn("Z" * 10, blob)                       # long token not leaked past the mask
+
+    def test_r2_5_xxe_needs_the_protective_value_on_that_factory(self):
+        self.put("src/main/java/x/X.java",
+                 "class X {\n"
+                 "  void a() { DocumentBuilderFactory f = DocumentBuilderFactory.newInstance();\n"
+                 "    f.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, false); }\n"
+                 "  void b() { DocumentBuilderFactory g = DocumentBuilderFactory.newInstance();\n"
+                 "    DocumentBuilderFactory h = DocumentBuilderFactory.newInstance();\n"
+                 "    h.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true); }\n"
+                 "  void c() { DocumentBuilderFactory.newInstance().newDocumentBuilder(); }\n"
+                 "}\n")
+        xxe = [f["line"] for f in S.scan(self.repo)["findings"] if f["rule"] == "XXE-001"]
+        self.assertEqual(xxe, [2, 4, 7])                        # h (line 5) is hardened
+
+    def test_r2_6_version_shaped_password_is_a_secret(self):
+        self.put("src/main/resources/app.properties", "db.password=12.34.56\n")
+        self.assertIn("SEC-003", self.rules_of(S.scan(self.repo)))
 
 
 if __name__ == "__main__":

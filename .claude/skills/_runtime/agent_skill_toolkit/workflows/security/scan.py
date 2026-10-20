@@ -29,7 +29,9 @@ SKIP_DIRS = {".git", "node_modules", "target", "build", "dist", "out", ".gradle"
              "coverage", "vendor", ".angular", "__pycache__", ".next", ".nuxt", "bin", "obj", ".codegraph",
              ".claude", ".agents", ".agent"}
 MAX_FILE = 20 * 1024 * 1024        # larger = a gap (reported), not silently skipped
-CHUNK, OVERLAP = 4000, 400         # very long lines are scanned in overlapping chunks (R1 #3)
+# every line is matched WHOLE (no chunking: a chunk boundary can split a match — Codex security R2 #4); the rule
+# patterns start with a literal anchor, so a long line costs ~linear time
+DEP_MANIFESTS = ("package.json", "bower.json", "composer.json")
 SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2, "info": 3}
 _IGNORE = re.compile(r"security-audit:\s*ignore\b\s*([A-Z]+-\d{3})?", re.I)
 _TEST_PATH = re.compile(r"(?:^|/)(?:src/test|src/it|test|tests|__tests__|spec|fixtures?|testdata|e2e)(?:/|$)|"
@@ -51,7 +53,8 @@ def _match(rel: str, globs) -> bool:
 
 # `<secret-ish name> = "value"` / `name: value` / `name=value` anywhere on a line
 _ASSIGNED = re.compile(r"(?i)(\w*(?:password|passwd|pwd|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|"
-                       r"credential)s?\w*[\"']?\s*(?:[:=]|=>)\s*)(\"[^\"]*\"|'[^']*'|[^\s,;)}\]]+)")
+                       r"credential)s?\w*[\"']?\s*(?:[:=]|=>)\s*)"
+                       r"(\"(?:[^\"\\]|\\.)*(?:\"|$)|'(?:[^'\\]|\\.)*(?:'|$)|[^\s,;)}\]]+)")   # escapes (R2 #1)
 
 
 def redact(text: str, spans=None) -> str:
@@ -61,7 +64,8 @@ def redact(text: str, spans=None) -> str:
     if spans:
         parts, pos = [], 0
         for a, b in sorted(spans):
-            if a < pos:
+            if a < pos:                                   # overlapping span: extend the masked run (R2 #2)
+                pos = max(pos, b)
                 continue
             parts += [out[pos:a], out[a:a + 3], "…"]
             pos = b
@@ -73,7 +77,10 @@ def redact(text: str, spans=None) -> str:
     def value(m):
         v = m.group(2)
         q = v[0] if v[:1] in "\"'" else ""
-        inner = v[1:-1] if q else v
+        closed = bool(q) and len(v) > 1 and v.endswith(q) and not v.endswith("\\" + q)
+        inner = v[1:-1] if closed else v[1:] if q else v
+        if q and not closed:                              # unterminated: masked to the end of the line
+            return m.group(1) + q + inner[:3] + "…"
         if len(inner) <= 3 or inner.startswith("${") and inner.endswith("}") and ":" not in inner:
             return m.group(0)
         return m.group(1) + q + inner[:3] + "…" + q
@@ -153,14 +160,8 @@ def _ignored(lines: list, i: int, rule_id: str) -> bool:
 
 
 def _search_spans(pattern, line: str) -> list:
-    """Every match span of `pattern` on `line`, long lines scanned in overlapping chunks."""
-    if len(line) <= CHUNK:
-        return [m.span() for m in pattern.finditer(line)]
-    spans = set()
-    for start in range(0, len(line), CHUNK - OVERLAP):
-        for m in pattern.finditer(line[start:start + CHUNK]):
-            spans.add((start + m.start(), start + m.end()))
-    return sorted(spans)
+    """Every match span of `pattern` on the whole `line`."""
+    return [m.span() for m in pattern.finditer(line)]
 
 
 # ----------------------------------------------------------------------------- config flattening
@@ -232,13 +233,13 @@ def flatten_config(rel: str, text: str) -> list:
     return out
 
 
-_JSON_PAIR = re.compile(r"\"([\w.\-]+)\"\s*:\s*\"([^\"]*)\"")
+_JSON_PAIR = re.compile(r"\"([\w.\-]+)\"\s*:\s*\"((?:[^\"\\]|\\.)*)\"")
 
 
 def _json_pairs(text: str) -> list:
     """[(line_no, key, value)] of "key": "string" pairs of a JSON file (key = last segment)."""
     return [(n, m.group(1), m.group(2)) for n, line in enumerate(text.splitlines(), 1)
-            for m in _JSON_PAIR.finditer(line[:CHUNK * 4])]
+            for m in _JSON_PAIR.finditer(line)]
 
 
 def _is_prod_config(rel: str) -> bool:
@@ -275,6 +276,8 @@ def _key_findings(rel: str, text: str) -> list:
             if r.id == "SEC-003":
                 if is_test(rel) or secret_value(value) is None:
                     continue
+                if rel.rsplit("/", 1)[-1] in DEP_MANIFESTS and R.VERSION_RANGE.match(value.strip()):
+                    continue                              # "registry-auth-token": "^3.4.0" (R2 #6)
             elif not r.value.search(value):
                 continue
             if _ignored(lines, n - 1, r.id):
@@ -286,8 +289,18 @@ def _key_findings(rel: str, text: str) -> list:
 
 def _unless_near(rule, code: list, i: int) -> bool:
     """Hardening written next to THIS call (same or next 15 lines of code, comments stripped) — not anywhere
-    in the file (R1 #11)."""
-    return bool(rule.unless and rule.unless.search("\n".join(code[i:i + 16])))
+    in the file (R1 #11). A `{var}` exemption applies to the variable the match assigned, and only with the
+    protective value written in the pattern; an unassigned (chained) factory is never exempt (R2 #5)."""
+    if not rule.unless_src:
+        return False
+    window = "\n".join(code[i:i + 16])
+    if rule.unless is not None:
+        return bool(rule.unless.search(window))
+    m = rule.pattern.search(code[i]) if i < len(code) else None
+    var = m.groupdict().get("var") if m else None
+    if not var:
+        return False
+    return bool(re.search(rule.unless_src.replace("{var}", re.escape(var)), window, re.I))
 
 
 # ----------------------------------------------------------------------------- the scan
