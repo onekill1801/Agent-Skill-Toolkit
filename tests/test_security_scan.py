@@ -336,5 +336,28 @@ class CodexRound2Test(Base):
         self.assertIn("SEC-003", self.rules_of(S.scan(self.repo)))
 
 
+class CodexRound3Test(Base):
+    def test_r3_1_trailing_backslash_string_is_masked(self):
+        self.put("web/a.js", 'eval(input); const password = "abc TAILSECRET\\\ncontinued";\n')
+        res = S.scan(self.repo)
+        self.assertIn("JS-001", self.rules_of(res))
+        self.assertNotIn("TAILSECRET", json.dumps(res))
+
+    def test_r3_2_each_factory_on_a_line_is_judged(self):
+        self.put("src/main/java/x/X.java",
+                 "class X { void a() {\n"
+                 "  DocumentBuilderFactory safe = DocumentBuilderFactory.newInstance(); "
+                 "DocumentBuilderFactory unsafe = DocumentBuilderFactory.newInstance();\n"
+                 "  safe.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true); unsafe.newDocumentBuilder(); }\n}\n")
+        self.assertIn("XXE-001", self.rules_of(S.scan(self.repo)))
+
+    def test_r3_3_manifest_exemption_only_for_dependency_entries(self):
+        self.put("web/package.json",
+                 '{"name": "app", "config": {"password": "12.34.56"},\n'
+                 ' "dependencies": {"registry-auth-token": "^3.4.0"}}\n')
+        sec = [f for f in S.scan(self.repo)["findings"] if f["rule"] == "SEC-003"]
+        self.assertEqual([f["text"].split(":")[0] for f in sec], ["password"])
+
+
 if __name__ == "__main__":
     unittest.main()

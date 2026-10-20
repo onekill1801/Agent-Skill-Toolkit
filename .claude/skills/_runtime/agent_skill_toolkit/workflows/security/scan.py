@@ -54,7 +54,7 @@ def _match(rel: str, globs) -> bool:
 # `<secret-ish name> = "value"` / `name: value` / `name=value` anywhere on a line
 _ASSIGNED = re.compile(r"(?i)(\w*(?:password|passwd|pwd|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|"
                        r"credential)s?\w*[\"']?\s*(?:[:=]|=>)\s*)"
-                       r"(\"(?:[^\"\\]|\\.)*(?:\"|$)|'(?:[^'\\]|\\.)*(?:'|$)|[^\s,;)}\]]+)")   # escapes (R2 #1)
+                       r"(\"(?:[^\"\\]|\\.)*(?:\"|\\?$)|'(?:[^'\\]|\\.)*(?:'|\\?$)|[^\s,;)}\]\"']+)")   # escapes (R2 #1, R3 #1)
 
 
 def redact(text: str, spans=None) -> str:
@@ -261,10 +261,34 @@ def secret_value(value: str):
     return v
 
 
+_DEP_SECTIONS = {"dependencies", "devDependencies", "peerDependencies", "optionalDependencies",
+                 "bundledDependencies", "resolutions", "overrides", "require", "require-dev"}
+
+
+def _dependency_entries(text: str) -> set:
+    """{(name, version)} declared in the dependency sections of a manifest (package.json / composer.json…):
+    only those may carry a version range under a secret-looking name. Unparsable JSON exempts nothing."""
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        return set()
+    out = set()
+
+    def walk(node, parent):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if isinstance(v, str) and parent in _DEP_SECTIONS:
+                    out.add((k, v))
+                walk(v, k)
+    walk(doc, "")
+    return out
+
+
 def _key_findings(rel: str, text: str) -> list:
     out = []
     lines = text.splitlines()
     pairs = _json_pairs(text) if rel.endswith(".json") else flatten_config(rel, text)
+    deps = _dependency_entries(text) if rel.rsplit("/", 1)[-1] in DEP_MANIFESTS else set()
     for n, key, value in pairs:
         for r in R.KEY_RULES:
             if r.prod_only and not _is_prod_config(rel):
@@ -276,8 +300,8 @@ def _key_findings(rel: str, text: str) -> list:
             if r.id == "SEC-003":
                 if is_test(rel) or secret_value(value) is None:
                     continue
-                if rel.rsplit("/", 1)[-1] in DEP_MANIFESTS and R.VERSION_RANGE.match(value.strip()):
-                    continue                              # "registry-auth-token": "^3.4.0" (R2 #6)
+                if (key, value) in deps and R.VERSION_RANGE.match(value.strip()):
+                    continue                              # "registry-auth-token": "^3.4.0" (R2 #6, R3 #3)
             elif not r.value.search(value):
                 continue
             if _ignored(lines, n - 1, r.id):
@@ -287,17 +311,17 @@ def _key_findings(rel: str, text: str) -> list:
     return out
 
 
-def _unless_near(rule, code: list, i: int) -> bool:
-    """Hardening written next to THIS call (same or next 15 lines of code, comments stripped) — not anywhere
-    in the file (R1 #11). A `{var}` exemption applies to the variable the match assigned, and only with the
-    protective value written in the pattern; an unassigned (chained) factory is never exempt (R2 #5)."""
+def _unless_near(rule, code: list, i: int, m) -> bool:
+    """Is THIS match `m` (on code line i) hardened right next to it (same or next 15 lines of code, comments
+    stripped) — not anywhere in the file (R1 #11)? A `{var}` exemption applies to the variable this match
+    assigned, with the protective value written in the pattern; an unassigned (chained) call is never exempt
+    (R2 #5). Each match of a line is judged on its own (R3 #2)."""
     if not rule.unless_src:
         return False
     window = "\n".join(code[i:i + 16])
     if rule.unless is not None:
         return bool(rule.unless.search(window))
-    m = rule.pattern.search(code[i]) if i < len(code) else None
-    var = m.groupdict().get("var") if m else None
+    var = m.groupdict().get("var")
     if not var:
         return False
     return bool(re.search(rule.unless_src.replace("{var}", re.escape(var)), window, re.I))
@@ -329,11 +353,12 @@ def scan(repo: str, history: bool = False, max_commits: int = 300) -> dict:
                                                                                  ".tsx", ".jsx")) else lines
             src = lines if r.category in ("secret", "leftover") else code
             for i, line in enumerate(src):
-                spans = _search_spans(r.pattern, line)
-                if not spans:
+                matches = list(r.pattern.finditer(line))
+                if not matches or _ignored(lines, i, r.id):
                     continue
-                if _ignored(lines, i, r.id) or _unless_near(r, code, i):
-                    continue
+                if not [m for m in matches if not _unless_near(r, code, i, m)]:
+                    continue                              # every match on the line is hardened
+                spans = [m.span() for m in matches]
                 raw = lines[i] if i < len(lines) else line
                 f = _finding(r, rel, i + 1, raw, spans=spans if r.secret else None)
                 if r.secret and test:
