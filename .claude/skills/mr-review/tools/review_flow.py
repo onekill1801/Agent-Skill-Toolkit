@@ -27,6 +27,7 @@ import json
 import os
 import runpy
 import socket
+import re
 import sys
 import time
 from pathlib import Path
@@ -111,6 +112,188 @@ def _ensure_owned(ctx) -> dict:
         return rc.save_job(job, sync=False)
 
 
+def _runtime_closure(sources: list, runtime: str, local_dirs: list = ()) -> list:
+    """Every file the review/posting tools (`sources`) can execute: transitively through static
+    imports (absolute, relative, inside functions), modules/packages of `local_dirs` (the tool dirs
+    of every skill — tools put each other on sys.path: review_post -> remote-control approvals;
+    a name found in several dirs counts in ALL of them), bootstrap.py and what it imports, package
+    __init__ files, `importlib.import_module("const")` and a provable `runpy.run_path(...)`.
+    A module nothing here reaches (e.g. workflows/security) can be edited while a review runs
+    without a false quarantine. Anything undeterminable — unparsable file, an import that is
+    neither stdlib nor found, a dynamic import/run/exec whose target is not provable — falls back
+    to EVERY .py under the runtime and `local_dirs` (recursive)."""
+    import ast
+    import glob
+    pkg_root = os.path.normpath(os.path.join(runtime, "agent_skill_toolkit"))
+    everything = glob.glob(os.path.join(runtime, "**", "*.py"), recursive=True)
+    for d in local_dirs:
+        everything += glob.glob(os.path.join(d, "**", "*.py"), recursive=True)
+    everything = sorted({os.path.normpath(f) for f in everything})
+    stdlib = set(getattr(sys, "stdlib_module_names", ())) | set(sys.builtin_module_names)
+
+    class Unknown(Exception):
+        pass
+
+    def in_root(root: str, parts: list) -> list:
+        out = []
+        for i in range(1, len(parts) + 1):             # every package on the way: its __init__
+            base = os.path.join(root, *parts[:i])
+            init = os.path.join(base, "__init__.py")
+            if os.path.isfile(init):
+                out.append(init)
+            elif os.path.isfile(base + ".py"):
+                out.append(base + ".py")
+                break                                  # a module: the rest are its attributes
+            elif not os.path.isdir(base):              # (a dir without __init__ = namespace package)
+                break
+        return out
+
+    def module_files(dotted: str, near: str, strict: bool = True) -> list:
+        parts = [p for p in dotted.split(".") if p]
+        if not parts:
+            return []
+        if parts[0] == "agent_skill_toolkit":
+            return in_root(runtime, parts)
+        out = []
+        for root in [near] + list(local_dirs):
+            out += in_root(root, parts)
+        if not out and strict and parts[0] not in stdlib:
+            raise Unknown(dotted)                          # a module from somewhere we do not hash
+        return out
+
+    def run_target(expr):
+        """The file runpy.run_path(expr) executes — only when provable: one ".py" constant, no
+        conditional, a path suffix with a directory, matching exactly one known file."""
+        if any(isinstance(n, (ast.IfExp, ast.BoolOp, ast.Subscript)) and not _is_parents_index(n)
+               for n in ast.walk(expr)):
+            return None
+        for n in ast.walk(expr):                       # only known path constructions may compute it
+            if isinstance(n, ast.Call):
+                f = n.func
+                if not _known_path_call(f):
+                    return None
+        consts = [n for n in ast.walk(expr) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+        consts = [n.value for n in sorted(consts, key=lambda n: (n.lineno, n.col_offset))]   # source order
+        if sum(c.endswith(".py") for c in consts) != 1 or not consts[-1].endswith(".py"):
+            return None
+        segs = [s for c in consts for s in re.split(r"[\\/]", c) if s and s not in (".", "..")]
+        if len(segs) < 2:
+            return None
+        tail = os.sep + os.path.join(*segs)
+        hits = [f for f in everything if f.endswith(tail)]
+        return hits[0] if len(hits) == 1 else None
+
+    def dotted_of(path: str) -> str:
+        rel = os.path.relpath(path, runtime)[:-3].replace(os.sep, ".")
+        return rel[:-9] if rel.endswith(".__init__") else rel
+
+    found = {os.path.normpath(os.path.join(runtime, "bootstrap.py"))}
+    seen, todo = set(), list(sources) + list(found)
+    try:
+        while todo:
+            f = os.path.normpath(todo.pop())
+            if f in seen:
+                continue
+            seen.add(f)
+            near = os.path.dirname(f)
+            try:
+                with open(f, encoding="utf-8") as fh:
+                    tree = ast.parse(fh.read(), f)
+            except (OSError, SyntaxError, ValueError):
+                raise Unknown(f)
+            inside = f.startswith(pkg_root)
+            here = dotted_of(f) if inside else ""
+            is_pkg = f.endswith("__init__.py")
+            targets = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                        and node.value.endswith(".py") and "\n" not in node.value:
+                    # a script named in code is a subprocess / run_path entry point (notify_group.py,
+                    # agent_runner.py…): hash every file of that name and what it imports
+                    name = os.path.basename(node.value.replace("\\", "/"))
+                    if name != "__init__.py":                  # (packages come in through imports)
+                        targets += [x for x in everything if os.path.basename(x) == name]
+                    continue
+                if isinstance(node, ast.Import):
+                    for a in node.names:
+                        if a.asname and a.name.split(".")[0] in _LOADER_MODULES:
+                            raise Unknown(f"aliased loader module in {f}")   # import importlib as il
+                        targets += module_files(a.name, near)
+                elif isinstance(node, ast.ImportFrom):
+                    if (node.module or "").split(".")[0] in _LOADER_MODULES and not node.level:
+                        raise Unknown(f"loader function imported by name in {f}")   # import_module as load
+                    if node.level:
+                        if not inside:
+                            raise Unknown(f"relative import outside the runtime package in {f}")
+                        parent = here.split(".")
+                        parent = parent[:len(parent) - node.level + (1 if is_pkg else 0)]
+                        base = ".".join(parent + ([node.module] if node.module else []))
+                    else:
+                        base = node.module or ""
+                    targets += module_files(base, near)
+                    for a in node.names:                       # `from pkg import submodule`
+                        targets += module_files(f"{base}.{a.name}", near, strict=False)
+                elif isinstance(node, ast.Call):
+                    fn = node.func
+                    name = fn.attr if isinstance(fn, ast.Attribute) else fn.id if isinstance(fn, ast.Name) else ""
+                    if name in ("import_module", "__import__", "run_module"):
+                        arg = node.args[0] if node.args else None
+                        if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
+                            raise Unknown(f"dynamic import in {f}")
+                        targets += module_files(arg.value, near)
+                        if name == "run_module":                 # a (namespace) package runs its __main__
+                            parts = arg.value.split(".")
+                            roots = [runtime] if parts[0] == "agent_skill_toolkit" else [near] + list(local_dirs)
+                            targets += [m for m in (os.path.join(r, *parts, "__main__.py") for r in roots)
+                                        if os.path.isfile(m)]
+                    elif name == "run_path":
+                        t = run_target(node.args[0]) if node.args else None
+                        if t is None:
+                            raise Unknown(f"run_path in {f}")
+                        targets.append(t)
+                    elif (isinstance(fn, ast.Name) and name in ("exec", "eval")) or name == "spec_from_file_location":
+                        raise Unknown(f"{name} in {f}")
+                    elif name == "getattr" and node.args and isinstance(node.args[0], ast.Name) \
+                            and node.args[0].id in _LOADER_MODULES:
+                        raise Unknown(f"getattr on a loader module in {f}")
+            for t in targets:
+                t = os.path.normpath(t)
+                found.add(t)
+                if t not in seen:
+                    todo.append(t)
+    except Unknown:
+        return everything
+    return sorted(found)
+
+
+# modules whose functions load code: an alias / getattr of them cannot be followed -> fallback
+_LOADER_MODULES = ("importlib", "runpy", "imp", "pkgutil", "zipimport", "builtins")
+
+
+def _known_path_call(f) -> bool:
+    """A call whose result is a fixed location: str()/Path(), os.path.<join|normpath|abspath|realpath|
+    dirname>, Path(...).resolve(), rc.tools_dir(), paths.toolkit_root() — receiver checked too (R4 #1)."""
+    import ast
+    if isinstance(f, ast.Name):
+        return f.id in ("str", "Path")
+    if not isinstance(f, ast.Attribute):
+        return False
+    v = f.value
+    if f.attr in ("join", "normpath", "abspath", "realpath", "dirname"):
+        return isinstance(v, ast.Attribute) and v.attr == "path" and isinstance(v.value, ast.Name) \
+            and v.value.id == "os"
+    if f.attr == "resolve":
+        return isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id == "Path"
+    return (f.attr, getattr(v, "id", None)) in (("tools_dir", "rc"), ("toolkit_root", "paths"))
+
+
+def _is_parents_index(node) -> bool:
+    """`Path(__file__).resolve().parents[2]` — a constant index into parents is a fixed location."""
+    import ast
+    return (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute)
+            and node.value.attr == "parents" and isinstance(node.slice, ast.Constant))
+
+
 def _protected_snapshot(jid: str) -> dict:
     """Hashes of state a review agent must never touch: the job file, approval records, the
     posting/rules code, the hook. Compared before/after the agent run (tamper DETECTION — the
@@ -123,7 +306,9 @@ def _protected_snapshot(jid: str) -> dict:
     out = {"job:" + k: json.dumps(job.get(k), sort_keys=True, default=str)
            for k in ("status", "worker", "approval", "approval_intent", "diff_refs", "head_sha", "review_file")}
     files = glob.glob(os.path.join(rc.tools_dir(), "*.py"))
-    files += glob.glob(os.path.join(skills, "_runtime", "**", "*.py"), recursive=True)
+    local = sorted(glob.glob(os.path.join(skills, "*", "tools")))   # tools put each other on sys.path
+    local.sort(key=lambda d: os.path.normpath(d) != os.path.normpath(rc.tools_dir()))
+    files += _runtime_closure(files, os.path.join(skills, "_runtime"), local)
     files += [os.path.join(skills, "..", "hooks", "guard_write.py"), os.path.join(skills, "..", "settings.json")]
     aid = (job.get("approval") or {}).get("id")
     if aid:                                  # this job's own Telegram approval record

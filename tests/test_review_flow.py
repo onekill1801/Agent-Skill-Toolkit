@@ -6,6 +6,7 @@ so the ctx.run path — stdin prompt, exit codes, quota JSON — is exercised fo
     python -m unittest discover -s tests
 """
 
+import glob
 import json
 import os
 import sys
@@ -286,6 +287,90 @@ class ReviewFlowTest(unittest.TestCase):
         self.assertEqual(self.work()[-1]["status"], "done")
         self.assertEqual(self.posted, ["77-20"])
         self.assertEqual(self.runs(), 2)
+
+    def test_protected_runtime_is_the_import_closure_of_the_review_tools(self):
+        """Editing a runtime module the review/posting path never imports (workflows/security) must not
+        quarantine a running review (etask !1216/!1223/!1226/!1267); what it imports stays protected."""
+        tools = rc.tools_dir()
+        runtime = os.path.normpath(os.path.join(tools, "..", "..", "_runtime"))
+        rel = {os.path.relpath(f, runtime).replace(os.sep, "/")
+               for f in rf._runtime_closure(glob.glob(os.path.join(tools, "*.py")), runtime,
+                                            sorted(glob.glob(os.path.join(tools, "..", "..", "*", "tools"))))}
+        for must in ("bootstrap.py", "agent_skill_toolkit/core/store.py", "agent_skill_toolkit/core/locks.py",
+                     "agent_skill_toolkit/integrations/gitlab.py", "agent_skill_toolkit/workflows/engine.py",
+                     "../remote-control/tools/approvals.py", "../dev-automation/tools/gitlab_api.py"):
+            self.assertIn(must, rel)
+        self.assertFalse(any(r.startswith("agent_skill_toolkit/workflows/security/") for r in rel))
+        self.assertNotIn("agent_skill_toolkit/workflows/settings.py", rel)
+        snap = rf._protected_snapshot("77-1")
+        self.assertFalse(any("security" + os.sep in k for k in snap))
+
+    def test_runtime_closure_boundaries(self):
+        """Codex quarantine-scope R1: local intermediaries, bootstrap imports, dynamic imports,
+        relative imports (module and package), `from pkg import submodule`, parse failure."""
+        root = tempfile.mkdtemp(prefix="closure-")
+        rt, tools, local = (os.path.join(root, d) for d in ("_runtime", "tools", "local"))
+
+        def put(path, text):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+        pk = os.path.join(rt, "agent_skill_toolkit")
+        for d in ("", "core", "flows", "unused"):
+            put(os.path.join(pk, d, "__init__.py"), "")
+        put(os.path.join(rt, "bootstrap.py"), "from agent_skill_toolkit.core import boot\n")
+        for m in ("boot", "store", "rel_target", "dyn", "sub"):
+            put(os.path.join(pk, "core", m + ".py"), "")
+        put(os.path.join(pk, "flows", "a.py"), "from ..core import rel_target\nfrom . import b\n")
+        put(os.path.join(pk, "flows", "b.py"), "")
+        put(os.path.join(pk, "unused", "x.py"), "")
+        put(os.path.join(local, "helper.py"), "from agent_skill_toolkit.core import store\n")
+        put(os.path.join(local, "helper_pkg", "__init__.py"), "")
+        put(os.path.join(local, "helper_pkg", "check.py"), "")
+        put(os.path.join(local, "helper_pkg", "checks", "approve.py"), "")      # namespace subpackage
+        put(os.path.join(local, "notify.py"), "import helper_dep\n")            # run as a subprocess
+        put(os.path.join(local, "helper_dep.py"), "")
+        put(os.path.join(local, "runpkg", "__init__.py"), "")
+        put(os.path.join(local, "runpkg", "__main__.py"), "import main_dep\n")    # run_module(package)
+        put(os.path.join(local, "main_dep.py"), "")
+        put(os.path.join(local, "runpkg", "ns", "__main__.py"), "")              # namespace subpackage __main__
+        put(os.path.join(tools, "t.py"),
+            "import runpy, importlib, helper\nfrom helper_pkg import check\nfrom helper_pkg.checks import approve\n"
+            "subprocess.run([sys.executable, os.path.join(HERE, 'notify.py')])\n"
+            "runpy.run_module('runpkg')\nrunpy.run_module('runpkg.ns')\n"
+            "runpy.run_path(str(Path(__file__).resolve().parents[1] / '_runtime' / 'bootstrap.py'))\n"
+            "runpy.run_path(os.path.join(H, '..', '_runtime', 'bootstrap.py'))\n"
+            "from agent_skill_toolkit.flows import a\n"
+            "from agent_skill_toolkit import core\n"
+            "def f():\n    importlib.import_module('agent_skill_toolkit.core.dyn')\n"
+            "    from agent_skill_toolkit.core import sub\n")
+        srcs = [os.path.join(tools, "t.py")]
+        rel = lambda fs: {os.path.relpath(f, root).replace(os.sep, "/") for f in fs}
+        got = rel(rf._runtime_closure(srcs, rt, [tools, local]))
+        for must in ("_runtime/bootstrap.py", "_runtime/agent_skill_toolkit/core/boot.py",
+                     "_runtime/agent_skill_toolkit/core/store.py", "local/helper.py",
+                     "_runtime/agent_skill_toolkit/core/rel_target.py", "_runtime/agent_skill_toolkit/flows/b.py",
+                     "_runtime/agent_skill_toolkit/core/dyn.py", "_runtime/agent_skill_toolkit/core/sub.py",
+                     "_runtime/agent_skill_toolkit/flows/__init__.py", "local/helper_pkg/__init__.py",
+                     "local/helper_pkg/check.py", "local/helper_pkg/checks/approve.py",
+                     "local/notify.py", "local/helper_dep.py", "local/runpkg/__main__.py", "local/main_dep.py",
+                     "local/runpkg/ns/__main__.py"):
+            self.assertIn(must, got)
+        self.assertNotIn("_runtime/agent_skill_toolkit/unused/x.py", got)
+        for bad in ("importlib.import_module(name)\n", "runpy.run_path(p)\n", "exec(code)\n", "def (:\n",
+                    "runpy.run_path(os.path.join(d, 'bootstrap.py'))\n",            # no directory: not provable
+                    "runpy.run_path(a if x else '_runtime/bootstrap.py')\n",       # conditional
+                    "runpy.run_path(resolve('_runtime/bootstrap.py'))\n",          # unknown path function
+                    "runpy.run_path(router.resolve('_runtime/bootstrap.py'))\n",   # unknown receiver
+                    "runpy.run_path(x.join(d, '_runtime', 'bootstrap.py'))\n",
+                    "from importlib import import_module as load\nload('payload')\n",   # aliased loader
+                    "import importlib as il\nil.util\n",
+                    "getattr(importlib, 'import_module')('payload')\n",
+                    "import module_from_nowhere\n"):                               # neither stdlib nor found
+            put(os.path.join(local, "helper.py"), "import importlib, runpy, os\n" + bad)
+            got = rel(rf._runtime_closure(srcs, rt, [tools, local]))
+            self.assertIn("_runtime/agent_skill_toolkit/unused/x.py", got, bad)   # whole fallback
+            self.assertIn("local/helper_pkg/check.py", got, bad)                   # recursive in local dirs
 
     def test_direct_request_approval_is_once_per_payload(self):
         """Round 2 MED: the CLI / Orca path calling request_approval directly gets the same guarantee."""
