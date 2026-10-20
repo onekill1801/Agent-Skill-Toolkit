@@ -385,6 +385,15 @@ class AutoPostRulesTest(unittest.TestCase):
         self.assertIn("thiếu @" + rp.WORD_JOINER + "Override", note)       # prose neutralised
         self.assertEqual([r for r in rr.content_problems(job, [note]) if "mention" in r or "HTML" in r], [])
 
+    def test_star_allows_every_project_other_rules_still_apply(self):
+        other = self.job(project_path="other/repo", project_id="9")
+        with mock.patch.dict(os.environ, {"REVIEW_AUTO_POST_PROJECTS": "*"}):
+            self.assertTrue(self.ok(other)["auto_post"])
+            self.assertFalse(self.ok(other, note="token = glpat-abcdefghijklmn12345")["auto_post"])
+        with mock.patch.dict(os.environ, {"REVIEW_AUTO_POST_PROJECTS": "*", "REVIEW_AUTO_POST_MAX_CHARS": "20000"}):
+            self.assertTrue(self.ok(other, note="x " * 5000)["auto_post"])
+        self.assertIn("note too long", self.ok(self.job(), note="x " * 5000)["reasons"])
+
     def test_scope_mode_and_source(self):
         self.assertFalse(self.ok(self.job(project_path="other/repo", project_id="9"))["auto_post"])
         self.assertFalse(self.ok(self.job(requests=[{"source": "unknown_bot"}]))["auto_post"])

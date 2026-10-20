@@ -9,7 +9,7 @@ nothing, because post() re-renders and re-checks.
 Config (.env / environment):
   REVIEW_AUTO_POST           off | shadow | auto   (default shadow: evaluate + report, still ask a human)
   REVIEW_AUTO_POST_PROJECTS  comma list of registry names / project paths / ids allowed to auto-post
-                             (empty = none)
+                             ("*" = every project, empty = none)
   REVIEW_AUTO_POST_SOURCES   comma list of request sources (default manual,mr_watch,fchat)
   REVIEW_AUTO_POST_DAILY_MAX posts per day across all MRs (default 30)
   REVIEW_AUTO_POST_MAX_CHARS rendered note limit (default 6000)
@@ -192,7 +192,7 @@ def evaluate(job: dict, note: str, inline_bodies: list) -> dict:
     if m == "off":
         reasons.append("auto-post is off (REVIEW_AUTO_POST=off)")
     allowed = set(_csv("REVIEW_AUTO_POST_PROJECTS"))
-    if not allowed & _project_keys(job):
+    if "*" not in allowed and not allowed & _project_keys(job):       # "*" = every project
         reasons.append("project not in REVIEW_AUTO_POST_PROJECTS")
     sources = set(_csv("REVIEW_AUTO_POST_SOURCES", "manual,mr_watch,fchat"))
     req_sources = {(r.get("source") or "manual").lower() for r in job.get("requests", [])} or {"manual"}
