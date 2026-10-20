@@ -297,7 +297,8 @@ class AutoPostRulesTest(unittest.TestCase):
 
     ENV = {"REVIEW_AUTO_POST": "auto", "REVIEW_AUTO_POST_PROJECTS": "grp/proj",
            "GITLAB_URL": "https://gitlab.example.vn", "REVIEW_AUTO_POST_DAILY_MAX": "30",
-           "REVIEW_NOTE_STYLE": "full", "REVIEW_INLINE_COMMENTS": "1"}
+           "REVIEW_NOTE_STYLE": "full", "REVIEW_INLINE_COMMENTS": "1",
+           "REVIEW_AUTO_POST_MAX_CHARS": "6000"}       # pinned: the real .env must not change these tests
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="rr-test-")
