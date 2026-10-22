@@ -118,6 +118,7 @@ python code_context.py callers|impact|locate <symbol> | affected <file>... | tra
 python cg.py prepare <worktree> --project-id <id> | analyze <worktree> --base B --head H --out F   # codegraph cho worktree: copy seed + sync (giây), method bị sửa, nơi gọi ngoài diff, test bị ảnh hưởng
 python vpn.py status | up | ensure | down | watch    # FortiVPN (macOS/Linux: openfortivpn; Windows: FortiClient). status exit 0 = mạng nội bộ OK
 python k8s.py logs ... deploy/NAME [--since 30m] [--errors -C 3] [--grep RE] [--previous]   # gộp log mọi pod của deploy; --errors bắt text/JSON/glog
+python jenkins_ops.py render|create [--update]|tags|run --action status|restart|rollback [--tag x.y.z] [--wait] [--via auto|ops|swap] --project P --env E   # RESTART/ROLLBACK k8s QUA JENKINS khi không có quyền k8s: job <job>-ops cạnh job build (dùng lại agent + kubeconfig credential), sinh từ registry; chưa có job ops → swap = tạm thay <script> job build, chạy, LUÔN khôi phục + so khớp (backup work/jenkins/backups/); create/run = [WRITE]
 python notifier.py started|mr-created|review-done|deploy-done|custom <id> ...   # [WRITE → người thật thấy]
 python ../auto-dev/tools/agent_init.py scan|draft|apply|check --project <P>   # chuẩn .agent/ cho repo sản phẩm (apply là [WRITE])
 python feedback.py add|recall|list|search|stats --project <P> ...   # sổ học từ can thiệp người (recall bơm bài học cũ vào prompt run sau)
