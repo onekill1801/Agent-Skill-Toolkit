@@ -83,6 +83,17 @@ details.help li .d { color: var(--muted); }
 .set-actions .primary:disabled { opacity: .5; cursor: not-allowed; }
 .okmsg { color: var(--ok); } .badmsg { color: var(--bad); }
 .secret { display: inline-block; margin: 2px 8px 2px 0; font-size: 12px; }
+.tabbar { display: flex; gap: 2px; padding: 0 10px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.tab { padding: 7px 12px; font: inherit; font-size: 13px; cursor: pointer; color: var(--muted); background: none; border: 0;
+  border-bottom: 2px solid transparent; border-radius: 0; margin-bottom: -1px; user-select: none; }
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tab:hover { color: var(--text); }
+.tab.on { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.tab .n { font-weight: 400; color: var(--muted); margin-left: 3px; }
+.tab.on .n { color: var(--accent); }
+.tab.alert .n { color: var(--bad); font-weight: 600; }
+.pager { display: flex; gap: 8px; align-items: center; justify-content: flex-end; padding: 6px 14px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+.pager button { font-size: 12px; padding: 2px 10px; }
 .toast { position: fixed; bottom: 16px; right: 16px; background: var(--text); color: var(--bg); padding: 6px 12px; border-radius: 6px; opacity: 0; transition: opacity .2s; }
 .toast.show { opacity: .92; }
 @media (max-width: 600px) { .grid2 { grid-template-columns: 1fr; } main { padding: 12px 16px; } }
@@ -119,6 +130,7 @@ details.help li .d { color: var(--muted); }
       <span class="chips" id="kind-chips"></span>
       <span class="hint">mở + đóng trong 24 giờ · <code>coordinator.py board</code></span></h2>
     <div data-help="tasks"></div>
+    <div class="tabbar" id="tasks-tabs"></div>
     <div class="body" id="tasks-body"></div>
   </section>
 
@@ -133,6 +145,7 @@ details.help li .d { color: var(--muted); }
     <h2>Review MR <span class="count" id="rev-count"></span>
       <span class="hint"><code>review_flow.py status</code></span></h2>
     <div data-help="reviews"></div>
+    <div class="tabbar" id="rev-tabs"></div>
     <div class="body" id="rev-body"></div>
   </section>
 
@@ -242,6 +255,52 @@ function attentionGaps() {
   return gaps;
 }
 
+// ---- tabs + paging for the long lists (tasks, reviews): the chosen tab is remembered per list
+const PAGE = 25;
+// a tab whose statuses are "*" takes every status no other tab names: nothing can fall through
+const TABS = {
+  tasks: [["active", "Đang chạy", ["running", "queued", "paused_quota"]], ["attn", "Chờ bạn", ["blocked", "failed"]],
+          ["closed", "Xong / khác", "*"], ["all", "Tất cả", null]],
+  reviews: [["active", "Đang làm", ["queued", "running", "approved"]],
+            ["attn", "Chờ bạn", ["awaiting_approval", "needs_human", "blocked"]],
+            ["posted", "Đã đăng", ["posted"]], ["other", "Lỗi / khác", "*"], ["all", "Tất cả", null]],
+};
+const tabSel = {}, tabPage = {};
+try { Object.assign(tabSel, JSON.parse(localStorage.getItem("dash.tabs") || "{}")); } catch (e) {}
+function tabbed(list, items, statusOf, barId) {
+  const defs = TABS[list];
+  const named = new Set(defs.flatMap((d) => Array.isArray(d[2]) ? d[2] : []));
+  const inTab = (key) => {
+    const d = defs.find((x) => x[0] === key);
+    if (!d || !d[2]) return items;
+    return items.filter((i) => d[2] === "*" ? !named.has(statusOf(i)) : d[2].includes(statusOf(i)));
+  };
+  if (!defs.some((d) => d[0] === tabSel[list])) {          // first visit: the first non-empty tab, remembered
+    tabSel[list] = (defs.find((d) => inTab(d[0]).length) || defs[0])[0];
+    try { localStorage.setItem("dash.tabs", JSON.stringify(tabSel)); } catch (e) {}
+  }
+  const bar = $(barId);
+  const ae = document.activeElement;
+  const focused = ae && ae.getAttribute ? ae.getAttribute("data-tab") : null;   // keep keyboard focus over refreshes
+  bar.setAttribute("role", "tablist");
+  bar.innerHTML = defs.map(([k, label]) => {
+    const n = inTab(k).length, on = k === tabSel[list];
+    return `<button type="button" role="tab" aria-selected="${on}" class="tab ${on ? "on" : ""} ${k === "attn" && n ? "alert" : ""}" data-tab="${list}:${k}">${esc(label)}<span class="n">${n}</span></button>`;
+  }).join("");
+  if (focused && focused.startsWith(list + ":") && bar.querySelector) {
+    const again = bar.querySelector(`[data-tab="${focused}"]`);
+    if (again) again.focus();
+  }
+  const rows = inTab(tabSel[list]);
+  const pages = Math.max(1, Math.ceil(rows.length / PAGE));
+  const page = Math.min(tabPage[list] || 0, pages - 1);
+  tabPage[list] = page;
+  const pager = pages > 1 ? `<div class="pager">${rows.length} dòng · trang ${page + 1}/${pages}
+    <button data-page="${list}:${page - 1}" ${page ? "" : "disabled"}>‹ Trước</button>
+    <button data-page="${list}:${page + 1}" ${page < pages - 1 ? "" : "disabled"}>Sau ›</button></div>` : "";
+  return { rows: rows.slice(page * PAGE, page * PAGE + PAGE), pager };
+}
+
 function renderKpis() {
   const st = section("store").data || {};
   const counts = (st.summary || {}).counts || {};
@@ -329,14 +388,15 @@ function renderTasks() {
     const flat = [];
     const walk = (r, seen) => { if (seen.has(r.id)) return; seen.add(r.id); flat.push(r); (kids[r.id] || []).forEach((c) => walk(c, seen)); };
     const seen = new Set(); roots.forEach((r) => walk(r, seen));
-    const shown = flat.filter((r) => !kindFilter || r.kind === kindFilter);
-    return { count: shown.length, html: table(["Trạng thái", "Loại", "Việc", "Bước", "Ghi chú", "ID"], shown.map((r) => [
+    const filtered = flat.filter((r) => !kindFilter || r.kind === kindFilter);
+    const { rows: shown, pager } = tabbed("tasks", filtered, (r) => r.status, "tasks-tabs");
+    return { count: filtered.length, html: table(["Trạng thái", "Loại", "Việc", "Bước", "Ghi chú", "ID"], shown.map((r) => [
       statusBadge(r.status), esc(KIND[r.kind] || r.kind),
       `<span class="indent" style="width:${depth(r) * 18}px"></span>${depth(r) ? "└ " : ""}${esc(r.title)}` +
         (r.resource ? `<div class="note mono">${esc(r.resource)}</div>` : ""),
       esc(r.step) + (r.done_steps && r.done_steps.length ? `<div class="note">xong: ${esc(r.done_steps.join(", "))}</div>` : ""),
       `<span class="note">${esc(r.note)}${r.attempts > 1 ? ` · lần ${esc(r.attempts)}` : ""}${r.source ? ` · từ ${esc(r.source)}` : ""}</span>`,
-      `<span class="mono note">${esc(r.id)}</span>`])) };
+      `<span class="mono note">${esc(r.id)}</span>`])) + pager };
   });
 }
 
@@ -365,9 +425,10 @@ function renderAccounts() {
 function renderReviews() {
   setBody("rev-body", "rev-count", section("reviews"), (d) => {
     const jobs = d.jobs || [];
-    return { count: jobs.length, html: table(["Trạng thái", "MR", "Tiêu đề", "Kết luận", "Nhánh", "Ai nhờ", "Cập nhật"], jobs.slice(0, 50).map((j) => [
+    const { rows, pager } = tabbed("reviews", jobs, (j) => j.status, "rev-tabs");
+    return { count: jobs.length, html: table(["Trạng thái", "MR", "Tiêu đề", "Kết luận", "Nhánh", "Ai nhờ", "Cập nhật"], rows.map((j) => [
       `<span class="badge">${esc(j.status)}</span>`, `<span class="mono">${esc(j.mr)}</span>`, esc(j.title),
-      esc(j.verdict || ""), `<span class="note mono">${esc(j.branches)}</span>`, esc(j.by), `<span class="note">${ago(j.updated)}</span>`])) };
+      esc(j.verdict || ""), `<span class="note mono">${esc(j.branches)}</span>`, esc(j.by), `<span class="note">${ago(j.updated)}</span>`])) + pager };
   });
 }
 
@@ -621,8 +682,17 @@ document.addEventListener("click", (e) => {
     return;
   }
   if (e.target.closest("[data-more]")) { showAllAttn = true; render(); return; }
+  const tb = e.target.closest("[data-tab]");
+  if (tb) {
+    const [list, key] = tb.getAttribute("data-tab").split(":");
+    tabSel[list] = key; tabPage[list] = 0;
+    try { localStorage.setItem("dash.tabs", JSON.stringify(tabSel)); } catch (err) {}
+    render(); return;
+  }
+  const pg = e.target.closest("[data-page]");
+  if (pg && !pg.disabled) { const [list, p] = pg.getAttribute("data-page").split(":"); tabPage[list] = +p; render(); return; }
   const k = e.target.closest("[data-kind]");
-  if (k) { kindFilter = k.getAttribute("data-kind"); render(); }
+  if (k) { kindFilter = k.getAttribute("data-kind"); tabPage.tasks = 0; render(); }
 });
 $("refresh").addEventListener("click", () => load(true));
 $("interval").addEventListener("change", schedule);
