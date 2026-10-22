@@ -86,6 +86,29 @@ Kiểm đúng chưa: dòng khởi động bot Telegram phải in `Hub repo: D:\C
 Mỗi daemon chỉ chạy **một bản** (hai bản group_watch = trả lời/đăng trùng). Sửa `.env` (tay hoặc qua thẻ Cài đặt) → restart tab liên quan.
 Tình trạng: `python $T/dev-automation/tools/daemon_common.py status`.
 
+### 3.5 Mở phiên Claude ngay trong một repo / worktree
+
+| Mở phiên ở | Kiến thức project (`AGENTS.md`, `.agent/`) | Skill + lệnh + hook toolkit |
+|---|---|---|
+| Gốc toolkit | phải chỉ: "làm trong `work/etask-pr7c`, đọc AGENTS.md + .agent/ trước" | có sẵn |
+| `work/<repo>` / worktree, **không** đặt biến | có (`CLAUDE.md` của repo + của toolkit đều nạp) | **không** — không có hook bảo vệ |
+| `work/<repo>` / worktree, **có** `CLAUDE_CODE_PLUGIN_DIRS` | có | có: skill `agent-skill-toolkit:*`, lệnh `/agent-skill-toolkit:<lệnh>`, hook `guard_write` |
+
+Đặt một lần cho user Windows (mở lại Orca/terminal để nhận):
+```powershell
+setx CLAUDE_CODE_PLUGIN_DIRS "D:\Claude-cli\Agent-Skill-Toolkit"
+```
+Claude nạp toolkit **tại chỗ** (không sao chép) nên commit mới có hiệu lực ở phiên kế tiếp. Ở chính gốc toolkit
+plugin tự tắt (không nạp trùng, hook không hỏi hai lần). Gọi tool: `python D:\Claude-cli\Agent-Skill-Toolkit\agentkit.py <tool>`;
+trong repo/worktree đã khai registry thì bỏ được `--project` (tool tự nhận từ thư mục hiện tại; `workspace where` để xem).
+Code ở worktree thì truyền `--repo <worktree>` cho tool đụng code (registry trỏ clone chính).
+`TOOLKIT_GUARD_ASK=off` (tắt popup hỏi) chỉ nằm trong `.claude/settings.local.json` của toolkit — phiên trong repo vẫn
+hỏi, trừ khi đặt biến đó ở môi trường user.
+
+Khai repo chưa có trong registry: `python agentkit.py workspace discover` → xem `temp/registry-draft.json`
+(id GitLab, nhánh mặc định, stack; repo `config*` nằm riêng — khai vào `platforms.json`) → `workspace apply --draft
+temp/registry-draft.json [--only k1,k2]` (chỉ thêm khoá mới, có bản sao lưu projects.json).
+
 ## 4. Các tình huống dùng hằng ngày
 
 ### 4.0 Giao diện web theo dõi (mở trong trình duyệt Orca)

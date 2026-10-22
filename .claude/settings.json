@@ -11,5 +11,8 @@
         ]
       }
     ]
+  },
+  "enabledPlugins": {
+    "agent-skill-toolkit@inline": false
   }
 }

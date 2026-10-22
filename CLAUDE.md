@@ -56,6 +56,14 @@ Agent: đọc `projects.json`, **prefix env inline** mỗi lệnh, vd:
 `GITLAB_PROJECT_ID=123 AZURE_DEVOPS_PROJECT=My-Project python3 gitlab_api.py list-mrs`.
 Chi tiết: `dev-automation/cookbook/multi-project.md`.
 
+**Mở phiên NGAY TRONG repo/worktree** (`work/<repo>`, `work/gitlab/<group>/<repo>`, worktree Orca): đặt env
+`CLAUDE_CODE_PLUGIN_DIRS=<gốc toolkit>` → Claude nạp toolkit như plugin TẠI CHỖ (không sao chép): skill
+`agent-skill-toolkit:*`, lệnh `/agent-skill-toolkit:<lệnh>`, hook `guard_write.py` (ở chính gốc toolkit plugin tự
+tắt — `enabledPlugins` trong `.claude/settings.json`). Gọi tool bằng `python <gốc toolkit>/agentkit.py <tool>`; thiếu
+`--project` thì tool tự nhận project từ thư mục hiện tại (clone hoặc worktree của nó trong registry).
+`python agentkit.py workspace discover` → bản nháp registry cho clone chưa khai (`temp/registry-draft.json`,
+chỉ đọc) · `workspace apply --draft F [--only k1,k2]` [WRITE] · `workspace where [DIR]`.
+
 ## Chạy tool Python
 
 - **Cách gọn nhất — một entry point:** `python agentkit.py <tool> [args]` (chạy từ gốc repo, không cần

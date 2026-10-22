@@ -245,6 +245,8 @@ def stop(name: str) -> dict:
 
 
 def start_saved(args) -> dict:
+    if not project_config.default_project(args):
+        raise k8s.K8sError("usage", "no project: pass --project (or run inside a registered repo/worktree)")
     ctx = project_config.resolve(args.project, args.env)
     fwds = ctx["stack"].get("forwards") or []
     if not fwds:

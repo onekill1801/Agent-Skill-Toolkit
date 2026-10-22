@@ -93,7 +93,24 @@ def decide(event: dict):
     return None, ""
 
 
+TOOLKIT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+
+
+def plugin_duplicate() -> bool:
+    """Run as the toolkit PLUGIN's hook (`--plugin`) inside the toolkit repo itself: the project's own
+    .claude/settings.json hook already guards this session — answer once, not twice."""
+    if "--plugin" not in sys.argv[1:]:
+        return False
+    project = os.environ.get("CLAUDE_PROJECT_DIR", "")
+    try:
+        return bool(project) and os.path.normcase(os.path.realpath(project)) == os.path.normcase(TOOLKIT_ROOT)
+    except (OSError, ValueError):
+        return False
+
+
 def main() -> int:
+    if plugin_duplicate():
+        return 0
     try:
         event = json.load(sys.stdin)
     except ValueError:

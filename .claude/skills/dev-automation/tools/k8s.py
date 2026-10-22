@@ -145,6 +145,8 @@ def find_kubectl(want_version: str = "", explicit: str = "") -> str:
 def resolve_target(args) -> dict:
     """Merge registry (--project/--env) with explicit flags. Explicit wins."""
     reg = {}
+    if hasattr(args, "project") and not args.context and not args.kubeconfig:
+        project_config.default_project(args)          # inside a registered repo/worktree: its project
     if getattr(args, "project", None):
         try:
             ctx = project_config.resolve(args.project, getattr(args, "env", None))

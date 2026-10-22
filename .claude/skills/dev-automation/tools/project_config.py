@@ -86,6 +86,110 @@ def _work_dir() -> str:
     return os.environ.get("WORK_DIR") or os.path.join(_repo_root(), "work")
 
 
+def _registry() -> dict:
+    path = os.path.join(_work_dir(), "projects.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def clone_path(entry: dict) -> str:
+    """Absolute clone_dir of a registry entry ('' when absent): absolute as written, `work:<rel>`
+    under the work dir, any other relative path under the toolkit root."""
+    cd = (entry or {}).get("clone_dir") or ""
+    if not isinstance(cd, str) or not cd:
+        return ""
+    if cd.startswith("work:"):
+        return os.path.join(_work_dir(), *cd[len("work:"):].split("/"))
+    return cd if os.path.isabs(cd) else os.path.join(_repo_root(), cd)
+
+
+def _norm(p: str) -> str:
+    return os.path.normcase(os.path.realpath(p))
+
+
+def _within(child: str, parent: str) -> bool:
+    try:
+        return os.path.commonpath([child, parent]) == parent
+    except ValueError:                                   # different drives
+        return False
+
+
+def git_identity(path: str):
+    """(work-tree top, normalized common .git dir) of the repo containing `path`, or (None, None) — read
+    from the .git entries like git does (a worktree's .git file -> gitdir -> commondir); no subprocess."""
+    d = os.path.realpath(path)
+    while True:
+        dot = os.path.join(d, ".git")
+        if os.path.isdir(dot):
+            return d, _norm(dot)
+        if os.path.isfile(dot):
+            try:
+                with open(dot, encoding="utf-8") as f:
+                    line = f.readline().strip()
+            except OSError:
+                return None, None
+            if not line.startswith("gitdir:"):
+                return None, None
+            gitdir = os.path.join(d, line[len("gitdir:"):].strip())
+            common = gitdir
+            try:
+                with open(os.path.join(gitdir, "commondir"), encoding="utf-8") as f:
+                    common = os.path.join(gitdir, f.readline().strip())
+            except OSError:
+                pass
+            return d, _norm(common)
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None, None
+        d = parent
+
+
+def project_from_cwd(cwd: str = None):
+    """The registry project `cwd` belongs to, else None. Identity first: cwd and the clone must be the
+    SAME git repository (same common .git dir) — a foreign repo nested inside a registered clone, or a
+    worktree of another repo, never inherits it (Codex workspace R1 #1). Among same-repo projects: the
+    deepest clone_dir containing cwd; from a worktree (outside every clone_dir), the project whose
+    clone_dir is the repository's main work tree. Ambiguous -> None. A cwd outside any git repo matches
+    nothing."""
+    here = _norm(cwd or os.getcwd())
+    _top, common = git_identity(here)
+    if common is None:
+        return None
+    same = []
+    for name, entry in _registry().items():
+        if not isinstance(entry, dict):
+            continue
+        cd = clone_path(entry)
+        if not cd or not os.path.isdir(cd):
+            continue
+        if git_identity(cd)[1] == common:
+            same.append((name, _norm(cd)))
+    inside = [(n, r) for n, r in same if _within(here, r)]
+    if inside:
+        deepest = max(len(r) for _, r in inside)
+        hits = [n for n, r in inside if len(r) == deepest]
+    else:
+        main_tree = os.path.dirname(common) if os.path.basename(common) == ".git" else None
+        hits = [n for n, r in same if main_tree is not None and r == main_tree]
+    return hits[0] if len(hits) == 1 else None
+
+
+def default_project(args) -> str:
+    """args.project, or the project inferred from the cwd (stored on args, noted on stderr)."""
+    if getattr(args, "project", None):
+        return args.project
+    name = project_from_cwd()
+    if name:
+        import sys
+        args.project = name
+        print(f"(project '{name}' — nhận từ thư mục hiện tại; ghi --project để chọn khác)", file=sys.stderr)
+    return name
+
+
 def load(name: str) -> dict:
     """Return the project entry from projects.json, or {} if missing/unreadable."""
     path = os.path.join(_work_dir(), "projects.json")
@@ -219,7 +323,7 @@ def apply_args(args, mutating: bool = False):
     Reads args.project, args.env, args.allow_prod (any may be absent). Returns
     None on success (env injected), or an error dict the tool should emit & exit.
     """
-    project = getattr(args, "project", None)
+    project = default_project(args) if hasattr(args, "project") else None
     if not project:
         return None
     try:
