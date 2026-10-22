@@ -35,6 +35,19 @@ Repo này là **toolset dùng chung**. Workspace project sống ở `./work/` (t
 - `./work/projects.json` — registry: project → `{gitlab_project_id, azure_project, clone_dir, stack, environments, ...}`.
 - `./work/<name>/` — bản clone của từng repo (vd `./work/atask` = `<group>/atask`).
 - `./work/proj.sh` — switcher cho terminal con người (`source` rồi `proj <name>`).
+- `./work/platforms.json` — môi trường DÙNG CHUNG (config-cloud, cụm k8s, kubeconfig/context). Project khai
+  `"platform": "<tên>"` → lớp thấp nhất khi resolve (platform env < project stack < project env).
+- `./work/kube/` — kubeconfig; registry trỏ bằng `work:kube/<file>` (đi theo thư mục, không phụ thuộc máy).
+- `./work/memory/` — **kiến thức bền mang theo được** (zip thư mục sang máy khác vẫn còn). Ghi fact bền
+  (môi trường, bẫy, quyết định của người dùng) vào ĐÂY + 1 dòng trong `work/memory/MEMORY.md`, không chỉ
+  vào auto-memory của máy. Chỉ mục được nạp ngay dưới đây (máy chưa có `work/` thì bỏ qua):
+
+@work/memory/MEMORY.md
+
+**Output tạm (log build/test, kết quả Codex, prompt, file khảo sát) → `temp/`, KHÔNG ghi ra gốc `work/`**
+(gốc `work/` chỉ chứa registry, clone/worktree, `kube/`, `memory/`). Log test: `temp/logs/suite/`; kết quả
+Codex/review: `temp/codex/`. Không redirect cả output `mvn test` (~260 MB/lần) để giữ — giữ bản tóm tắt + đoạn
+lỗi; log full chỉ để khi đang soi lỗi. Test etask: `work/etask-suite-run.sh <base> <branch>` (đã theo quy ước này).
 
 > Tool đọc registry tại `<repo>/work/projects.json` (đè bằng env `WORK_DIR` nếu cần).
 

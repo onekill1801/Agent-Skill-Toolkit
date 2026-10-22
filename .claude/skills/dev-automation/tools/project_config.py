@@ -37,6 +37,11 @@ projects.json shape (only `stack` / `environments` are read here):
 
 Backward compatible: a project with only `stack` and no `environments` resolves to
 that single stack regardless of --env.
+
+Shared platform: most projects run on the same config server / k8s clusters, so a
+project may declare `"platform": "<name>"`. `<work_dir>/platforms.json` then holds
+`{"<name>": {"environments": {"<env>": {...}}}}` and that block is the LOWEST layer:
+platform env < project stack < project env. Its env names count as known envs.
 """
 
 import json
@@ -93,6 +98,18 @@ def load(name: str) -> dict:
         return {}
 
 
+def load_platform(name: str) -> dict:
+    """Return the platform entry from platforms.json, or {} if missing/unreadable."""
+    path = os.path.join(_work_dir(), "platforms.json")
+    if not name or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f).get(name, {})
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     """Recursively merge override onto base (one level of nested dicts is enough)."""
     out = dict(base)
@@ -121,19 +138,23 @@ def resolve(name: str, env: str = None) -> dict:
     block = load(name)
     base = block.get("stack", {})
     envs = block.get("environments", {})
-    known = sorted(envs.keys())
+    platform_envs = load_platform(block.get("platform", "")).get("environments", {})
+    known = sorted(set(envs) | set(platform_envs))
 
     chosen = env or block.get("default_env")
-    if envs and not chosen:
+    if known and not chosen:
         raise ResolveError(
             f"project '{name}' has multiple environments; pass --env (one of: {', '.join(known)})"
         )
-    if chosen and envs and chosen not in envs:
+    if chosen and known and chosen not in known:
         raise ResolveError(
             f"unknown env '{chosen}' for project '{name}' (known: {', '.join(known) or 'none'})"
         )
 
-    merged = _deep_merge(base, envs.get(chosen, {})) if chosen else base
+    if chosen:
+        merged = _deep_merge(_deep_merge(platform_envs.get(chosen, {}), base), envs.get(chosen, {}))
+    else:
+        merged = base
 
     # Spring gap-fill: most Java projects keep the real per-env DB connection in
     # application-<env>.yml, not in the registry. Fill ONLY the keys the registry

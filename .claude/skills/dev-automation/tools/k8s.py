@@ -96,9 +96,12 @@ def lens_dirs() -> list:
 
 
 def expand_kubeconfig(path: str) -> str:
-    """'~/x' -> home path; 'lens:<file>' -> <Lens>/kubeconfigs/<file> (first that exists)."""
+    """'~/x' -> home path; 'lens:<file>' -> <Lens>/kubeconfigs/<file> (first that exists);
+    'work:<rel>' -> <work_dir>/<rel> (travels with the repo folder)."""
     if not path:
         return ""
+    if path.startswith("work:"):
+        return os.path.join(project_config._work_dir(), *path[len("work:"):].split("/"))
     if path.startswith("lens:"):
         name = path[len("lens:"):]
         cands = [os.path.join(d, "kubeconfigs", name) for d in lens_dirs()]
