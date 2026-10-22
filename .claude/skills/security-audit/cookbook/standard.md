@@ -11,12 +11,12 @@ cần sửa hoặc ghi lý do) · 🔵 low (vệ sinh code) · ⚪ info (danh s�
 
 ```
 T=.claude/skills/security-audit/tools
-python $T/security_scan.py scan --repo work/etask                    # báo cáo text, exit 1 nếu có lỗi HIGH MỚI
-python $T/security_scan.py scan --repo work/etask --format md --out temp/etask-security.md
-python $T/security_scan.py scan --repo work/etask --history           # + secret từng commit (300 commit gần nhất)
-python $T/security_scan.py endpoints --repo work/etask --public       # endpoint công khai (permitAll)
-python $T/security_scan.py endpoints --repo work/etask --ids          # endpoint nhận id, chỉ cần đăng nhập → soát BOLA
-python $T/security_scan.py baseline --repo work/etask --note "hiện trạng 2026-10-20"   # chấp nhận lỗi cũ
+python $T/security_scan.py scan --repo work/gitlab/idaas/etask                    # báo cáo text, exit 1 nếu có lỗi HIGH MỚI
+python $T/security_scan.py scan --repo work/gitlab/idaas/etask --format md --out temp/etask-security.md
+python $T/security_scan.py scan --repo work/gitlab/idaas/etask --history           # + secret từng commit (300 commit gần nhất)
+python $T/security_scan.py endpoints --repo work/gitlab/idaas/etask --public       # endpoint công khai (permitAll)
+python $T/security_scan.py endpoints --repo work/gitlab/idaas/etask --ids          # endpoint nhận id, chỉ cần đăng nhập → soát BOLA
+python $T/security_scan.py baseline --repo work/gitlab/idaas/etask --note "hiện trạng 2026-10-20"   # chấp nhận lỗi cũ
 python $T/security_scan.py rules                                     # danh sách mã
 ```
 - **Baseline** (`<repo>/.agent/security-baseline.json`): lưu dấu vân tay các lỗi đã biết → các lần sau chỉ

@@ -33,7 +33,9 @@ skill chỉ là vỏ: tool gọi `_runtime/bootstrap.py` rồi import đủ name
 
 Repo này là **toolset dùng chung**. Workspace project sống ở `./work/` (trong repo, đã **gitignore** → thấy được nhưng không commit):
 - `./work/projects.json` — registry: project → `{gitlab_project_id, azure_project, clone_dir, stack, environments, ...}`.
-- `./work/<name>/` — bản clone của từng repo (vd `./work/atask` = `<group>/atask`).
+- `./work/gitlab/<group>/<repo>/` — bản clone chính của từng repo, đúng đường dẫn GitLab (vd `./work/gitlab/idaas/etask`).
+- `./work/wt/<project>/<tên>/` — worktree (Orca/agent) tách khỏi clone chính (vd `./work/wt/etask/etask-pr7c`).
+- `./work/cache/` — bare repo cho review MR + codegraph seeds (tool tự quản).
 - `./work/proj.sh` — switcher cho terminal con người (`source` rồi `proj <name>`).
 - `./work/platforms.json` — môi trường DÙNG CHUNG (config-cloud, cụm k8s, kubeconfig/context). Project khai
   `"platform": "<tên>"` → lớp thấp nhất khi resolve (platform env < project stack < project env).
@@ -185,7 +187,7 @@ Khi tắt SSL verify → cảnh báo người dùng.
 Toolkit chạy trên cả 3 OS. Kiểm tra mức sẵn sàng của máy:
 ```
 python dev-automation/tools/doctor.py        # (hoặc python3) — báo OS, Python, CLI có/thiếu, feature nào chạy được
-python agentkit.py security_scan scan --repo work/etask [--history] [--format md --out F] | baseline | endpoints --public|--ids   # KIỂM BẢO MẬT offline theo security-audit/cookbook/standard.md (secret luôn che; exit 1 = lỗi MỚI, 3 = quét chưa đủ)
+python agentkit.py security_scan scan --repo work/gitlab/idaas/etask [--history] [--format md --out F] | baseline | endpoints --public|--ids   # KIỂM BẢO MẬT offline theo security-audit/cookbook/standard.md (secret luôn che; exit 1 = lỗi MỚI, 3 = quét chưa đủ)
 python agentkit.py machine_context [--json]  # bối cảnh máy ngoài git: .env theo nhóm, work/*.json, ~/.ssh, kubeconfig/Lens, DBeaver, gh, tài khoản agent — chỉ kiểm tồn tại, không đọc giá trị bí mật
 ```
 

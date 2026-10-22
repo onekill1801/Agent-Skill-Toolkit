@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Offline security scan of a product repo against the toolkit standard (cookbook/standard.md).
 
-    python security_scan.py scan --repo work/etask [--history] [--format text|md|json] [--out F]
+    python security_scan.py scan --repo work/gitlab/idaas/etask [--history] [--format text|md|json] [--out F]
                                  [--fail-on high|medium|low] [--include-info] [--baseline F]
-    python security_scan.py baseline --repo work/etask [--note "lý do"]   # [WRITE] accept today's findings
-    python security_scan.py endpoints --repo work/etask [--format text|json] [--public|--unprotected|--ids]
+    python security_scan.py baseline --repo work/gitlab/idaas/etask [--note "lý do"]   # [WRITE] accept today's findings
+    python security_scan.py endpoints --repo work/gitlab/idaas/etask [--format text|json] [--public|--unprotected|--ids]
     python security_scan.py rules                                       # the catalog (ids = the standard)
 
 Exit code of `scan`: 0 = no NEW finding at/above --fail-on (default high) · 1 = there are · 2 = error ·

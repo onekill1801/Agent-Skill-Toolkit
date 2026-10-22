@@ -90,7 +90,7 @@ Tình trạng: `python $T/dev-automation/tools/daemon_common.py status`.
 
 | Mở phiên ở | Kiến thức project (`AGENTS.md`, `.agent/`) | Skill + lệnh + hook toolkit |
 |---|---|---|
-| Gốc toolkit | phải chỉ: "làm trong `work/etask-pr7c`, đọc AGENTS.md + .agent/ trước" | có sẵn |
+| Gốc toolkit | phải chỉ: "làm trong `work/wt/etask/etask-pr7c`, đọc AGENTS.md + .agent/ trước" | có sẵn |
 | `work/<repo>` / worktree, **không** đặt biến | có (`CLAUDE.md` của repo + của toolkit đều nạp) | **không** — không có hook bảo vệ |
 | `work/<repo>` / worktree, **có** `CLAUDE_CODE_PLUGIN_DIRS` | có | có: skill `agent-skill-toolkit:*`, lệnh `/agent-skill-toolkit:<lệnh>`, hook `guard_write` |
 
@@ -195,8 +195,8 @@ verify:
 ```
 Chạy:
 ```bash
-python $T/auto-dev/tools/verify.py plan  --repo work/etask                # xem sẽ chạy gì (không tốn token)
-python $T/auto-dev/tools/verify.py start --repo work/etask --ac "AC1: tạo task trả 201"
+python $T/auto-dev/tools/verify.py plan  --repo work/gitlab/idaas/etask                # xem sẽ chạy gì (không tốn token)
+python $T/auto-dev/tools/verify.py start --repo work/gitlab/idaas/etask --ac "AC1: tạo task trả 201"
 python $T/auto-dev/tools/verify.py work --once
 python $T/auto-dev/tools/verify.py report <task_id>                       # AC nào có test chứng minh, AC nào chưa
 ```
@@ -231,8 +231,8 @@ Trần thật = tổng slot tài khoản (5 tài khoản Claude × 2 + Codex); �
 ### 4.6 Đề xuất cải tiến hằng tuần (không tốn token khi quét)
 
 ```bash
-python $T/auto-dev/tools/proposals.py scan --repo work/etask              # chỉ đọc: thư viện cũ, file "nóng"
-python $T/auto-dev/tools/proposals.py scan --repo work/etask --enqueue    # tạo ứng viên chờ bạn chọn
+python $T/auto-dev/tools/proposals.py scan --repo work/gitlab/idaas/etask              # chỉ đọc: thư viện cũ, file "nóng"
+python $T/auto-dev/tools/proposals.py scan --repo work/gitlab/idaas/etask --enqueue    # tạo ứng viên chờ bạn chọn
 python $T/auto-dev/tools/proposals.py list
 python $T/auto-dev/tools/proposals.py go <id>                             # [Làm]: Claude+Codex tranh luận → ADR (TỐN token)
 python $T/auto-dev/tools/proposals.py decide <id> accept --reason "..."   # bạn quyết; reject thì toolkit nhớ, không đề xuất lại
@@ -241,9 +241,9 @@ python $T/auto-dev/tools/proposals.py decide <id> accept --reason "..."   # bạ
 ### 4.7 Refactor lớn theo từng lát
 
 ```bash
-python $T/auto-dev/tools/refactor.py survey --repo work/etask --depth 2   # bản đồ module, vòng phụ thuộc, điểm nóng (chỉ đọc)
-python $T/auto-dev/tools/refactor.py ratchet init --repo work/etask       # chụp số vi phạm kiến trúc hiện tại (cần .agent/architecture.json)
-python $T/auto-dev/tools/refactor.py program new --repo work/etask --goal "Tách module X" \
+python $T/auto-dev/tools/refactor.py survey --repo work/gitlab/idaas/etask --depth 2   # bản đồ module, vòng phụ thuộc, điểm nóng (chỉ đọc)
+python $T/auto-dev/tools/refactor.py ratchet init --repo work/gitlab/idaas/etask       # chụp số vi phạm kiến trúc hiện tại (cần .agent/architecture.json)
+python $T/auto-dev/tools/refactor.py program new --repo work/gitlab/idaas/etask --goal "Tách module X" \
        --invariants "API không đổi" --slices slices.json                 # chia lát
 python $T/auto-dev/tools/refactor.py program approve <id>                 # bạn duyệt kế hoạch
 python $T/auto-dev/tools/coordinator.py work                              # mỗi lát: code → thang kiểm → nhánh riêng
@@ -254,9 +254,9 @@ python $T/auto-dev/tools/refactor.py program status <id>
 ### 4.8 Tra cứu code nhanh
 
 ```bash
-python $T/dev-automation/tools/code_context.py callers <tênHàm> --repo work/etask   # ai gọi hàm này
-python $T/dev-automation/tools/code_context.py affected <file> --repo work/etask    # sửa file này ảnh hưởng gì / test nào
-python $T/dev-automation/tools/code_context.py trace --repo work/etask < stack.txt  # stacktrace → vị trí code
+python $T/dev-automation/tools/code_context.py callers <tênHàm> --repo work/gitlab/idaas/etask   # ai gọi hàm này
+python $T/dev-automation/tools/code_context.py affected <file> --repo work/gitlab/idaas/etask    # sửa file này ảnh hưởng gì / test nào
+python $T/dev-automation/tools/code_context.py trace --repo work/gitlab/idaas/etask < stack.txt  # stacktrace → vị trí code
 ```
 
 ### 4.9 Nhận yêu cầu từ group TChat
@@ -335,12 +335,12 @@ python $T/dev-automation/tools/dbeaver.py probe "Folder/Tên kết nối" --sql 
 Quy chuẩn: `.claude/skills/security-audit/cookbook/standard.md` (mỗi lỗi có mã, mức, cách sửa). Máy quét chỉ đọc
 file + `git log`, **không gửi gì ra ngoài**, secret luôn bị che trong báo cáo.
 ```bash
-python agentkit.py security_scan scan --repo work/etask                       # báo cáo text
-python agentkit.py security_scan scan --repo work/etask --format md --out temp/etask-security.md
-python agentkit.py security_scan scan --repo work/etask --history             # + secret trong 300 commit gần nhất
-python agentkit.py security_scan endpoints --repo work/etask --public         # endpoint công khai (permitAll)
-python agentkit.py security_scan endpoints --repo work/etask --ids            # nhận id, chỉ cần đăng nhập → soát BOLA
-python agentkit.py security_scan baseline --repo work/etask --note "hiện trạng"   # chấp nhận lỗi cũ → chỉ chặn lỗi MỚI
+python agentkit.py security_scan scan --repo work/gitlab/idaas/etask                       # báo cáo text
+python agentkit.py security_scan scan --repo work/gitlab/idaas/etask --format md --out temp/etask-security.md
+python agentkit.py security_scan scan --repo work/gitlab/idaas/etask --history             # + secret trong 300 commit gần nhất
+python agentkit.py security_scan endpoints --repo work/gitlab/idaas/etask --public         # endpoint công khai (permitAll)
+python agentkit.py security_scan endpoints --repo work/gitlab/idaas/etask --ids            # nhận id, chỉ cần đăng nhập → soát BOLA
+python agentkit.py security_scan baseline --repo work/gitlab/idaas/etask --note "hiện trạng"   # chấp nhận lỗi cũ → chỉ chặn lỗi MỚI
 ```
 Mã thoát: `0` sạch (so với baseline) · `1` có lỗi MỚI mức ≥ `--fail-on` (mặc định high) · `2` lỗi · `3` **quét chưa
 đủ** (file quá lớn / không đọc được / git lỗi — đừng coi là sạch). Bỏ qua có lý do ngay tại dòng:
