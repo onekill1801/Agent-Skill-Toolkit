@@ -1,5 +1,5 @@
 ---
-name: Skill Scaffold
+name: skill-scaffold
 description: >
   Extract agent tools from an external application and scaffold a new Claude Code skill
   in this repo (SKILL.md, tools/, cookbook/, prompts/, slash commands).

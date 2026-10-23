@@ -18,9 +18,11 @@ Usage:
     python gitlab_api.py my-review-mrs [reviewer|assignee|both]
 """
 
+import contextlib
 import json
 import ssl
 import sys
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -37,8 +39,24 @@ def _ssl_context() -> ssl.SSLContext:
     return ssl.create_default_context()
 
 
+_TLS = threading.local()
+
+
 def _project_id() -> str:
-    return config.get("GITLAB_PROJECT_ID")
+    # a per-THREAD override (project_scope) wins over the env/.env value: several workers in one
+    # process may talk to different projects at once without touching os.environ
+    return getattr(_TLS, "project_id", None) or config.get("GITLAB_PROJECT_ID")
+
+
+@contextlib.contextmanager
+def project_scope(project_id):
+    """Calls made by THIS thread inside the block use `project_id`."""
+    prev = getattr(_TLS, "project_id", None)
+    _TLS.project_id = str(project_id)
+    try:
+        yield
+    finally:
+        _TLS.project_id = prev
 
 
 def _request(url: str, method: str = "GET", data: dict | None = None) -> dict | list:

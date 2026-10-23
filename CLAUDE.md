@@ -16,18 +16,40 @@ Mục tiêu: giải phóng người dùng khỏi công việc lặp lại (đọ
     atask-automation/       # aTask: task/sprint/checklist/analytics (PAT auth)
     fork-terminal/          # Spawn agent khác (Claude/Codex/Gemini) ra terminal mới
     skill-scaffold/         # Meta-skill: trích tool từ app khác → sinh skill mới
+    security-audit/         # Quy chuẩn bảo mật + máy quét offline repo sản phẩm (endpoint, secret, cấu hình prod…)
+    mr-review/              # Hàng đợi review MR: worktree đúng diff_refs → review.json → DUYỆT → đăng
+  hooks/guard_write.py      # PreToolUse: lệnh ghi/notify/đọc secret → hỏi (headless → chặn)
+.claude-plugin/ .codex-plugin/   # manifest plugin (Orca/Claude/Codex nhận skill ở .claude/skills)
 .env                        # Token + cấu hình (KHÔNG commit). Mẫu: .env.sample
 temp/                       # Output tạm (đã gitignore)
 ```
 
 Mỗi skill có: `SKILL.md` (trigger + workflow + routing) · `cookbook/` (chi tiết) · `prompts/` · `tools/` (Python).
 
+Code mới đặt trong package `.claude/skills/_runtime/agent_skill_toolkit/` (`core` · `integrations` · `workflows`),
+skill chỉ là vỏ: tool gọi `_runtime/bootstrap.py` rồi import đủ namespace — xem `docs/design/agent-ecosystem.md §B`.
+
 ## Workspace đa project
 
 Repo này là **toolset dùng chung**. Workspace project sống ở `./work/` (trong repo, đã **gitignore** → thấy được nhưng không commit):
 - `./work/projects.json` — registry: project → `{gitlab_project_id, azure_project, clone_dir, stack, environments, ...}`.
-- `./work/<name>/` — bản clone của từng repo (vd `./work/atask` = `<group>/atask`).
+- `./work/gitlab/<group>/<repo>/` — bản clone chính của từng repo, đúng đường dẫn GitLab (vd `./work/gitlab/idaas/etask`).
+- `./work/wt/<project>/<tên>/` — worktree (Orca/agent) tách khỏi clone chính (vd `./work/wt/etask/etask-pr7c`).
+- `./work/cache/` — bare repo cho review MR + codegraph seeds (tool tự quản).
 - `./work/proj.sh` — switcher cho terminal con người (`source` rồi `proj <name>`).
+- `./work/platforms.json` — môi trường DÙNG CHUNG (config-cloud, cụm k8s, kubeconfig/context). Project khai
+  `"platform": "<tên>"` → lớp thấp nhất khi resolve (platform env < project stack < project env).
+- `./work/kube/` — kubeconfig; registry trỏ bằng `work:kube/<file>` (đi theo thư mục, không phụ thuộc máy).
+- `./work/memory/` — **kiến thức bền mang theo được** (zip thư mục sang máy khác vẫn còn). Ghi fact bền
+  (môi trường, bẫy, quyết định của người dùng) vào ĐÂY + 1 dòng trong `work/memory/MEMORY.md`, không chỉ
+  vào auto-memory của máy. Chỉ mục được nạp ngay dưới đây (máy chưa có `work/` thì bỏ qua):
+
+@work/memory/MEMORY.md
+
+**Output tạm (log build/test, kết quả Codex, prompt, file khảo sát) → `temp/`, KHÔNG ghi ra gốc `work/`**
+(gốc `work/` chỉ chứa registry, clone/worktree, `kube/`, `memory/`). Log test: `temp/logs/suite/`; kết quả
+Codex/review: `temp/codex/`. Không redirect cả output `mvn test` (~260 MB/lần) để giữ — giữ bản tóm tắt + đoạn
+lỗi; log full chỉ để khi đang soi lỗi. Test etask: `work/etask-suite-run.sh <base> <branch>` (đã theo quy ước này).
 
 > Tool đọc registry tại `<repo>/work/projects.json` (đè bằng env `WORK_DIR` nếu cần).
 
@@ -36,10 +58,22 @@ Agent: đọc `projects.json`, **prefix env inline** mỗi lệnh, vd:
 `GITLAB_PROJECT_ID=123 AZURE_DEVOPS_PROJECT=My-Project python3 gitlab_api.py list-mrs`.
 Chi tiết: `dev-automation/cookbook/multi-project.md`.
 
+**Mở phiên NGAY TRONG repo/worktree** (`work/<repo>`, `work/gitlab/<group>/<repo>`, worktree Orca): đặt env
+`CLAUDE_CODE_PLUGIN_DIRS=<gốc toolkit>` → Claude nạp toolkit như plugin TẠI CHỖ (không sao chép): skill
+`agent-skill-toolkit:*`, lệnh `/agent-skill-toolkit:<lệnh>`, hook `guard_write.py` (ở chính gốc toolkit plugin tự
+tắt — `enabledPlugins` trong `.claude/settings.json`). Gọi tool bằng `python <gốc toolkit>/agentkit.py <tool>`; thiếu
+`--project` thì tool tự nhận project từ thư mục hiện tại (clone hoặc worktree của nó trong registry).
+`python agentkit.py workspace discover` → bản nháp registry cho clone chưa khai (`temp/registry-draft.json`,
+chỉ đọc) · `workspace apply --draft F [--only k1,k2]` [WRITE] · `workspace where [DIR]`.
+
 ## Chạy tool Python
 
+- **Cách gọn nhất — một entry point:** `python agentkit.py <tool> [args]` (chạy từ gốc repo, không cần
+  `cd`). `--list [chuỗi]` xem tool có sẵn · `--where <tool>` xem file nào sẽ chạy. Tên trùng giữa các
+  skill (`config`) phải ghi rõ `<skill>:<tool>` — agentkit từ chối đoán. Nó cũng đặt thư mục tools của
+  skill sở hữu **lên đầu** `sys.path` nên tool luôn import đúng `config` của mình.
 - Tool **chỉ dùng stdlib** (`urllib`), không cần `pip install`.
-- `cd` vào thư mục `tools/` của skill rồi chạy. Windows: `python` · macOS/Linux: `python3`.
+- Cách cũ vẫn chạy y nguyên: `cd` vào `tools/` của skill rồi gọi. Windows: `python` · macOS/Linux: `python3`.
 - Config đọc từ `.env` ở gốc repo (tự dò ngược tối đa 5 cấp thư mục).
 - Tool trả JSON; lỗi trả `{"error": true, "status": ..., "message": ...}` — đọc và xử lý, đừng coi là crash.
 
@@ -60,12 +94,51 @@ python gitlab_api.py mr-comment <iid> "body"       # [WRITE]
 python gitlab_api.py merge-mr <iid> [--keep-source] [--squash]   # [WRITE] accept/merge MR
 python gitlab_api.py whoami                         # user GitLab hiện tại
 python gitlab_api.py my-review-mrs [reviewer|assignee|both]   # MR gắn tên tôi (toàn project)
-python mr_watch.py [--who ...] [--interval 300] [--once] [--no-spawn]   # poll MR gắn tên tôi → tự mở Claude review (hỏi trước khi post)
+python mr_watch.py [--who ...] [--interval 300] [--once] [--no-spawn] [--mode store|terminal]   # poll MR gắn tên tôi → xếp task review_mr vào store (mặc định; `review_flow.py work` chạy) · terminal = mở Claude như cũ
+python supervise.py --name N [--no-reload] -- <lệnh daemon>   # GIỮ DAEMON CHẠY: thoát/lỗi → tự chạy lại (2→60 s); commit mới/.env/agents.json đổi → chạy lại để dùng code mới
 python daemon_common.py status   # tình trạng các daemon (last event: started/transient/fatal/recovered) từ temp/daemon_health.jsonl
+python ../auto-dev/tools/verify.py plan|start --repo DIR [--base B] [--spec F] | work [--once] | status   # THANG KIỂM: build→test liên quan→suite→review chéo, tự sửa tới xanh (spec đọc từ base ref; không chạy trên nhánh mặc định)
+python ../auto-dev/tools/refactor.py survey --repo DIR [--depth 2] | ratchet check|init|tighten --repo DIR | program new|approve|status | snapshot|metrics record --rung R   # LÀN LỚN: khảo sát module/vòng phụ thuộc/điểm nóng + bánh cóc kiến trúc (ngoại lệ chỉ giảm; bậc `kind: ratchet` trong thang kiểm)
+python ../auto-dev/tools/proposals.py scan --repo DIR [--enqueue] | new --repo DIR --question Q | go <id> | decide <id> accept|reject --reason R   # LÀN ĐỀ XUẤT: quét tuần (không token) → [Làm] → debate → ADR → bạn quyết
+python ../auto-dev/tools/accounts.py [--json]   # TÀI KHOẢN agent (work/agents.json, gồm tài khoản Orca): đang làm gì + dung lượng còn lại (đọc thẳng Anthropic bằng access token của từng tài khoản, 5 phút/lần, KHÔNG gia hạn token; không được thì số của Orca · `--orca-only`)
+python ../auto-dev/tools/coordinator.py work [--parallel N] [--once] | board | accept <id> [--lane L] | capacity [N] | usage [PCT] | budget [--daily-agent-runs N]   # ĐIỀU PHỐI mọi loại việc trong store (giới hạn song song toàn cục, phụ thuộc, khoá repo) + bảng tiến độ
+python taskstore.py summary | list [--status ...] | show <id> | events [<id>] | add <kind> <ref> | unblock|cancel <id>   # store bền (temp/toolkit.db): task, lease, checkpoint, dừng khi hết quota → chạy tiếp
+python dashboard.py serve [--port 8765] [--read-only]   # GIAO DIỆN WEB (127.0.0.1): việc, tài khoản, review MR, duyệt chờ, daemon, lệnh từng chức năng + FORM CÀI ĐẶT — mở link có #key=… mà lệnh in ra (không key = chỉ xem)
+python toolkit_settings.py list | set KEY VALUE   # cùng danh mục cài đặt ở terminal (chỉ khoá KHÔNG bí mật; set = [WRITE], báo tab cần restart)
 python status.py [--json] [--section daemons,runs,queue,approvals,feedback]   # BẢNG TRẠNG THÁI tổng hợp: daemon + pipeline run đang mở + queue + approval chờ + feedback stats
+python k8s.py doctor|contexts                       # kubectl (PATH/Lens) + kubeconfig có trên máy — không gọi mạng
+python k8s.py access|pods|deploys|events|describe|logs|get --project P --env E   # READ-ONLY; hoặc --context C --kubeconfig F [-n NS]
+python k8s.py forwards [--listening]               # port-forward đã lưu trong Lens: cluster/context, svc, cổng local, đang mở?
+python dbeaver.py list [--q t] [--folder PROD] | show "Folder/Tên" | forwards   # metadata DBeaver (KHÔNG đọc credential)
+python dbeaver.py probe "Folder/Tên" --sql "select …"   # qua probe_db; user/pass từ env DB_USER/DB_PASSWORD; PROD = chỉ đọc
+python podfwd.py start <pod/x|svc/x|deploy/x|"-l app=db"> <local>:<remote> --project P --env E [--name N]   # forward nền, tự nối lại
+python podfwd.py start-saved --project P --env E | list | stop <name|all> | logs <name>   # PROD cần --allow-prod (hook hỏi)
+python podfwd.py fetch <pod|"-l sel"> <path-trong-pod> [--to DIR]   # oc rsync pod -> work/pods/ (đọc code/config đã deploy)
+python code_context.py callers|impact|locate <symbol> | affected <file>... | trace < stack.txt | status --repo DIR   # NGỮ CẢNH CODE: CodeGraph khi index mới (cũ → sync), không thì grep; luôn ghi source
+python cg.py prepare <worktree> --project-id <id> | analyze <worktree> --base B --head H --out F   # codegraph cho worktree: copy seed + sync (giây), method bị sửa, nơi gọi ngoài diff, test bị ảnh hưởng
+python vpn.py status | up | ensure | down | watch    # FortiVPN (macOS/Linux: openfortivpn; Windows: FortiClient). status exit 0 = mạng nội bộ OK
+python k8s.py logs ... deploy/NAME [--since 30m] [--errors -C 3] [--grep RE] [--previous]   # gộp log mọi pod của deploy; --errors bắt text/JSON/glog
+python jenkins_scan.py scan | show [--project P] | apply [--only k1,k2]   # NHÁNH TỪNG MÔI TRƯỜNG từ Jenkins: quét mọi job (config inline, prod 403 → log build), thư mục gốc → env (DEMO=demo, DEV-K8S=dev, Special-SANBOX=sandbox, PROD-KYTA-NEW=prod…); apply [WRITE] ghi environments.<env>.jenkins.job/branch(/jobs) + deployed_branch vào projects.json
+python jenkins_ops.py render|create [--update]|tags|run --action status|restart|rollback [--tag x.y.z] [--wait] [--via auto|ops|swap] --project P --env E   # RESTART/ROLLBACK k8s QUA JENKINS khi không có quyền k8s: job <job>-ops cạnh job build (dùng lại agent + kubeconfig credential), sinh từ registry; chưa có job ops → swap = tạm thay <script> job build, chạy, LUÔN khôi phục + so khớp (backup work/jenkins/backups/); create/run = [WRITE]
 python notifier.py started|mr-created|review-done|deploy-done|custom <id> ...   # [WRITE → người thật thấy]
+python ../auto-dev/tools/agent_init.py scan|draft|apply|check --project <P>   # chuẩn .agent/ cho repo sản phẩm (apply là [WRITE])
 python feedback.py add|recall|list|search|stats --project <P> ...   # sổ học từ can thiệp người (recall bơm bài học cũ vào prompt run sau)
 ```
+
+### mr-review (`.claude/skills/mr-review/tools/`) — xem `mr-review/SKILL.md`
+```
+python review_queue.py add --project etask --iid 123 | add-text "<tin có link MR>" | list --brief | next | pending
+python review_ws.py prepare <job> [--with-merge] | diff <job> [--path P] | check-stale <job> | cleanup <job> | gc
+python review_post.py validate|render|request-approval <job>    # agent dừng ở đây
+python review_post.py approve|reject <job>                      # CHỈ người (cần TTY), duyệt gắn với đúng nội dung
+python review_rules.py check <job>                              # luật tự đăng (REVIEW_AUTO_POST=off|shadow|auto)
+python review_flow.py enqueue --project P --iid N | enqueue-text "<tin>" --source fchat | work [--once] | reconcile | status   # review BỀN: hết quota → dừng/chạy tiếp, MR đổi commit → review lại
+python review_post.py sweep                                     # [WRITE] đăng review đã duyệt + báo FChat
+```
+Orca: automation "Auto review MR" = công tắc (precheck `review_queue.py pending`); listener FChat
+(`tchat-automation/tools/group_watch.py`) chỉ xếp hàng + kích hoạt. `orca_adapter.py` (dev-automation)
+là nơi DUY NHẤT gọi `orca` CLI. Router model/tài khoản: `agent_runner.py --role <r>` theo `work/agents.json`.
+Task nhiều repo: `auto-dev/cookbook/multi-repo.md`.
 
 ### atask-automation (`.claude/skills/atask-automation/tools/`)
 ```
@@ -96,6 +169,11 @@ Khi tắt SSL verify → cảnh báo người dùng.
 ## Guardrail (BẮT BUỘC)
 
 1. **Hỏi xác nhận trước thao tác `[WRITE]`** lần đầu trong một mạch tự động: tạo branch/MR, đổi state, **mọi `notifier.py`** (người thật sẽ thấy).
+   Ngoại lệ duy nhất: comment review MR do `review_post.py sweep` tự đăng khi `REVIEW_AUTO_POST=auto` và
+   review qua mọi luật của `mr-review/tools/review_rules.py` (agent vẫn không tự gọi `gitlab_api.py mr-comment`).
+1b. **Mốc duyệt là gate thật, không phải trạng thái.** `run_log.py checkpoint ... --source agent` (mặc định)
+   **không** đủ để `advance deliver` ở `mode=checkpoint` — cần `--source human|telegram`. Đường chuẩn:
+   `tg_gate.py parse` tự ghi checkpoint kèm proof. Đừng tự khai `--source human` khi không có người duyệt thật.
 2. **Luôn confirm** trước thao tác xoá (`delete`, `del-comment`, `delete-branch`) và trước khi chuyển task sang trạng thái cuối (Done/Closed/Cancelled).
 3. **Không hardcode token/URL** — luôn qua `config.py`.
 4. Đọc cookbook liên quan trước khi chạy một workflow nhiều bước.
@@ -111,6 +189,8 @@ Khi tắt SSL verify → cảnh báo người dùng.
 Toolkit chạy trên cả 3 OS. Kiểm tra mức sẵn sàng của máy:
 ```
 python dev-automation/tools/doctor.py        # (hoặc python3) — báo OS, Python, CLI có/thiếu, feature nào chạy được
+python agentkit.py security_scan scan --repo work/gitlab/idaas/etask [--history] [--format md --out F] | baseline | endpoints --public|--ids   # KIỂM BẢO MẬT offline theo security-audit/cookbook/standard.md (secret luôn che; exit 1 = lỗi MỚI, 3 = quét chưa đủ)
+python agentkit.py machine_context [--json]  # bối cảnh máy ngoài git: .env theo nhóm, work/*.json, ~/.ssh, kubeconfig/Lens, DBeaver, gh, tài khoản agent — chỉ kiểm tồn tại, không đọc giá trị bí mật
 ```
 
 - **Python**: `python` (Windows) · `python3` (macOS/Linux). Tool chỉ dùng **stdlib**, không pip.

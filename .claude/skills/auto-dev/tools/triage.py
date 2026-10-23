@@ -33,7 +33,8 @@ _SKILLS = os.path.dirname(os.path.dirname(_HERE))
 sys.path.insert(0, os.path.join(_SKILLS, "fork-terminal", "tools"))
 sys.path.insert(0, _HERE)
 import agent_parser  # noqa: E402
-import agent_runner  # noqa: E402
+import agent_runner  # noqa: E402  (also activates the runtime package)
+from agent_skill_toolkit.workflows.intake import lanes  # noqa: E402
 
 # Signals that a task touches risky surface area -> force complex (English + Vietnamese).
 HIGH_RISK = [
@@ -145,16 +146,38 @@ def cmd_classify(args) -> dict:
         mode = args.force_mode
 
     _, _, _, signals = classify(args.type, args.title, desc, n_files)
+    text = f"{args.title or ''} {desc or ''}"
+    kind = lanes.kind_of(args.type, text)
+    lane = lanes.lane_for(tier, kind, text)
+    if getattr(args, "force_lane", None):
+        lane = {"lane": args.force_lane, "reason": "forced by operator"}
+    # The lane is authoritative for the legacy policy keys callers already read (tier / mode /
+    # skip_debate): a task routed to a larger lane must not keep the small-task autonomy (Codex F.1 #1).
+    lane_adjusted = None
+    order = ("trivial", "standard", "complex")
+    floor = {"vua": "standard", "lon": "complex", "de_xuat": "standard"}.get(lane["lane"])
+    if floor and order.index(tier) < order.index(floor):
+        lane_adjusted = f"tier {tier} -> {floor} for lane {lane['lane']}"
+        tier = floor
+    if lane["lane"] not in (None, "nho") and mode == "auto":
+        mode = "checkpoint"
+        lane_adjusted = (lane_adjusted + "; " if lane_adjusted else "") + f"mode auto -> checkpoint for lane {lane['lane']}"
     out = {
         "tier": tier,
         "mode": mode,
         "reason": reason,
-        "skip_debate": tier == "trivial",
+        "skip_debate": tier == "trivial" and lane["lane"] in (None, "nho"),
         "source": source,
         "signals": signals,
+        "kind": kind,                       # design §4.2
+        "lane": lane["lane"],               # design §4.3 (None for non-code kinds)
+        "lane_reason": lane["reason"],
+        "profile": lanes.PROFILES.get(lane["lane"]) if lane["lane"] else None,
     }
     if clarity_downgrade:
         out["clarity_downgrade"] = clarity_downgrade
+    if lane_adjusted:
+        out["lane_adjusted"] = lane_adjusted
     if fallback_note:
         out["note"] = fallback_note
     return out
@@ -177,10 +200,21 @@ def main() -> int:
                    help="clarify verdict (pass|needs_clarification); needs_clarification blocks auto")
     p.add_argument("--force-tier", default=None, choices=["trivial", "standard", "complex"])
     p.add_argument("--force-mode", default=None, choices=["auto", "checkpoint"])
+    p.add_argument("--force-lane", default=None, choices=list(lanes.LANES))
+    u = sub.add_parser("upgrade", help="automatic lane upgrade check (never downgrades)")
+    u.add_argument("--lane", required=True, choices=list(lanes.LANES))
+    u.add_argument("--diff-lines", type=int, default=0)
+    u.add_argument("--files", type=int, default=0)
+    u.add_argument("--red-twice", action="store_true")
+    u.add_argument("--new-blocking", type=int, default=0)
 
     args = ap.parse_args()
     try:
-        out = cmd_classify(args)
+        if args.action == "upgrade":
+            out = lanes.upgrade(args.lane, diff_lines=args.diff_lines, files=args.files,
+                                red_twice=args.red_twice, new_blocking=args.new_blocking)
+        else:
+            out = cmd_classify(args)
     except (ValueError, OSError) as e:
         out = {"error": True, "message": str(e)}
     print(json.dumps(out, ensure_ascii=False, indent=2))

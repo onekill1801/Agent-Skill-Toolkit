@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""Intake gate (checklist F.5): which source may create which task, allowlist by user id, switches,
+and the watchers only enqueue.
+    python -m unittest discover -s tests
+"""
+
+import json
+import os
+import runpy
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+runpy.run_path(os.path.join(_ROOT, ".claude", "skills", "_runtime", "bootstrap.py"))["activate"]()
+from agent_skill_toolkit.core import store as S  # noqa: E402
+from agent_skill_toolkit.workflows.intake import gate  # noqa: E402
+
+
+class GateTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="gate-")
+        mock.patch.dict(os.environ, {"WORK_DIR": self.tmp, "TOOLKIT_STATE_DIR": self.tmp,
+                                     "TOOLKIT_STORE": os.path.join(self.tmp, "t.db")}).start()
+
+    def tearDown(self):
+        mock.patch.stopall()
+
+    def policy(self, data):
+        with open(os.path.join(self.tmp, "policy.json"), "w") as f:
+            f.write(data if isinstance(data, str) else json.dumps(data))
+
+    def test_kinds_per_source(self):
+        self.assertEqual(gate.admit("fchat", "review_mr")["trust"], "low")
+        self.assertEqual(gate.admit("self", "implement")["trust"], "high")
+        for source, kind in (("fchat", "implement"), ("mr_watch", "implement"), ("schedule", "implement"),
+                             ("atask_watch", "review_mr"), ("nobody", "review_mr")):
+            with self.assertRaises(PermissionError, msg=(source, kind)):
+                gate.admit(source, kind)
+
+    def test_switches(self):
+        self.policy({"intake": {"mr_watch": {"on": False}, "fchat": {"on": True}}})
+        with self.assertRaises(PermissionError):
+            gate.admit("mr_watch", "review_mr")
+        self.assertTrue(gate.admit("fchat", "review_mr"))
+
+    def test_unreadable_policy_fails_closed(self):
+        self.policy("{not json")
+        with self.assertRaises(PermissionError):
+            gate.admit("fchat", "review_mr")
+
+    def test_malformed_switches_fail_closed(self):
+        """Codex F.5 #5: a mistyped switch must not mean 'on'."""
+        for bad in ({"intake": {"fchat": False}}, {"intake": {"fchat": {"on": "false"}}}, {"intake": []}, []):
+            self.policy(bad)
+            with self.assertRaises(PermissionError, msg=bad):
+                gate.admit("fchat", "review_mr")
+        self.policy({"intake": {"fchat": {}}, "other": 1})
+        self.assertTrue(gate.admit("fchat", "review_mr"))
+
+    def test_group_cannot_trigger_build(self):
+        """Codex F.5 #1: only the owner (self) may ask for a build from the group."""
+        with self.assertRaises(PermissionError):
+            gate.admit("fchat", "build")
+        self.assertTrue(gate.admit("fchat", "investigate"))
+        self.assertTrue(gate.admit("self", "build"))
+
+    def test_host_check(self):
+        """Codex F.5 #3: userinfo / port / lookalike hosts are not our GitLab."""
+        ours = "https://gitlab.example.vn"
+        self.assertTrue(gate.host_ok("gitlab.example.vn", ours))
+        self.assertTrue(gate.host_ok("GitLab.Example.VN", ours))
+        for bad in ("gitlab.example.vn:pw@evil.example.com", "evil.example.com", "gitlab.example.vn.evil.com",
+                    "gitlab.example.vn:8443", "x.gitlab.example.vn", "", "gitlab.example.vn\\@evil"):
+            self.assertFalse(gate.host_ok(bad, ours), bad)
+        self.assertTrue(gate.host_ok("gitlab.example.vn:8443", "https://gitlab.example.vn:8443/"))
+        self.assertFalse(gate.host_ok("gitlab.example.vn", ""))
+
+    def test_allowlist_is_by_user_id_only(self):
+        self.assertTrue(gate.sender_allowed("U1", "u1, U2"))
+        self.assertFalse(gate.sender_allowed("U3", "U1,Nguyen Van A"))
+        self.assertFalse(gate.sender_allowed("", "*"))                     # no id = nobody
+        self.assertFalse(gate.sender_allowed("Nguyen Van A", "U1"))        # a name is not an id
+        self.assertTrue(gate.sender_allowed("U9", "*"))
+        self.assertFalse(gate.sender_allowed("U9", ""))
+        self.assertTrue(gate.sender_allowed("ME", "", me="me"))
+
+    def test_submit_records_where_the_task_came_from(self):
+        with S.Store() as st:
+            t = gate.submit(st, "atask_watch", "atask_intake", "T1@open", title="x", data={"a": 1},
+                            requester_id="u")
+            again = gate.submit(st, "atask_watch", "atask_intake", "T1@open")
+        self.assertEqual(t["data"]["intake"]["source"], "atask_watch")
+        self.assertEqual(t["data"]["a"], 1)
+        self.assertTrue(again["duplicate"])
+
+
+class MrWatchEnqueueTest(unittest.TestCase):
+    """mr_watch default mode: enqueue a durable task; an MR that could not be queued is retried."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(_ROOT, ".claude", "skills", "dev-automation", "tools"))
+        import mr_watch
+        self.mw = mr_watch
+        self.tmp = tempfile.mkdtemp(prefix="mrw-")
+        mock.patch.object(mr_watch, "STATE", os.path.join(self.tmp, "state.json")).start()
+        mock.patch.object(mr_watch, "MODE", "store").start()
+        self.mrs = [{"project_id": 7, "iid": 1, "sha": "a", "title": "t", "author": "x", "web_url": "u"},
+                    {"project_id": 7, "iid": 2, "sha": "b", "title": "t", "author": "x", "web_url": "u"}]
+        mock.patch.object(mr_watch.gitlab_api, "list_review_merge_requests", return_value=self.mrs).start()
+        self.spawn = mock.patch.object(mr_watch, "_spawn_review").start()
+
+    def tearDown(self):
+        mock.patch.stopall()
+
+    def test_store_mode_enqueues_and_never_spawns(self):
+        with mock.patch.object(self.mw, "_enqueue_review", side_effect=lambda mr: mr["iid"] == 1) as enq:
+            state = {}
+            self.mw.poll_once("me", "reviewer", False, True, state)
+        self.assertEqual(enq.call_count, 2)
+        self.assertEqual(state, {"7:1": "a"})              # !2 failed -> not marked, retried next poll
+        self.spawn.assert_not_called()
+
+    def test_enqueue_calls_review_flow_with_source_mr_watch(self):
+        fake = mock.Mock(stdout=json.dumps({"task_id": "t1", "job_id": "7-1"}), returncode=0)
+        with mock.patch.object(self.mw.subprocess, "run", return_value=fake) as run:
+            self.assertTrue(self.mw._enqueue_review(self.mrs[0]))
+        argv = run.call_args[0][0]
+        self.assertEqual(argv[argv.index("--source") + 1], "mr_watch")
+        self.assertTrue(argv[1].endswith("review_flow.py"))
+        fake.stdout = json.dumps({"error": True, "message": "switched off"})
+        with mock.patch.object(self.mw.subprocess, "run", return_value=fake):
+            self.assertFalse(self.mw._enqueue_review(self.mrs[0]))
+        # Codex F.5 #4: a crash with empty output is not "queued"
+        for out, rc in (("", 1), ("", 0), ("[]", 0), (json.dumps({"task_id": "t"}), 0),
+                        (json.dumps({"task_id": "t", "job_id": "j"}), 1)):
+            crash = mock.Mock(stdout=out, stderr="Traceback", returncode=rc)
+            with mock.patch.object(self.mw.subprocess, "run", return_value=crash):
+                self.assertFalse(self.mw._enqueue_review(self.mrs[0]), (out, rc))
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+GW_PROBE = r'''
+import json, sys
+sys.argv = ["x"]
+import group_watch as g
+calls, posts = [], []
+g._invoke_agent = lambda *a, **k: (calls.append(k.get("readonly")), ("ok", False))[1]
+g._post_tagged = lambda *a: posts.append(a[-1])
+g._post_results = lambda *a: None
+g._send_group = lambda *a, **k: None
+g.listen._fetch_history = lambda *a, **k: []
+g.rccfg.get = lambda k, d="": {"FCHAT_REVIEW_ALLOWED": "U1", "FCHAT_WATCH_FREEFORM": "1"}.get(k, d)
+out = {}
+for who, text in (("U1", "fix the reviewing errors and push the patch"), ("U1", "deploy etask lên dev"),
+                  ("U1", "hàm tính lương nằm ở đâu?"), ("ME", "build etask")):
+    calls.clear(); posts.clear()
+    g._process_one("G", 1, "n", who, text, "ME")
+    out[text] = {"agent": list(calls), "denied": bool(posts) and posts[-1].startswith("⛔")}
+argv = g.readonly_argv(["claude", "-p", "x"])
+out["argv"] = argv
+print(json.dumps(out, ensure_ascii=False))
+'''
+
+
+class GroupWatchReadOnlyTest(unittest.TestCase):
+    """Codex F.5 R2 #1: group members get a READ-ONLY agent; change requests are refused up front."""
+
+    def test_group_requests(self):
+        import subprocess
+        tools = os.path.join(_ROOT, ".claude", "skills", "tchat-automation", "tools")
+        tmp = tempfile.mkdtemp(prefix="gw-")
+        env = dict(os.environ, WORK_DIR=tmp, TOOLKIT_STATE_DIR=tmp, PYTHONIOENCODING="utf-8")
+        p = subprocess.run([sys.executable, "-c", GW_PROBE], cwd=tools, env=env, capture_output=True,
+                           text=True, encoding="utf-8", timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr[-1500:])
+        out = json.loads(p.stdout.strip().splitlines()[-1])
+        self.assertEqual(out["fix the reviewing errors and push the patch"], {"agent": [], "denied": True})
+        self.assertEqual(out["deploy etask lên dev"]["agent"], [])
+        self.assertEqual(out["hàm tính lương nằm ở đâu?"], {"agent": [True], "denied": False})   # read-only
+        self.assertEqual(out["build etask"]["agent"], [False])                                  # the owner
+        argv = out["argv"]
+        denied = argv[argv.index("--disallowedTools") + 1].split(",")
+        for tool in ("Bash", "Edit", "Write", "WebFetch", "Task"):
+            self.assertIn(tool, denied)
+        self.assertIn("--strict-mcp-config", argv)

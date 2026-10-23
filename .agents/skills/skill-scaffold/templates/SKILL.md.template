@@ -1,0 +1,47 @@
+---
+name: {{DISPLAY_NAME}}
+description: >
+  {{ONE_LINE_PURPOSE}}
+  Trigger phrases: {{TRIGGER_PHRASE_1}}, {{TRIGGER_PHRASE_2}}.
+---
+
+# {{DISPLAY_NAME}}
+
+## Feature Flags
+
+```yaml
+{{FEATURE_FLAGS_YAML}}
+```
+
+## Available Tools
+
+All tools are in `tools/` relative to this SKILL.md.
+The agent MUST read tool source before first use.
+
+| Tool | Purpose |
+|------|---------|
+{{TOOLS_TABLE_ROWS}}
+
+## Workflows
+
+{{WORKFLOWS_SECTION}}
+
+## Routing Rules
+
+| User says... | Workflow | Cookbook |
+|---|---|---|
+{{ROUTING_TABLE_ROWS}}
+
+## Slash Commands
+
+| Command | Workflow |
+|---------|----------|
+{{SLASH_COMMANDS_TABLE}}
+
+Run Python from `tools/` — `python3` on Linux/macOS, `python` on Windows if needed.
+
+## Important Rules
+
+1. Read the relevant cookbook before starting a workflow.
+2. Never hardcode secrets — use `config.py` and `.env`.
+3. Confirm with user before tools marked `writes_data` in production.
