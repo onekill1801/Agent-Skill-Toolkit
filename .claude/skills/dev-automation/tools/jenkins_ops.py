@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Restart / rollback / status of a k8s deployment THROUGH Jenkins.
+"""Restart / rollback / scale / status of a k8s deployment THROUGH Jenkins.
 
 Why: our own k8s credentials are read-only on most clusters, but each build job
 already holds a kubeconfig credential that can scale / set image. Instead of
 hand-editing the build pipeline, we create ONE companion job `<job>-ops` next
 to it (same folder, same agent, same kubeconfig credential) with parameters
-ACTION=status|restart|rollback and TAG. The build job is never touched.
+ACTION=status|restart|rollback|scale, TAG and REPLICAS. The build job is never touched.
 
 Everything is rendered from the registry (work/projects.json, merged with
 work/platforms.json), block `environments.<env>.jenkins`:
@@ -24,7 +24,7 @@ Usage:
     python jenkins_ops.py render --project etask --env sandbox          # print job XML (no network)
     python jenkins_ops.py create --project etask --env sandbox [--update] [--dry-run]   # [WRITE] Jenkins
     python jenkins_ops.py tags   --project etask --env sandbox [--limit 15]   # versions from git tags
-    python jenkins_ops.py run    --project etask --env sandbox --action status|restart|rollback [--tag 1.2.3] [--wait] [--dry-run] [--via auto|ops|swap]
+    python jenkins_ops.py run    --project etask --env sandbox --action status|restart|rollback|scale [--tag 1.2.3] [--replicas N] [--wait] [--dry-run] [--via auto|ops|swap]
 
 When the Jenkins user may not create jobs (createItem = 403) but may configure the
 build job, `--via swap` (and `auto` when the ops job does not exist) does what people
@@ -35,11 +35,13 @@ queued/running.
 
 Restart/rollback mirror the build job's own deploy steps (scale 0 -> [set image] ->
 scale back to the previous replica count -> rollout status) so they only need the
-permissions the build job already uses. Protected envs (prod) are refused unless
+permissions the build job already uses. Scale sets the replica count (1..MAX_REPLICAS) with
+no restart; a later build of the job may reset it (etask sandbox build scales to 1). Protected envs (prod) are refused unless
 --allow-prod. Output: one JSON object.
 """
 
 import argparse
+import html
 import json
 import os
 import re
@@ -53,7 +55,8 @@ import jenkins
 import probe_common as pc
 import project_config
 
-ACTIONS = ("status", "restart", "rollback")
+ACTIONS = ("status", "restart", "rollback", "scale")
+MAX_REPLICAS = 10
 TAG_RE = re.compile(r"^\d+\.\d+\.\d+$")
 REQUIRED = ("job", "agent", "k8s_credential", "resource", "container", "namespace", "image")
 # Values are pasted into a Groovy single-quoted string: allow only harmless characters.
@@ -70,6 +73,7 @@ pipeline {
     RES = '@RES@'
     CONTAINER = '@CONTAINER@'
     IMAGE = '@IMAGE@'
+    REPLICAS = "${params.REPLICAS}"
   }
   stages {
     stage('Status before') {
@@ -111,6 +115,20 @@ pipeline {
         '''
       }
     }
+    stage('Scale') {
+      when { expression { params.ACTION == 'scale' } }
+      steps {
+        script {
+          if (!(params.REPLICAS ==~ /^[1-9][0-9]?$/)) { error "REPLICAS must be 1..99, got: ${params.REPLICAS}" }
+        }
+        sh '''
+          set -e
+          echo "scale: $RES -> $REPLICAS replicas"
+          kubectl --kubeconfig=$K8S_CONFIG -n $NS scale $RES --replicas $REPLICAS
+          kubectl --kubeconfig=$K8S_CONFIG -n $NS rollout status $RES --timeout=900s
+        '''
+      }
+    }
     stage('Status after') {
       when { expression { params.ACTION != 'status' } }
       steps {
@@ -130,14 +148,20 @@ XML = """<?xml version='1.1' encoding='UTF-8'?>
       <parameterDefinitions>
         <hudson.model.ChoiceParameterDefinition>
           <name>ACTION</name>
-          <description>status = chỉ xem · restart = scale 0 rồi scale lại · rollback = đổi image sang TAG</description>
+          <description>status = chỉ xem · restart = scale 0 rồi scale lại · rollback = đổi image sang TAG · scale = đặt số pod = REPLICAS</description>
           <choices class="java.util.Arrays$ArrayList">
-            <a class="string-array"><string>status</string><string>restart</string><string>rollback</string></a>
+            <a class="string-array"><string>status</string><string>restart</string><string>rollback</string><string>scale</string></a>
           </choices>
         </hudson.model.ChoiceParameterDefinition>
         <hudson.model.StringParameterDefinition>
           <name>TAG</name>
           <description>Chỉ dùng cho rollback: tag image dạng 1.2.3</description>
+          <defaultValue></defaultValue>
+          <trim>true</trim>
+        </hudson.model.StringParameterDefinition>
+        <hudson.model.StringParameterDefinition>
+          <name>REPLICAS</name>
+          <description>Chỉ dùng cho scale: số pod (1..99)</description>
           <defaultValue></defaultValue>
           <trim>true</trim>
         </hudson.model.StringParameterDefinition>
@@ -181,16 +205,18 @@ def ops_spec(stack: dict) -> dict:
     return j
 
 
-def render_script(spec: dict, action: str = "", tag: str = "") -> str:
+def render_script(spec: dict, action: str = "", tag: str = "", replicas=None) -> str:
     """Ops pipeline. With `action`, parameters are baked in as literals (swap mode:
     the build job has no ACTION/TAG parameters)."""
     script = (SCRIPT.replace("@AGENT@", spec["agent"]).replace("@CRED@", spec["k8s_credential"])
               .replace("@NS@", spec["namespace"]).replace("@RES@", spec["resource"])
               .replace("@CONTAINER@", spec["container"]).replace("@IMAGE@", spec["image"]))
     if action:
-        if action not in ACTIONS or (tag and not TAG_RE.match(tag)):
-            raise OpsError(f"bad action/tag for swap: {action!r} {tag!r}")
+        if action not in ACTIONS or (tag and not TAG_RE.match(tag)) or                 (replicas is not None and not 1 <= int(replicas) <= MAX_REPLICAS):
+            raise OpsError(f"bad action/tag/replicas for swap: {action!r} {tag!r} {replicas!r}")
+        rep = str(int(replicas)) if replicas is not None else ""
         script = (script.replace("params.ACTION", f"'{action}'").replace("params.TAG", f"'{tag}'")
+                  .replace("params.REPLICAS", f"'{rep}'")
                   .replace("$IMAGE:$TAG", f"$IMAGE:{tag}"))
         script = SWAP_MARK + "\n" + script
     return script
@@ -268,6 +294,12 @@ def _validate_run(spec: dict, args, tags_fn) -> None:
             raise OpsError(f"tag {args.tag} not found among {spec['git_tag_prefix']}* git tags (fetch the clone?)")
     elif args.tag:
         raise OpsError("--tag is only for --action rollback")
+    replicas = getattr(args, "replicas", None)
+    if args.action == "scale":
+        if replicas is None or not 1 <= replicas <= MAX_REPLICAS:
+            raise OpsError(f"scale needs --replicas 1..{MAX_REPLICAS}")
+    elif replicas is not None:
+        raise OpsError("--replicas is only for --action scale")
 
 
 def ops_job_exists(spec: dict) -> bool:
@@ -284,7 +316,8 @@ def cmd_run(spec: dict, args, tags_fn=list_tags) -> dict:
         return swap_run(spec, args)
     ns = argparse.Namespace(path=spec["ops_job"], job=None, dry_run=args.dry_run, wait=args.wait,
                             timeout=args.timeout, poll=5,
-                            param=[f"ACTION={args.action}", f"TAG={args.tag or ''}"])
+                            param=[f"ACTION={args.action}", f"TAG={args.tag or ''}",
+                                   f"REPLICAS={getattr(args, 'replicas', None) or ''}"])
     out = jenkins.cmd_build(ns)
     out["ops_job"] = spec["ops_job"]
     out["via"] = "ops"
@@ -303,6 +336,13 @@ def _script_of(xml: str) -> str:
     return m.group(2) if m else ""
 
 
+def _same_script(a_xml: str, b_xml: str) -> bool:
+    """Jenkins re-serializes config.xml on save (&quot; -> ", CRLF), so compare the decoded script."""
+    def norm(x):
+        return html.unescape(_script_of(x)).replace("\r\n", "\n")
+    return norm(a_xml) == norm(b_xml)
+
+
 def _backup_path(args) -> str:
     d = os.path.join(project_config._work_dir(), "jenkins", "backups")
     os.makedirs(d, exist_ok=True)
@@ -313,11 +353,13 @@ def swap_run(spec: dict, args) -> dict:
     """Temporarily replace the build job's pipeline with the ops script, run it once,
     and ALWAYS restore the original config (verified). The user's manual workaround, automated."""
     base, job = jenkins._base(), spec["job"]
-    script = render_script(spec, args.action, args.tag or "")
+    replicas = getattr(args, "replicas", None)
+    script = render_script(spec, args.action, args.tag or "", replicas)
     steps = ["check build job idle", "GET config.xml -> backup", "POST config.xml (ops script)",
              "build + wait", "POST original config.xml", "verify restored"]
     if args.dry_run:
-        return {"dry_run": True, "via": "swap", "job": job, "action": args.action, "tag": args.tag, "steps": steps}
+        return {"dry_run": True, "via": "swap", "job": job, "action": args.action, "tag": args.tag,
+                "replicas": replicas, "steps": steps, "script": script}
 
     st, _, body = jenkins._req("GET", f"{base}/{job}/api/json?tree=inQueue,lastBuild[number,building]")
     if st != 200:
@@ -334,7 +376,7 @@ def swap_run(spec: dict, args) -> dict:
         f.write(original)
     swapped = swap_xml(original, script)
 
-    out = {"via": "swap", "job": job, "action": args.action, "tag": args.tag, "backup": backup}
+    out = {"via": "swap", "job": job, "action": args.action, "tag": args.tag, "replicas": replicas, "backup": backup}
     try:
         st, _, body = _post_xml(f"{base}/{job}/config.xml", swapped)
         if st not in (200, 302):
@@ -357,7 +399,7 @@ def restore_config(job: str, original: str) -> dict:
         st, _, body = _post_xml(f"{base}/{job}/config.xml", original)
         if st in (200, 302):
             st2, _, now = jenkins._req("GET", f"{base}/{job}/config.xml")
-            if st2 == 200 and _script_of(now) == _script_of(original):
+            if st2 == 200 and _same_script(now, original):
                 return {"ok": True}
             last = f"verify mismatch (HTTP {st2})"
         else:
@@ -367,7 +409,7 @@ def restore_config(job: str, original: str) -> dict:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="k8s restart/rollback via a Jenkins ops job")
+    p = argparse.ArgumentParser(description="k8s restart/rollback/scale via a Jenkins ops job")
     sub = p.add_subparsers(dest="cmd", required=True)
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--project", required=True)
@@ -382,6 +424,7 @@ def main() -> int:
     r = sub.add_parser("run", parents=[common])
     r.add_argument("--action", choices=ACTIONS, required=True)
     r.add_argument("--tag")
+    r.add_argument("--replicas", type=int, help=f"pod count for --action scale (1..{MAX_REPLICAS})")
     r.add_argument("--wait", action="store_true")
     r.add_argument("--timeout", type=int, default=1500)
     r.add_argument("--dry-run", action="store_true")

@@ -55,7 +55,7 @@ class RenderTest(unittest.TestCase):
     def test_xml_is_valid_and_parameterized(self):
         root = ET.fromstring(ops.render_xml(ops.ops_spec(STACK)).encode("utf-8"))
         names = [n.text for n in root.iter("name")]
-        self.assertEqual(names, ["ACTION", "TAG"])
+        self.assertEqual(names, ["ACTION", "TAG", "REPLICAS"])
         script = root.find("definition/script").text
         for needle in ("label 'tranglv'", "credentials('kubeconfig-x')", "NS = 'fpt-sanbox-kyta'",
                        "set image $RES $CONTAINER=$IMAGE:$TAG", "params.ACTION == 'rollback'"):
@@ -87,7 +87,21 @@ class RunTest(unittest.TestCase):
                               tags_fn=lambda *a: ["1.2.3"])
         self.assertTrue(out["dry_run"])
         self.assertIn("/job/etask/job/etask-ops/buildWithParameters?", out["url"])
-        self.assertEqual(out["params"], {"ACTION": "rollback", "TAG": "1.2.3"})
+        self.assertEqual(out["params"], {"ACTION": "rollback", "TAG": "1.2.3", "REPLICAS": ""})
+
+    def test_scale_requires_replicas_in_range(self):
+        for n in (None, 0, ops.MAX_REPLICAS + 1):
+            with self.assertRaises(ops.OpsError):
+                ops.cmd_run(self.spec, run_args(action="scale", replicas=n))
+
+    def test_replicas_only_for_scale(self):
+        with self.assertRaises(ops.OpsError):
+            ops.cmd_run(self.spec, run_args(action="restart", replicas=3))
+
+    def test_scale_dry_run_passes_replicas(self):
+        with mock.patch.dict(os.environ, {"JENKINS_URL": "http://j"}):
+            out = ops.cmd_run(self.spec, run_args(action="scale", replicas=3))
+        self.assertEqual(out["params"], {"ACTION": "scale", "TAG": "", "REPLICAS": "3"})
 
 
 class CreateTest(unittest.TestCase):
@@ -180,6 +194,19 @@ class SwapTest(unittest.TestCase):
         self.assertIn("'rollback' == 'rollback'", s)
         self.assertIn("$IMAGE:1.2.3", s)
         self.assertTrue(s.startswith(ops.SWAP_MARK))
+
+    def test_baked_scale_script(self):
+        s = ops.render_script(self.spec, "scale", "", 3)
+        self.assertNotIn("params.", s)
+        self.assertIn("'scale' == 'scale'", s)
+        self.assertIn("REPLICAS = \"${'3'}\"", s)
+        self.assertIn("--replicas $REPLICAS", s)
+
+    def test_restore_verify_ignores_jenkins_reserialization(self):
+        saved = ORIGINAL.replace("&amp;&amp;", "&#38;&#38;").replace("<description>build</description>",
+                                                                  "<description>build</description>")
+        self.assertTrue(ops._same_script(ORIGINAL, saved.replace("sh 'mvn", "sh &apos;mvn")))
+        self.assertFalse(ops._same_script(ORIGINAL, ORIGINAL.replace("mvn", "gradle")))
 
     def test_swap_xml_replaces_only_script(self):
         out = ops.swap_xml(ORIGINAL, "new <script> & stuff")
