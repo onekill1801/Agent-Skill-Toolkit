@@ -64,8 +64,8 @@ Bot cần workload k8s, container chính, tiền tố git tag của MỖI env; e
 | 0b | Outbox (phân biệt tin bot / chủ nhóm), inbox bền, catch-up không chạy lệnh cũ, heartbeat | ✅ | `d0b06cd` — Codex ACCEPT |
 | 1a | Thẻ R-n thay tin "🔎 Review…", không ack ngay, chờ bot 3′, quá hạn 30′, head chưa đổi ⇒ trỏ thẻ cũ | ✅ | `3364820` — Codex ACCEPT (7 vòng) |
 | 1b | `review lại R-n`, `@bot tôi là ai`, `@bot ping`, `@bot help`, quyền theo `team.json` | ✅ | `aaf8eb9` — Codex ACCEPT (2 vòng) |
-| 2a | `@bot env <repo>`, `@bot MR <số> <repo> ở đâu?` + ✅ qua Jenkins, tag mới hơn, cờ revert | ✅ | `c42c9d1` + (commit 2b) — Codex ACCEPT |
-| 2b | Thẻ `E-<repo>-<env>` tự động + bản tổng hợp; shadow mặc định | 🟡 | (commit 2b) — Codex ACCEPT (3 vòng); còn: chạy shadow 2 ngày (A1) |
+| 2a | `@bot env <repo>`, `@bot MR <số> <repo> ở đâu?` + ✅ qua Jenkins, tag mới hơn, cờ revert | ✅ | `c42c9d1` + `cc61114` — Codex ACCEPT |
+| 2b | Thẻ `E-<repo>-<env>` tự động + bản tổng hợp; shadow mặc định | 🟡 | `cc61114` — Codex ACCEPT (3 vòng); còn: chạy shadow 2 ngày (A1) |
 | 3 | Task aTask: nháp T-n → `xác nhận T-n` → tạo; `xong T-n` (hỏi lại) | ⛔ | cần S1 + project/list (A3); S7 🟡 = tạo bằng tài khoản bạn |
 | 4 | Deploy dev/sandbox: D-n → người KHÁC duyệt → Jenkins → đợi rollout | ⛔ | cần S1 + lựa chọn pipeline (A3, S8 ❌) + quyền (A2) |
 | 5 | Extension bật lệnh mới; sửa thẻ tại chỗ nếu S4 đạt | 🟡 | v1.7.1 (git local `179fb78`); Task/Deploy chờ pha 3/4 |
