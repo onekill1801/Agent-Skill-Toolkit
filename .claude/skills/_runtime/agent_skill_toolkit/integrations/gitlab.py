@@ -65,6 +65,14 @@ def project_info(project) -> dict:
     return request(f"{base_url()}/projects/{urllib.parse.quote(str(project), safe='')}")
 
 
+def search_projects(name: str, limit: int = 10) -> list:
+    """Find projects by name (membership scope). Returns a list of dicts, or an error dict."""
+    q = urllib.parse.urlencode({"search": name, "per_page": limit, "membership": "true",
+                                "order_by": "last_activity_at"})
+    r = request(f"{base_url()}/projects?{q}")
+    return r if isinstance(r, list) else r
+
+
 class Client:
     """Calls for ONE project (the id is fixed at construction — thread-safe by design)."""
 
@@ -78,6 +86,19 @@ class Client:
 
     def _request(self, url: str, method: str = "GET", data: dict = None):
         return request(url, method=method, data=data)
+
+    def latest_commit(self, ref: str = None) -> dict:
+        """Newest commit on `ref` (branch/tag/sha), or the default branch if ref is None.
+        Returns the commit dict (id, title, message, author_name, created_at, ...) or an error dict."""
+        path = "/repository/commits?per_page=1"
+        if ref:
+            path += "&ref_name=" + urllib.parse.quote(str(ref), safe="")
+        r = request(self._api(path))
+        if isinstance(r, dict) and r.get("error"):
+            return r
+        if isinstance(r, list) and r:
+            return r[0]
+        return {"error": True, "status": "empty", "message": f"no commits on ref {ref!r}"}
 
     def get_merge_request(self, mr_iid: int) -> dict:
         return request(self._api(f"/merge_requests/{int(mr_iid)}"))
