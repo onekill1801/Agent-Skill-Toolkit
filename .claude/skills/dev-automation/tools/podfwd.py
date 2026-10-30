@@ -11,6 +11,8 @@ every restart. Forwards bind to 127.0.0.1 only.
 
     python podfwd.py start <svc/x|pod/x|deploy/x|-l app=db> <local>:<remote> [--name N] [target opts]
     python podfwd.py start-saved --project P --env E      # environments.<env>.forwards in projects.json
+    python podfwd.py start-saved --platform econtract [--group sandbox|prod|uat] [--only a,b] [--allow-prod]
+                                                          # named forwards of platforms.json (fixed local ports)
     python podfwd.py list
     python podfwd.py stop <name|all>
     python podfwd.py logs <name> [--tail 40]
@@ -244,7 +246,46 @@ def stop(name: str) -> dict:
     return {"stopped": done}
 
 
+def platform_forwards(platform: str, group: str = "", only: str = "") -> list:
+    """Named forwards of platforms.json <platform>.forwards, each with its k8s access resolved from
+    <platform>.k8s_access. Filter by `group` and/or a comma list `only`."""
+    plat = project_config.load_platform(platform)
+    fwds = {k: v for k, v in (plat.get("forwards") or {}).items() if not k.startswith("_")}
+    if not fwds:
+        raise k8s.K8sError("config", f"no `forwards` in platforms.json `{platform}`")
+    names = [n.strip() for n in only.split(",") if n.strip()]
+    unknown = [n for n in names if n not in fwds]
+    if unknown:
+        raise k8s.K8sError("usage", f"unknown forward(s) {unknown}; known: {sorted(fwds)}")
+    access = plat.get("k8s_access") or {}
+    out = []
+    for name, f in fwds.items():
+        if (names and name not in names) or (group and f.get("group") != group):
+            continue
+        acc = access.get(f.get("access", ""))
+        if not acc:
+            raise k8s.K8sError("config", f"forward {name}: k8s_access `{f.get('access')}` not defined")
+        out.append(dict(f, name=name, k8s=acc))
+    return out
+
+
+def _start_platform(args) -> dict:
+    started = []
+    for f in platform_forwards(args.platform, args.group or "", args.only or ""):
+        fa = argparse.Namespace(**vars(args))
+        fa.project = None
+        fa.kubeconfig, fa.context, fa.namespace = f["k8s"]["kubeconfig"], f["k8s"]["context"], f["k8s"].get("namespace")
+        fa._ctx = {"protected": bool(f.get("prod"))}
+        try:
+            started.append(dict(start(fa, f["target"], f["ports"], f["name"]), what=f.get("what", "")))
+        except k8s.K8sError as e:
+            started.append({"name": f["name"], **e.to_dict()})
+    return {"started": started}
+
+
 def start_saved(args) -> dict:
+    if getattr(args, "platform", None):
+        return _start_platform(args)
     if not project_config.default_project(args):
         raise k8s.K8sError("usage", "no project: pass --project (or run inside a registered repo/worktree)")
     ctx = project_config.resolve(args.project, args.env)
@@ -302,7 +343,10 @@ def main(argv=None) -> int:
     p.add_argument("target", help="svc/x | pod/x | deploy/x | '-l app=db'")
     p.add_argument("ports", help="<local>:<remote>")
     p.add_argument("--name", default="")
-    topts(sub.add_parser("start-saved"))
+    p = topts(sub.add_parser("start-saved"))
+    p.add_argument("--platform", help="named forwards of platforms.json <platform>.forwards (each with its own k8s access)")
+    p.add_argument("--group", default="", help="with --platform: only this group (sandbox / prod / uat)")
+    p.add_argument("--only", default="", help="with --platform: comma list of forward names")
     sub.add_parser("list")
     p = sub.add_parser("stop")
     p.add_argument("name")

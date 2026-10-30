@@ -72,6 +72,7 @@ SPAWNERS = {
     "agent_skill_toolkit.workflows.security.scan": "git log -p for secrets in history (security audit)",
     "agent_skill_toolkit.integrations.secret_sync": "ssh to the peer machine (filesync ops run there)",
     "agent_skill_toolkit.integrations.google_sa": "openssl dgst -sign for the service-account JWT (stdlib has no RSA)",
+    "agent_skill_toolkit.integrations.dbeaver_store": "openssl enc for DBeaver's credential store (stdlib has no AES)",
 }
 SPAWN_CALLS = {"subprocess.run", "subprocess.Popen", "subprocess.call", "subprocess.check_call",
                "subprocess.check_output", "os.system", "os.popen", "proc.run", "ctx.run", "os.startfile"}

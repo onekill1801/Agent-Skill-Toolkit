@@ -24,7 +24,7 @@ import subprocess
 from agent_skill_toolkit.core import filesync, paths, proc
 
 DEFAULT_PATHS = [".env", "work/hosts.json", "work/agents.json", "work/platforms.json", "work/projects.json",
-                 "work/team.json", "work/kube", "work/memory", "work/secrets"]
+                 "work/team.json", "work/kube", "work/memory", "work/secrets", "work/dbeaver"]
 REMOTE_BACKUPS = "temp/secret-sync/backups"
 TIMEOUT = 120
 

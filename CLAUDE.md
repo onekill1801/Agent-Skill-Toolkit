@@ -112,8 +112,9 @@ python k8s.py access|pods|deploys|events|describe|logs|get --project P --env E  
 python k8s.py forwards [--listening]               # port-forward đã lưu trong Lens: cluster/context, svc, cổng local, đang mở?
 python dbeaver.py list [--q t] [--folder PROD] | show "Folder/Tên" | forwards   # metadata DBeaver (KHÔNG đọc credential)
 python dbeaver.py probe "Folder/Tên" --sql "select …"   # qua probe_db; user/pass từ env DB_USER/DB_PASSWORD; PROD = chỉ đọc
+python dbeaver_bundle.py collect --label L | check [--only ENV] | build | install | doc [--out F]   # MỘT project DBeaver "Kyta" gộp từ mọi máy (work/dbeaver/catalog.json): Env/Sản phẩm, forward cổng cố định; install = [WRITE] (đóng DBeaver trước); doc → work/memory/db-connections.md
 python podfwd.py start <pod/x|svc/x|deploy/x|"-l app=db"> <local>:<remote> --project P --env E [--name N]   # forward nền, tự nối lại
-python podfwd.py start-saved --project P --env E | list | stop <name|all> | logs <name>   # PROD cần --allow-prod (hook hỏi)
+python podfwd.py start-saved --project P --env E | --platform econtract [--group sandbox|prod|uat] [--only a,b] | list | stop <name|all> | logs <name>   # PROD cần --allow-prod (hook hỏi); forward cấp platform = cổng cố định 1xxxx sandbox / 2xxxx prod / 3xxxx pod
 python podfwd.py fetch <pod|"-l sel"> <path-trong-pod> [--to DIR]   # oc rsync pod -> work/pods/ (đọc code/config đã deploy)
 python code_context.py callers|impact|locate <symbol> | affected <file>... | trace < stack.txt | status --repo DIR   # NGỮ CẢNH CODE: CodeGraph khi index mới (cũ → sync), không thì grep; luôn ghi source
 python cg.py prepare <worktree> --project-id <id> | analyze <worktree> --base B --head H --out F   # codegraph cho worktree: copy seed + sync (giây), method bị sửa, nơi gọi ngoài diff, test bị ảnh hưởng
