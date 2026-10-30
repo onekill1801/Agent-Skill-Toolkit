@@ -36,6 +36,14 @@ def ns(**kw):
     return Namespace(**kw)
 
 
+def _plan(*files):
+    """Minimal plan carrying only <target_files> — enough for touches_runtime."""
+    body = "".join(f"<file>{f}</file>" for f in files)
+    return f"<final_specification><target_files>{body}</target_files></final_specification>"
+
+
+
+
 SPRING_YML = """\
 spring:
   datasource:
@@ -223,6 +231,26 @@ class VerifyGenTest(unittest.TestCase):
         out = self._gen(plan=p2)
         self.assertFalse(out["touches_runtime"])
 
+    def test_odd_named_runtime_file_still_requires_verify(self):
+        """The hole this closes: a behaviour change whose file name matches no
+        runtime keyword used to skip the verify gate and ship on unit tests."""
+        self.assertTrue(verify_gen.touches_runtime(
+            _plan("src/main/java/com/acme/ReportAggregator.java")))
+        self.assertTrue(verify_gen.touches_runtime(
+            _plan("src/main/java/com/acme/PriceRules.java")))
+
+    def test_unparseable_plan_requires_verify(self):
+        self.assertTrue(verify_gen.touches_runtime("<final_specification>đổi logic</final_specification>"))
+
+    def test_one_runtime_file_among_docs_requires_verify(self):
+        self.assertTrue(verify_gen.touches_runtime(
+            _plan("README.md", "src/main/java/PriceRules.java")))
+
+    def test_docs_and_tests_only_stays_inert(self):
+        self.assertFalse(verify_gen.touches_runtime(_plan("README.md", "docs/a.md")))
+        self.assertFalse(verify_gen.touches_runtime(_plan("src/test/java/FooTest.java")))
+        self.assertFalse(verify_gen.touches_runtime(_plan(".github/workflows/ci.yml")))
+
     def test_bad_step_type_rejected(self):
         bad = json.dumps({"steps": [{"type": "ssh", "name": "x"}]})
         with self.assertRaises(ValueError):
@@ -265,14 +293,15 @@ class ResolveCmdTest(unittest.TestCase):
         os.makedirs(lib)
         open(os.path.join(lib, "extra.jar"), "w").close()
         with open(os.path.join(self.tmp, "target", "cp.txt"), "w", encoding="utf-8") as f:
-            f.write(os.pathsep.join([r"C:\m2\a.jar", r"C:\m2\b.jar"]))
+            jars = [r"C:\m2\a.jar", r"C:\m2\b.jar"] if os.name == "nt" else [r"\m2\a.jar", r"\m2\b.jar"]
+            f.write(os.pathsep.join(jars))
         out = local_app._write_argfile(self.tmp)
         self.assertTrue(out["ok"])
         self.assertEqual(out["entries"], 4)   # classes + 2 jar + extra.jar
         with open(out["argfile"], encoding="utf-8") as f:
             content = f.read()
         self.assertTrue(content.startswith('-cp "target/classes;'))
-        self.assertIn("C:/m2/a.jar", content)          # backslash -> forward slash
+        self.assertIn(jars[0].replace("\\", "/"), content)  # backslash -> forward slash
         self.assertIn("src/main/resources/lib/extra.jar", content)
         self.assertNotIn("\\", content)
 

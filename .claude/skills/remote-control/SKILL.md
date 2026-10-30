@@ -109,7 +109,14 @@ python tg_api.py me|test|send <chat> "text" [bot]  # Telegram Bot API (kiểm tr
 python telegram_bridge.py [--bot ops] [--mode full|approvals-only] [--test]   # daemon (1/token)
 python telegram_approve.py                          # PreToolUse hook (bridge gọi, không gọi tay)
 python ssh_exec.py list|ping <a>|run <a> "<cmd>" [--dry-run]|classify "<cmd>"
+python secret_sync.py paths|status <a> | push|pull <a> [--only P,..] [--force] [--yes]   # .env/registry/kube/memory qua SSH, KHÔNG qua GitHub
 ```
+
+`secret_sync`: host trong `work/hosts.json` cần thêm `toolkit_dir` (gốc toolkit trên máy đó). So 3 chiều theo
+hash (`temp/secret-sync/<alias>.json`): đổi một phía → đi theo phía đó; đổi cả hai → `conflict`, chỉ gửi khi
+`--force`. Không `--yes` = dry-run. Phía nhận backup file bị thay (`temp/secret-sync/backups/`, giữ 20 bản),
+không bao giờ xoá; `work/projects.json` đi dạng `work:<rel>` (không mang đường dẫn máy này sang máy kia).
+Máy kia chỉ cần `python3` — mã chạy phía đó được gửi kèm qua stdin.
 
 ## Guardrail (BẮT BUỘC)
 
