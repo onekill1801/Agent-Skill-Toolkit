@@ -1018,6 +1018,19 @@ def _strip_self_prefix(content):
     return None
 
 
+def _mentions(data) -> list:
+    """metadata.mentions of a WS/history message. metadata may arrive as an object OR a JSON string (a live
+    frame crashed on `.get` of a str, 30/10) — anything else = no mention."""
+    meta = data.get("metadata")
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except ValueError:
+            meta = None
+    ms = meta.get("mentions") if isinstance(meta, dict) else None
+    return [m for m in ms if isinstance(m, dict)] if isinstance(ms, list) else []
+
+
 def _handle(obj, gid_target, me, kws):
     data = obj.get("data") or {}
     if data.get("type") != "TEXT":
@@ -1086,7 +1099,7 @@ def _handle(obj, gid_target, me, kws):
         return
     # XẾP HÀNG thay vì spawn-rồi-bỏ: tin tới khi đang bận vẫn được xử lý sau.
     _inbox_set(gid, msg_id, "queued")
-    mentions = [m for m in ((data.get("metadata") or {}).get("mentions") or []) if isinstance(m, dict)]
+    mentions = _mentions(data)
     _work_q.put(((gid, group_type, sender_name, sender, content, me, mentions), (gid, msg_id)))
     tag = "[CMD]" if is_command else "[queued]"
     print(f"[{_now()}] {tag} {sender_name}: {content!r}  (chờ xử lý: {_work_q.qsize()})")
@@ -1157,7 +1170,16 @@ def run(gid_target, idle_ping=20):
                 except Exception:
                     o = None
                 if isinstance(o, dict) and o.get("type") == "message":
-                    _handle(o, gid_target, me, kws)
+                    try:
+                        _handle(o, gid_target, me, kws)
+                    except Exception as e:  # noqa: BLE001 — one bad frame must not drop the socket (and refresh
+                        import traceback    # the shared token, which restarts every daemon watching .env)
+                        d = o.get("data") if isinstance(o.get("data"), dict) else {}
+                        print(f"[{_now()}] [WARN] tin lỗi, bỏ qua: {e}\n{traceback.format_exc(limit=4)}",
+                              file=sys.stderr)
+                        key = _msg_key(d) if d.get("groupId") == gid_target else None
+                        if key:
+                            _inbox_set(gid_target, key, "error", f"handle: {e}"[:200])
                 if time.time() - last_ping > idle_ping:
                     ws.send_text("ping")
                     last_ping = time.time()

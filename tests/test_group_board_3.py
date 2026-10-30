@@ -473,6 +473,11 @@ now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 g._handle({"type": "message", "data": {"type": "TEXT", "groupId": "G", "messageIdInc": 300, "senderId": "U1",
            "content": "@bot tạo task: A | giao: @Huy", "createdAt": now, "user": {"displayName": "Lan"},
            "metadata": {"mentions": [{"target": "Huy", "userId": "U2", "offset": 22, "length": 4}]}}}, "G", "ME", g._keywords())
+# metadata as a JSON STRING (live frame, 30/10), broken string, odd type: never a crash
+for i, meta in enumerate(('{"mentions": [{"target": "Huy", "userId": "U2"}]}', "{broken", 7, None)):
+    g._handle({"type": "message", "data": {"type": "TEXT", "groupId": "G", "messageIdInc": 310 + i, "senderId": "U1",
+               "content": "@bot ping", "createdAt": now, "user": {"displayName": "Lan"}, "metadata": meta}},
+              "G", "ME", g._keywords())
 out["handled"] = [list(x[4:]) for x in hq]
 out["calls"] = calls
 print(json.dumps(out, ensure_ascii=False))
@@ -502,7 +507,9 @@ class GroupWatch3Test(unittest.TestCase):
         self.assertEqual(out["calls"][:2], [["create", "Sửa lọc", "L1"], ["assign", "T1", ["102"]]])
         self.assertIn("🤖 [T-2] Việc của chủ nhóm", out["owner_draft"][0][0])
         self.assertEqual(out["handled"], [["@bot tạo task: A | giao: @Huy", "ME",
-                                           [{"target": "Huy", "userId": "U2", "offset": 22, "length": 4}]]])
+                                           [{"target": "Huy", "userId": "U2", "offset": 22, "length": 4}]],
+                                          ["@bot ping", "ME", [{"target": "Huy", "userId": "U2"}]],
+                                          ["@bot ping", "ME", []], ["@bot ping", "ME", []], ["@bot ping", "ME", []]])
 
 
 @unittest.skipUnless((EXT / "board.js").exists() and shutil.which("node"), "extension folder / node not found")
