@@ -632,7 +632,7 @@ def _task_command(gid, group_type, ident, name, args, mentions):
             _task_out(gid, group_type, board_task._reply(ident, why))
             return
         with _board_lock:
-            out = board_task.draft(_board, gid, ident, fields, assignee, entry, _OWNER["name"])
+            out = board_task.draft(_board, gid, ident, fields, assignee, entry, _OWNER["name"], owner_id=_OWNER["id"])
     elif name in ("task_confirm", "task_confirm_done"):
         # gọi aTask NGOÀI _board_lock: thẻ đã được "giành" bằng revision trong store ⇒ chỉ một lượt thắng
         fn = board_task.confirm if name == "task_confirm" else board_task.confirm_done

@@ -29,10 +29,21 @@ DRAFT_TTL = 24 * 3600
 DONE_TTL = 600
 STUCK_S = 300            # a "creating"/"completing" claim older than this = the process died mid-call
 TITLE_MAX = 200
+CODE_RETRIES = (2, 2)     # 3 lookups in all: create_task returns no taskCode and aTask's search index lags (real run 30/10)
 
 _LABELS = {"giao": "assignee", "giao cho": "assignee", "hạn": "due", "han": "due", "mô tả": "desc",
            "mo ta": "desc", "mota": "desc", "list": "list"}
 _SELF = {"tôi", "toi", "mình", "minh", "me"}
+VN = dt.timezone(dt.timedelta(hours=7))       # the team's day: a due date ends at 23:59:59 Vietnam time
+
+
+def due_instant(iso_date: str) -> str:
+    """aTask stores due dates as UTC instants (BPT-31: 2026-08-07T16:59:59Z = 07/08 23:59:59 +07) and rejects a
+    bare date ("could not be parsed at index 10", real run 30/10)."""
+    if not iso_date:
+        return ""
+    end = dt.datetime.combine(dt.date.fromisoformat(iso_date), dt.time(23, 59, 59), VN)
+    return end.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # ---------------------------------------------------------------- configuration
@@ -198,14 +209,15 @@ def marker(group: str, card_id: str) -> str:
 
 
 # ---------------------------------------------------------------- transitions
-def draft(board, group: str, ident: dict, fields: dict, assignee, entry: tuple, owner_name: str, now: float = None):
+def draft(board, group: str, ident: dict, fields: dict, assignee, entry: tuple, owner_name: str, now: float = None,
+          owner_id: str = ""):
     now = now or time.time()
     key, lst = entry
     payload = {"requester": {"id": ident.get("fchat_id") or "", "name": ident.get("name") or ""},
                "assignee": assignee or {}, "title": fields["title"], "desc": fields.get("desc") or "",
                "due": fields["due"].isoformat() if fields.get("due") else "",
                "list": {"key": key, **{k: lst.get(k) for k in ("name", "project", "project_id", "list_id")}},
-               "drafted_at": now, "owner_name": owner_name}
+               "drafted_at": now, "owner_name": owner_name, "owner_id": str(owner_id or "")}
     card = board.card_open(group, "T", f"draft:{uuid.uuid4().hex}", fields["title"], payload)
     card = board.card_update(group, card["id"], state="draft")
     return _card(card, f"gõ \"xác nhận {card['id']}\" để tạo trên aTask, \"huỷ {card['id']}\" để bỏ "
@@ -226,7 +238,7 @@ def _done_people(card):
     return {str((p.get("requester") or {}).get("id") or ""), str((p.get("assignee") or {}).get("fchat_id") or "")} - {""}
 
 
-def confirm(board, group: str, card_id: str, ident: dict, at, now: float = None):
+def confirm(board, group: str, card_id: str, ident: dict, at, now: float = None, wait=time.sleep):
     """Create the task (requester only). Single winner: the draft is CLAIMED (revision check) before calling
     aTask; any earlier attempt ⇒ look for the marker first (a lost answer must not create a duplicate)."""
     now = now or time.time()
@@ -263,7 +275,7 @@ def confirm(board, group: str, card_id: str, ident: dict, at, now: float = None)
         owner = p.get("owner_name") or "chủ nhóm"
         desc = "\n".join(x for x in (p.get("desc"), f"Tạo từ FPT Chat bởi {p['requester'].get('name') or '?'} "
                                                     f"(bằng tài khoản {owner}). {mk}") if x)
-        r = at.create_task(p["title"], lst["list_id"], desc, p.get("due") or "")
+        r = at.create_task(p["title"], lst["list_id"], desc, due_instant(p.get("due") or ""))
         if r.get("error"):
             state = "uncertain" if r.get("uncertain") else "error"
             card = board.card_update(group, card["id"], state=state, last_error=render.one_line(r.get("message"), 200))
@@ -276,12 +288,20 @@ def confirm(board, group: str, card_id: str, ident: dict, at, now: float = None)
         if not task.get("id"):
             card = board.card_update(group, card["id"], state="uncertain", last_error="create_task không trả id")
             return _card(card, "aTask không trả mã task — gõ \"xác nhận %s\" lại để đối soát" % card["id"])
-    if not task.get("taskCode"):
+    for delay in (0,) + CODE_RETRIES:
+        if task.get("taskCode"):
+            break
+        if delay:
+            wait(delay)
         found = at.find_by_marker(p["title"], lst["list_id"], mk) or {}
         task = {**found, **{k: v for k, v in task.items() if v}}
     upd = {"task_id": task["id"], "code": task.get("taskCode") or "", "link": at.task_link(task.get("taskCode") or "")}
     # names in notes are plain text: the people are already tagged once on the header line
-    note = f"tạo bằng tài khoản {p.get('owner_name') or 'chủ nhóm'} thay {render._value(p['requester'].get('name'), 60)}"
+    owner, who = p.get("owner_name") or "chủ nhóm", render._value(p["requester"].get("name"), 60)
+    same = bool(p.get("owner_id")) and str(p["requester"].get("id")) == p["owner_id"]     # by id, never by name
+    note = f"tạo bằng tài khoản {owner}" + ("" if same else f" thay {who}")
+    if not task.get("taskCode"):
+        note += "; aTask chưa trả mã task — xem trong list"
     asg = p.get("assignee") or {}
     if asg.get("atask") and not p.get("assigned"):
         r = at.assign_users(task["id"], [asg["atask"]])

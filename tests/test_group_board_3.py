@@ -119,6 +119,13 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(policy.check("task_done", {"perms": []})[0], False)       # registry-blocked sender
 
 
+class DueTest(unittest.TestCase):
+    def test_due_instant(self):
+        self.assertEqual(task.due_instant("2026-08-07"), "2026-08-07T16:59:59Z")       # = BPT-31 on aTask
+        self.assertEqual(task.due_instant("2026-12-31"), "2026-12-31T16:59:59Z")
+        self.assertEqual(task.due_instant(""), "")
+
+
 class ListTest(unittest.TestCase):
     def test_pick(self):
         self.assertEqual(task.pick_list(LISTS, "")[0], "6")
@@ -196,7 +203,7 @@ class FlowTest(unittest.TestCase):
         c = out["card"]
         self.assertEqual((c["state"], c["payload"]["code"], c["payload"]["task_id"]), ("created", "BPT-41", "T1"))
         self.assertEqual(self.at.created[0]["list_id"], "L6")
-        self.assertEqual(self.at.created[0]["due"], "2026-11-05")
+        self.assertEqual(self.at.created[0]["due"], "2026-11-05T16:59:59Z")          # 23:59:59 +07, as aTask stores it
         self.assertIn("[FChat T-1 · nhóm G]", self.at.created[0]["description"])
         self.assertEqual(self.at.assigned, [("T1", ["102"])])
         text = out["send"][0]
@@ -258,6 +265,34 @@ class FlowTest(unittest.TestCase):
         self.assertIn("quá 24 giờ", r["reply"][0])
         self.assertEqual(self.b.card_get("G", "T-1")["state"], "expired")
         self.assertEqual(self.at.created, [])
+
+    def test_code_arrives_late(self):                                                   # real run 30/10
+        _draft(self.b)
+        self.at.create_task = lambda *a, **k: {"success": True, "content": {"id": "T9"}}   # no taskCode
+        answers = iter([{}, {}, {"id": "T9", "taskCode": "BPT-35"}])
+        self.at.find_by_marker = lambda *a: next(answers)
+        waits = []
+        out = task.confirm(self.b, "G", "T-1", LAN, self.at, now=1100.0, wait=waits.append)
+        self.assertEqual((out["card"]["payload"]["code"], waits), ("BPT-35", [2, 2]))
+        self.assertIn("🔗 https://atask.example/task/BPT-35", out["send"][0])
+        _draft(self.b)                                                                    # never arrives: said so
+        calls = []
+        self.at.find_by_marker = lambda *a: calls.append(1) or {}
+        out = task.confirm(self.b, "G", "T-2", LAN, self.at, now=1100.0, wait=lambda s: None)
+        self.assertEqual(len(calls), 3)                                                   # 3 lookups in all
+        self.assertEqual(out["card"]["state"], "created")
+        self.assertIn("aTask chưa trả mã task", out["send"][0])
+
+    def test_owner_note_by_id(self):                                                    # Codex 3 R5 #2
+        def run(ident, owner_name, owner_id):
+            ok, f = task.parse_create("x", TODAY)
+            out = task.draft(self.b, "G", ident, f, None, task.pick_list(LISTS, ""), owner_name, now=1000.0,
+                             owner_id=owner_id)
+            return task.confirm(self.b, "G", out["card"]["id"], ident, self.at, now=1100.0)["send"][0]
+        owner = {"fchat_id": "ME", "name": "Chung (máy 2)", "perms": ["admin", "task"]}
+        self.assertNotIn("thay", run(owner, "Chung", "ME"))                       # same id, other display name
+        twin = {"fchat_id": "U7", "name": "Chung", "perms": ["task"]}
+        self.assertIn("tạo bằng tài khoản Chung thay Chung", run(twin, "Chung", "ME"))  # same name, other person
 
     def test_assign_failure_is_shown(self):
         _draft(self.b)
