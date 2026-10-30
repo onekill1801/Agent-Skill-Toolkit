@@ -190,14 +190,21 @@ def _remote(f: dict) -> str:
     return f"{f['target'].split('/', 1)[-1]}:{str(f['ports']).split(':')[1]}"
 
 
+def env_folder(e: dict) -> str:
+    """DBeaver folder = the environment only (PROD, UAT, SANDBOX, SIT, LAB, LOCAL); the product goes in the name."""
+    return e["folder"].split("/")[0]
+
+
 def display_name(e: dict, fw: dict) -> str:
-    """The navigator label says where the bytes go: ':25432 ⇐ haproxy-db-prod:5432 [prod-pg-kyta]'."""
+    """'<product> <name> · :25432 ⇐ haproxy-db-prod:5432 [prod-pg-kyta]' — the label says where the bytes go."""
+    sub = e["folder"].split("/", 1)[1] if "/" in e["folder"] else ""
+    name = e["name"] if not sub or sub.lower() in e["name"].lower() else f"{sub} {e['name']}"
     if e.get("forward"):
         f = fw[e["forward"]]
-        return f"{e['name']} · :{local_port(f)} ⇐ {_remote(f)} [{e['forward']}]"
+        return f"{name} · :{local_port(f)} ⇐ {_remote(f)} [{e['forward']}]"
     if e.get("host"):
-        return f"{e['name']} · {e['host']}:{e['port']}"
-    return e["name"]
+        return f"{name} · {e['host']}:{e['port']}"
+    return name
 
 
 def description(e: dict, fw: dict, access: dict) -> str:
@@ -245,10 +252,8 @@ def build() -> dict:
         c = copy.deepcopy(tmpl)
         cid = _conn_id(e, c.get("driver") or "conn")
         parts = e["folder"].split("/")
-        for i in range(len(parts)):
-            path = "/".join(parts[:i + 1])
-            folders.setdefault(path, {"parent": "/".join(parts[:i])} if i else {})
-        c["name"], c["folder"] = display_name(e, fw), e["folder"]
+        folders.setdefault(env_folder(e), {})
+        c["name"], c["folder"] = display_name(e, fw), env_folder(e)
         c["description"] = description(e, fw, access)
         cfg = c.setdefault("configuration", {})
         if e.get("forward"):
