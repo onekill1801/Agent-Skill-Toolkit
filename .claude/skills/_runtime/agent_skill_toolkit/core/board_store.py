@@ -237,6 +237,11 @@ class Board:
                 f"update inbox set status='missed', outcome='interrupted' where group_id=? and status in "
                 f"({','.join('?' * len(UNFINISHED))})", (str(group_id), *UNFINISHED)).rowcount
 
+    def inbox_count_since(self, group_id: str, since: float, statuses) -> int:
+        q = (f"select count(*) n from inbox where group_id=? and received>=? "
+             f"and status in ({','.join('?' * len(statuses))})")
+        return self.db.execute(q, (str(group_id), since, *statuses)).fetchone()["n"]
+
     def inbox_counts(self, group_id: str) -> dict:
         return {r["status"]: r["n"] for r in self.db.execute(
             "select status, count(*) n from inbox where group_id=? group by status", (str(group_id),))}

@@ -48,7 +48,8 @@ import time
 from pathlib import Path
 
 runpy.run_path(str(Path(__file__).resolve().parents[2] / "_runtime" / "bootstrap.py"))["activate"]()
-from agent_skill_toolkit.core import board_store  # noqa: E402
+from agent_skill_toolkit.core import board_store, identity, policy  # noqa: E402
+from agent_skill_toolkit.workflows.group_board import commands as board_commands  # noqa: E402
 from agent_skill_toolkit.workflows.group_board import render as board_render  # noqa: E402
 from agent_skill_toolkit.workflows.group_board import review as board_review  # noqa: E402
 from agent_skill_toolkit.workflows.intake import gate  # noqa: E402
@@ -398,6 +399,102 @@ def _card_timer(gid, interval=30):
         time.sleep(interval)
 
 
+def _kick_auto_review():
+    """Kích hoạt automation "Auto review MR" của Orca nếu đang bật; trả câu mô tả trạng thái."""
+    orca, auto_id, enabled = _auto_review_state()
+    if orca and auto_id and enabled:
+        try:
+            orca.automation_run(auto_id)
+            return "đang review"
+        except orca.OrcaError as e:
+            return f"đã xếp hàng (kích hoạt lỗi: {e.message[:60]})"
+    if orca and auto_id:
+        return "đã xếp hàng — tự động review đang TẮT, sẽ review khi được bật hoặc chạy tay"
+    return "đã xếp hàng (Orca/automation chưa sẵn sàng)"
+
+
+# ── Lệnh của thành viên trong nhóm bật bảng việc (Pha 1b) ────────────────
+_OWNER = {"id": "", "name": "chủ nhóm"}
+_COUNTED = ("queued", "done", "error", "missed", "missed_reported", "missed_shadow")
+
+
+def _post_inline(gid, group_type, text, people):
+    """Trả lời một lệnh (không phải thẻ): mention inline, ghi outbox như mọi tin bot."""
+    content, metadata = send.with_mentions(text, people)
+    try:
+        res = send.send_text(gid, content, group_type or None, metadata=metadata)
+        return isinstance(res, dict) and not res.get("error")
+    except Exception as e:  # noqa: BLE001
+        print(f"[{_now()}] [WARN] trả lời lệnh lỗi: {e}", file=sys.stderr)
+        return False
+
+
+def _identity(sender_id, sender_name, me):
+    """Định danh + quyền; danh bạ hỏng ⇒ None (fail-closed: không cấp quyền nào)."""
+    try:
+        return identity.resolve(sender_id, sender_name, me)
+    except Exception as e:  # noqa: BLE001
+        print(f"[{_now()}] [WARN] team.json lỗi — chặn lệnh: {e}", file=sys.stderr)
+        return None
+
+
+def _allowed(gid, group_type, ident, action, sender_name, sender_id):
+    if ident is None:
+        _post_inline(gid, group_type, f"⛔ @{sender_name}: danh bạ của bot đang lỗi — lệnh tạm bị chặn, "
+                                      f"báo {_OWNER['name']}.", [(sender_name, sender_id)])
+        return False
+    ok, why = policy.check(action, ident)
+    if not ok:
+        print(f"[{_now()}] [DENY] {sender_name} ({sender_id}): {action} — {why}")
+        _post_inline(gid, group_type, *board_commands.denied_text(ident, why, _OWNER["name"]))
+    return ok
+
+
+def _review_again(gid, group_type, sender_name, sender_id, card_id):
+    with _board_lock:
+        card = _board.card_get(gid, card_id.upper())
+    if not card or card.get("kind") != "R":
+        _post_inline(gid, group_type, f"🤖 @{sender_name}: không thấy thẻ {card_id.upper()} trong nhóm này.",
+                     [(sender_name, sender_id)])
+        return
+    p = card["payload"]
+    started = time.time()
+    res = _run_tool("review_flow.py", "enqueue", "--project", str(p.get("project_id") or ""),
+                    "--iid", str(p.get("iid") or ""), "--source", "fchat", "--group", str(gid),
+                    "--group-type", str(group_type or ""), "--requester", sender_name or "",
+                    "--requester-id", str(sender_id or ""), "--priority", rccfg.get("FCHAT_REVIEW_PRIORITY") or "3",
+                    "--note", f"review lại {card['id']}")
+    if res.get("error") or not res.get("job"):
+        msg = board_render.one_line(res.get("message") or "không rõ lỗi", 160)
+        _post_inline(gid, group_type,
+                     board_render.defuse(f"⚠️ @{sender_name}: không review lại được {card['id']}: {msg}"),
+                     [(sender_name, sender_id)])
+        return
+    _review_cards(gid, group_type, sender_name, sender_id, {"jobs": [res["job"]]}, started)
+    print(f"[{_now()}] [review] {sender_name}: review lại {card['id']} -> {_kick_auto_review()}")
+
+
+def _board_command(gid, group_type, sender_name, sender_id, me, name, args):
+    ident = _identity(sender_id, sender_name, me)
+    if name == "review_again":
+        if _allowed(gid, group_type, ident, "review", sender_name, sender_id):
+            _review_again(gid, group_type, sender_name, sender_id, args[0])
+    elif name == "whoami":
+        if ident is None:
+            _allowed(gid, group_type, None, "", sender_name, sender_id)
+            return
+        _post_inline(gid, group_type, *board_commands.whoami_text(ident, _OWNER["name"]))
+    elif name == "ping":
+        hb = daemon_common.last_heartbeat(heartbeat_label(gid)) if daemon_common is not None else {}
+        midnight = time.mktime(time.localtime()[:3] + (0, 0, 0, 0, 0, -1))
+        with _board_lock:
+            n = _board.inbox_count_since(gid, midnight, _COUNTED)
+            pending = _board.cards_in(gid, "R", ("pending",))
+        _post_inline(gid, group_type, board_commands.ping_text(hb, {"commands": n}, pending), [])
+    elif name == "help":
+        _post_inline(gid, group_type, board_commands.help_text(), [])
+
+
 def _enqueue_review(gid, group_type, sender_name, sender_id, text):
     # vào store bền qua cổng vào (nguồn fchat, tin cậy thấp: chỉ review_mr) — F.5
     board = _board_on(gid)
@@ -425,17 +522,7 @@ def _enqueue_review(gid, group_type, sender_name, sender_id, text):
         _review_cards(gid, group_type, sender_name, sender_id, res, started)
     for r in res.get("refused") or []:
         print(f"[{_now()}] [review] bỏ qua {r.get('ref')}: {r.get('reason')}")
-    orca, auto_id, enabled = _auto_review_state()
-    if orca and auto_id and enabled:
-        try:
-            orca.automation_run(auto_id)
-            mode = "đang review"
-        except orca.OrcaError as e:
-            mode = f"đã xếp hàng (kích hoạt lỗi: {e.message[:60]})"
-    elif orca and auto_id:
-        mode = "đã xếp hàng — tự động review đang TẮT, sẽ review khi được bật hoặc chạy tay"
-    else:
-        mode = "đã xếp hàng (Orca/automation chưa sẵn sàng)"
+    mode = _kick_auto_review()
     print(f"[{_now()}] [review] {sender_name}: jobs={jobs} -> {mode}")
     if board:
         return          # bảng việc: không ack ngay — thẻ 'chờ bot' ra sau 3′ nếu chưa có kết quả (§4.4)
@@ -458,6 +545,16 @@ def _sweeper(interval=30):
 def _process_one(gid, group_type, sender_name, sender_id, text, me):
     """Một lượt xử lý đầy đủ cho MỘT tin (chạy trong worker, tuần tự)."""
     intent = _guess_intent(text)
+    if _board_on(gid):
+        # nhóm bật bảng việc: lệnh neo đầu dòng + quyền theo định danh (team.json; mặc định review+task)
+        cmd = board_commands.parse(text, prefixed=bool(me) and sender_id == me)
+        if cmd:
+            _board_command(gid, group_type, sender_name, sender_id, me, *cmd)
+            return
+        if intent == "review":
+            if _allowed(gid, group_type, _identity(sender_id, sender_name, me), "review", sender_name, sender_id):
+                _enqueue_review(gid, group_type, sender_name, sender_id, text)
+            return
     if not _is_allowed(sender_id, sender_name, me):
         print(f"[{_now()}] [DENY] {sender_name} ({sender_id}) không có trong FCHAT_REVIEW_ALLOWED")
         explicit = re.search(r"\b(review|build|deploy)\b", text or "", re.I)
@@ -572,10 +669,13 @@ def _msg_key(m):
     return f"inc:{inc}" if inc is not None else (m.get("id") or None)
 
 
-def _is_command(m, content, me, kws):
-    """Tin lịch sử này có phải lệnh cho bot? (catch-up: báo lệnh bị lỡ, KHÔNG chạy lại)."""
+def _is_command(m, content, me, kws, gid=None):
+    """Tin lịch sử này có phải lệnh cho bot? (catch-up: báo lệnh bị lỡ, KHÔNG chạy lại). Cùng luật với
+    _handle: lệnh bảng việc (`@bot tôi là ai`, `review lại R-n`…) cũng là lệnh ở nhóm bật bảng việc."""
     if m.get("senderId") == me:
         return _strip_self_prefix(content) is not None
+    if gid is not None and _board_on(gid) and board_commands.parse(content):
+        return True
     return _looks_like_request(content, kws) and _guess_intent(content) in ("review", "build")
 
 
@@ -692,7 +792,7 @@ def _catch_up(gid, me, kws):
         content = m.get("content") or ""
         status = "history"
         if wm is not None and inc is not None and inc > wm and not listen._looks_encrypted(content) \
-                and created and now - created <= MISSED_WINDOW_S and _is_command(m, content, me, kws):
+                and created and now - created <= MISSED_WINDOW_S and _is_command(m, content, me, kws, gid):
             bot = m.get("senderId") == me and _board_call("is_bot_message", gid, m.get("requestId") or "",
                                                           content, created, inc)
             status = "history" if bot else "missed"
@@ -778,7 +878,8 @@ def _handle(obj, gid_target, me, kws):
     group = data.get("group") or {}
     group_type = group.get("type") or group.get("groupType") or "SUPER_PRIVATE"
 
-    if not is_command and not _looks_like_request(content, kws):
+    if not is_command and not _looks_like_request(content, kws) and \
+            not (_board_on(gid) and board_commands.parse(content)):
         _inbox_set(gid, msg_id, "ignored")
         print(f"[{_now()}] [skip] {sender_name}: {content!r}  (không khớp từ khoá)")
         return
@@ -800,7 +901,9 @@ def run(gid_target, idle_ping=20):
     n = _board_call("inbox_mark_unfinished", gid_target)
     if n:
         print(f"[{_now()}] [missed] {n} lệnh dở dang từ lần chạy trước — sẽ báo người gửi")
-    me = client.api_get("/user/me").get("id")
+    who = client.api_get("/user/me")
+    me = who.get("id")
+    _OWNER.update(id=me or "", name=who.get("displayName") or who.get("fullName") or "chủ nhóm")
     if not me:
         _hlog("fatal", "cannot resolve current user (token bad?)")
         print("[ERROR] không xác định được user hiện tại (token hỏng?)", file=sys.stderr)
