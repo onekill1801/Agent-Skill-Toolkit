@@ -37,14 +37,15 @@ Ký hiệu: ✅ xong · 🟡 đang làm / xong một phần · ⬜ chưa làm ·
       (Mặc định ai cũng `review` + `task`; muốn bỏ: `--remove task`.)
 
 ### A3. Quyết định / cho phép còn mở
-- [ ] 👤 **S1** — cho phép gửi 1 khung WS với `senderId` SAI vào *Saved Messages của bạn* để xem server có ép
-      định danh không. ⛔ Chặn Pha 3 (task) và Pha 4 (deploy).
+- [x] 👤 **S1** — đã cho phép (30/10). ⛔ vẫn chặn Pha 3/4 vì **chưa kết luận**: Saved Messages đòi nội dung mã hoá,
+      server từ chối khung (`oaep decoding error`) trước khi xét định danh, không lưu tin.
+- [ ] 👤 **S1 lần 2** — cần chỗ gửi chấp nhận plaintext mà chỉ bạn thấy: bạn tạo 1 nhóm chỉ có mình bạn (vd "bot-test")
+      rồi gửi tôi id/tên nhóm ⇒ tôi gửi lại đúng 1 khung ở đó.
 - [ ] 👤 **S4** — bạn tự sửa / reply / thả reaction / ghim 1 tin trong Saved Messages trong lúc bot nghe WS (chỉ đọc)
       → biết định dạng để sửa thẻ tại chỗ (Pha 5).
 - [ ] 👤 Project/list aTask mặc định cho lệnh tạo task (Pha 3).
-- [ ] 👤 **Pipeline deploy (S8 ❌):** job dev/demo/sandbox etask không nhận tham số commit/tag, nhánh hard-code ⇒ deploy
-      qua chat KHÔNG ghim được commit. Chọn: (a) sửa pipeline nhận `GIT_SHA`/tag, (b) cho dev chạy `allow_unpinned`
-      (duyệt "HEAD lúc chạy"), (c) bỏ deploy qua chat. Không chọn ⇒ Pha 4 dừng.
+- [x] 👤 **Pipeline deploy (S8 ❌):** chọn **(b) cho dev** (30/10) — dev deploy "HEAD lúc chạy" (`allow_unpinned`), bot so
+      SHA thực sau build. Sandbox/demo qua chat vẫn chặn tới khi pipeline nhận SHA/tag.
 - [x] Giờ tổng hợp: dùng 08:30 (đổi bằng `FCHAT_ENV_DIGEST_AT`).
 
 ### A4. Repo khác ngoài etask (registry `work/projects.json`, mục `environments.<env>.envmap`)
@@ -66,8 +67,8 @@ Bot cần workload k8s, container chính, tiền tố git tag của MỖI env; e
 | 1b | `review lại R-n`, `@bot tôi là ai`, `@bot ping`, `@bot help`, quyền theo `team.json` | ✅ | `aaf8eb9` — Codex ACCEPT (2 vòng) |
 | 2a | `@bot env <repo>`, `@bot MR <số> <repo> ở đâu?` + ✅ qua Jenkins, tag mới hơn, cờ revert | ✅ | `c42c9d1` + `cc61114` — Codex ACCEPT |
 | 2b | Thẻ `E-<repo>-<env>` tự động + bản tổng hợp; shadow mặc định | 🟡 | `cc61114` — Codex ACCEPT (3 vòng); còn: chạy shadow 2 ngày (A1) |
-| 3 | Task aTask: nháp T-n → `xác nhận T-n` → tạo; `xong T-n` (hỏi lại) | ⛔ | cần S1 + project/list (A3); S7 🟡 = tạo bằng tài khoản bạn |
-| 4 | Deploy dev/sandbox: D-n → người KHÁC duyệt → Jenkins → đợi rollout | ⛔ | cần S1 + lựa chọn pipeline (A3, S8 ❌) + quyền (A2) |
+| 3 | Task aTask: nháp T-n → `xác nhận T-n` → tạo; `xong T-n` (hỏi lại) | ⛔ | cần S1 lần 2 + project/list (A3); S7 🟡 = tạo bằng tài khoản bạn |
+| 4 | Deploy dev: D-n → người KHÁC duyệt → Jenkins → đợi rollout | ⛔ | cần S1 lần 2 + quyền (A2); pipeline: (b) dev "HEAD lúc chạy" |
 | 5 | Extension bật lệnh mới; sửa thẻ tại chỗ nếu S4 đạt | 🟡 | v1.7.1 (git local `179fb78`); Task/Deploy chờ pha 3/4 |
 
 ### Chi tiết từng pha

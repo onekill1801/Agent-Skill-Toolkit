@@ -268,6 +268,11 @@ senderId sai vào Saved Messages của chính bạn).
 - **Heartbeat** (Pha 0b): `temp/heartbeat/group_watch-<gid>.json` mỗi 30 s; `supervise.py --heartbeat group_watch-<gid>
   --stale-after 180` khởi động lại khi treo. Extension suy "bot im lặng" từ chat (lệnh ≥ 3′ chưa có tin bot).
   Còn lại: `@bot ping` (1b), cảnh báo Telegram cho chủ nhóm khi stale.
+- **S1 được phép** (30/10) — 1 khung WS `senderId` sai vào Saved Messages của chủ nhóm.
+- **S1 lần 1 (30/10) — chưa kết luận:** khung WS vào Saved Messages (`6890c423…`, type SAVED) với `senderId` của thành viên khác ⇒ server trả `error: oaep decoding error` cho đúng requestId, KHÔNG lưu tin (đọc lại lịch sử: không có). Saved Messages bắt nội dung mã hoá RSA-OAEP mà server tự giải ⇒ bị chặn ở bước nội dung, chưa tới bước định danh. Cần nơi nhận chấp nhận plaintext (nhóm chỉ có chủ nhóm) hoặc dò khoá mã hoá của web client. Kết quả: `temp/spike/s1.json` (ubuntu-c).
+- **Pipeline (S8 ❌) — chọn (b) cho dev** (30/10): deploy dev qua chat chạy `allow_unpinned` — thẻ D ghi rõ "HEAD lúc
+  chạy của <nhánh>", người duyệt duyệt nhánh chứ không phải commit; sau build bot so SHA thực (provenance) và ghi vào
+  thẻ. Sandbox/demo/prod qua chat vẫn CHẶN tới khi pipeline nhận SHA/tag.
 
 ## 12. Điều kiện khi code (P2 từ vòng 3 — Codex + Fable)
 - Kiểm hai người duyệt khác nhau theo **identity đã xác minh** (không chỉ khác senderId).
