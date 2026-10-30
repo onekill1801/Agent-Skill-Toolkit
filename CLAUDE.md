@@ -191,6 +191,7 @@ Toolkit chạy trên cả 3 OS. Kiểm tra mức sẵn sàng của máy:
 python dev-automation/tools/doctor.py        # (hoặc python3) — báo OS, Python, CLI có/thiếu, feature nào chạy được
 python agentkit.py security_scan scan --repo work/gitlab/idaas/etask [--history] [--format md --out F] | baseline | endpoints --public|--ids   # KIỂM BẢO MẬT offline theo security-audit/cookbook/standard.md (secret luôn che; exit 1 = lỗi MỚI, 3 = quét chưa đủ)
 python agentkit.py machine_context [--json]  # bối cảnh máy ngoài git: .env theo nhóm, work/*.json, ~/.ssh, kubeconfig/Lens, DBeaver, gh, tài khoản agent — chỉ kiểm tồn tại, không đọc giá trị bí mật
+python agentkit.py secret_sync status|push|pull <host> [--only P,..] [--force] [--yes]   # đồng bộ .env + work/{projects,platforms,agents,hosts,team}.json + work/kube|memory|secrets sang toolkit máy khác QUA SSH (host + toolkit_dir trong work/hosts.json); so 3 chiều theo hash, phía nhận backup, không xoá
 ```
 
 - **Python**: `python` (Windows) · `python3` (macOS/Linux). Tool chỉ dùng **stdlib**, không pip.
