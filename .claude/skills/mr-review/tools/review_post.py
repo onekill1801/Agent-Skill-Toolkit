@@ -852,13 +852,54 @@ def notice_text(job: dict, review: dict) -> str:
             f"{_counts(review.get('findings', []))}. {job.get('web_url', '')}")
 
 
-def _send_one(r: dict, text: str) -> tuple:
+def board_groups() -> set:
+    """Groups with the workboard on (FCHAT_BOARD_GROUPS, comma-separated): notices there are R cards."""
+    return {g.strip() for g in (rc.config.get("FCHAT_BOARD_GROUPS") or "").split(",") if g.strip()}
+
+
+def card_notice(job: dict, review: dict, r: dict):
+    """(text, card_id, people) — the R card of this MR in the requester's group, updated to the verdict; None
+    when the group has no workboard or the board store is unavailable (the plain notice is sent instead).
+    Caller holds board_review.lock(group, ref) until the card is SENT (ordering with the watcher's timer)."""
+    if r.get("group") not in board_groups():
+        return None
+    try:
+        from agent_skill_toolkit.core import board_store
+        from agent_skill_toolkit.workflows.group_board import review as board_review
+        with board_store.Board() as b:
+            card, (text, people) = board_review.on_result(
+                b, r["group"], job, review["verdict"], _counts(review.get("findings", [])),
+                {"id": r.get("by_id") or "", "name": r.get("by") or ""} if r.get("by") else None)
+        return text, card["id"], people
+    except Exception as e:  # noqa: BLE001 — a board problem must not swallow the notice
+        print(f"[WARN] board card for {job.get('id')}: {type(e).__name__}: {e}", file=sys.stderr)
+        return None
+
+
+def _send_notice(job: dict, review: dict, r: dict, text: str) -> tuple:
+    """Board group: card update + send under the MR's card lock; other groups: the plain notice."""
+    if r.get("group") not in board_groups():
+        return _send_one(r, text)
+    from agent_skill_toolkit.workflows.group_board import review as board_review
+    try:
+        with board_review.lock(r["group"], board_review.ref_of(job), timeout=60):
+            card = card_notice(job, review, r)
+            return _send_one(r, *card) if card else _send_one(r, text)
+    except TimeoutError:                                       # nothing sent: `failed` is retried by sweep
+        return "failed", "thẻ bảng việc đang bận — thử lại sau"
+
+
+def _send_one(r: dict, text: str, card_id: str = "", people=None) -> tuple:
     script = os.path.normpath(os.path.join(rc.tools_dir(), "..", "..", "tchat-automation", "tools", "notify_group.py"))
     args = [sys.executable, script, "--group", r["group"], "--text", text]
     if r.get("group_type"):
         args += ["--group-type", r["group_type"]]
-    if r.get("by_id") and r.get("by"):
-        args += ["--user-id", r["by_id"], "--user-name", r["by"]]
+    # a card names the person in place ("Yêu cầu: @Tên", the name as RENDERED) — mention inline at that spot
+    name = (people[0][0] if people else "") if card_id else r.get("by")
+    if r.get("by_id") and name:
+        args += ["--user-id", r["by_id"], "--user-name", name]
+    if card_id:
+        args += ["--inline", "--card-id", card_id]
     env = {k: v for k, v in os.environ.items() if k not in _STALE_ENV}
     try:
         p = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -930,7 +971,7 @@ def deliver_notices(jid: str, review: dict = None, force: bool = False) -> list:
             n.update(state="sending", at=rc.now(), attempts=(0 if force else n.get("attempts", 0)) + 1)
         if _update_posted(jid, note_id, mark) is None:
             break                                              # replaced meanwhile: this delivery is obsolete
-        state, err = _send_one(reqs[k], text)
+        state, err = _send_notice(job, review, reqs[k], text)
 
         def record(j, k=k, state=state, err=err):
             j["notices"][k].update(state=state, at=rc.now(), error=err)

@@ -67,7 +67,9 @@ def _reap(jobs: list) -> None:
 
 
 def add_job(project, iid, *, requester="", requester_id="", source="manual", group="",
-            group_type="", priority=PRIORITY_DEFAULT, note="", mr=None) -> dict:
+            group_type="", priority=PRIORITY_DEFAULT, note="", mr=None, skip_same_head=False) -> dict:
+    """skip_same_head: the MR's last review was POSTED at the current head commit -> no new round
+    ({"duplicate": True, "same_head": True}; the request is still recorded on the job)."""
     project_id, path = rc.resolve_project_id(project)
     mr = mr or rc.gitlab_mr(project_id, iid)
     if mr.get("state") != "opened":
@@ -85,6 +87,10 @@ def add_job(project, iid, *, requester="", requester_id="", source="manual", gro
                 job["rerequested_head"] = head        # post step will mark the review stale
             rc.log_event(job, "merged_request", by=requester)
             return {"job": rc.save_job(job), "duplicate": True}
+        if skip_same_head and job and job.get("status") == "posted" and job.get("head_sha") == head and job.get("verdict"):
+            job.setdefault("requests", []).append(request)
+            rc.log_event(job, "same_head_request", by=requester)
+            return {"job": rc.save_job(job), "duplicate": True, "same_head": True}
         job = {
             "id": jid, "project_id": project_id, "iid": int(iid),
             "project_path": path or (mr.get("references") or {}).get("full", "").split("!")[0],

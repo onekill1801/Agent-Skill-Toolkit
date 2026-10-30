@@ -19,7 +19,7 @@ import time
 
 from . import store as _store
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2          # 2: cards + seq (phase 1a)
 MATCH_WINDOW_S = 120          # hash fallback: an echo within ±2 min of the outbox row (requestId missing)
 
 SCHEMA = """
@@ -33,6 +33,13 @@ create table if not exists inbox (
   created_at real, received real not null, status text not null, card_id text, outcome text,
   primary key (group_id, message_id));
 create index if not exists inbox_status on inbox(group_id, status);
+create table if not exists seq (group_id text not null, kind text not null, next integer not null,
+  primary key (group_id, kind));
+create table if not exists cards (
+  group_id text not null, id text not null, kind text not null, ref text not null, revision integer not null,
+  state text not null, title text, payload text default '{}', created real not null, updated real not null,
+  primary key (group_id, id));
+create unique index if not exists cards_ref on cards(group_id, kind, ref);
 """
 # A message seen once as `inc:N` and once by its id must be ONE row. Rows duplicated by an earlier build
 # (keyed by id) are merged first — keep the most advanced status — or the unique index cannot be created.
@@ -75,6 +82,7 @@ class Board:
     def __init__(self, path: str = ""):
         self.s = _store.Store(path)
         self.db = self.s.db
+        self._backup_before_upgrade()
         with self.s._tx():
             for stmt in (x.strip() for x in SCHEMA.split(";")):
                 if stmt:
@@ -88,6 +96,23 @@ class Board:
                 self._merge_inc_duplicates()
                 self.db.execute(INBOX_INC_UNIQUE)
             self._set_meta("schema_version", str(SCHEMA_VERSION))
+
+    def _backup_before_upgrade(self) -> None:
+        """§4.1: a database at an OLDER board schema is copied (sqlite online backup) before it is upgraded:
+        <db>.bak-board-v<old>-<timestamp>. Fresh databases (no board tables yet) need none."""
+        try:
+            r = self.db.execute("select value from board_meta where key='schema_version'").fetchone()
+        except Exception:  # noqa: BLE001 — no board_meta yet: nothing to upgrade
+            return
+        if not r or int(r["value"]) >= SCHEMA_VERSION:
+            return
+        import sqlite3
+        dest = f"{self.s.path}.bak-board-v{r['value']}-{time.strftime('%Y%m%d-%H%M%S')}"
+        out = sqlite3.connect(dest)
+        try:
+            self.db.backup(out)
+        finally:
+            out.close()
 
     def _merge_inc_duplicates(self) -> None:
         rank = {s: i for i, s in enumerate(_STATUS_RANK)}
@@ -215,6 +240,68 @@ class Board:
     def inbox_counts(self, group_id: str) -> dict:
         return {r["status"]: r["n"] for r in self.db.execute(
             "select status, count(*) n from inbox where group_id=? group by status", (str(group_id),))}
+
+    # ------------------------------------------------------------------ cards (§4.1)
+    @staticmethod
+    def _card(r) -> dict:
+        if r is None:
+            return {}
+        d = dict(r)
+        d["payload"] = json.loads(d.get("payload") or "{}")
+        return d
+
+    def card_open(self, group_id: str, kind: str, ref: str, title: str = "", payload: dict = None) -> dict:
+        """The card of (group, kind, ref) — created with the next `<kind>-<n>` code if missing (sequence and
+        insert in ONE transaction: two watchers never mint the same code). `created` key: True if new."""
+        with self.s._tx():
+            r = self.db.execute("select * from cards where group_id=? and kind=? and ref=?",
+                                (str(group_id), kind, ref)).fetchone()
+            if r:
+                return {**self._card(r), "created": False}
+            row = self.db.execute("select next from seq where group_id=? and kind=?", (str(group_id), kind)).fetchone()
+            n = row["next"] if row else 1
+            self.db.execute("insert into seq(group_id, kind, next) values (?,?,?) "
+                            "on conflict(group_id, kind) do update set next=excluded.next", (str(group_id), kind, n + 1))
+            now = time.time()
+            cid = f"{kind}-{n}"
+            self.db.execute("insert into cards(group_id, id, kind, ref, revision, state, title, payload, created, updated) "
+                            "values (?,?,?,?,1,'new',?,?,?,?)",
+                            (str(group_id), cid, kind, ref, title or "", json.dumps(payload or {}, ensure_ascii=False),
+                             now, now))
+            self.event("card_created", group=str(group_id), card=cid, ref=ref)
+            return {**self._card(self.db.execute("select * from cards where group_id=? and id=?",
+                                                 (str(group_id), cid)).fetchone()), "created": True}
+
+    def card_get(self, group_id: str, card_id: str = "", kind: str = "", ref: str = "") -> dict:
+        if card_id:
+            r = self.db.execute("select * from cards where group_id=? and id=?", (str(group_id), card_id)).fetchone()
+        else:
+            r = self.db.execute("select * from cards where group_id=? and kind=? and ref=?",
+                                (str(group_id), kind, ref)).fetchone()
+        return self._card(r)
+
+    def card_update(self, group_id: str, card_id: str, state: str = None, title: str = None,
+                    if_revision: int = None, **payload) -> dict:
+        """Merge payload fields, set state/title, revision+1. if_revision: only from that revision (a caller
+        that read an older card loses — {} returned)."""
+        with self.s._tx():
+            r = self.db.execute("select * from cards where group_id=? and id=?", (str(group_id), card_id)).fetchone()
+            if not r or (if_revision is not None and r["revision"] != if_revision):
+                return {}
+            data = {**json.loads(r["payload"] or "{}"), **payload}
+            self.db.execute("update cards set state=?, title=?, payload=?, revision=revision+1, updated=? "
+                            "where group_id=? and id=?",
+                            (state or r["state"], r["title"] if title is None else title,
+                             json.dumps(data, ensure_ascii=False), time.time(), str(group_id), card_id))
+            if state and state != r["state"]:
+                self.event("card_state", group=str(group_id), card=card_id, frm=r["state"], to=state)
+            return self._card(self.db.execute("select * from cards where group_id=? and id=?",
+                                              (str(group_id), card_id)).fetchone())
+
+    def cards_in(self, group_id: str, kind: str, states) -> list:
+        q = (f"select * from cards where group_id=? and kind=? and state in ({','.join('?' * len(states))}) "
+             f"order by created")
+        return [self._card(r) for r in self.db.execute(q, (str(group_id), kind, *states))]
 
     def event(self, kind: str, **data) -> None:
         """Audit line in the shared events table (task_id = null) — `taskstore.py events` shows it."""

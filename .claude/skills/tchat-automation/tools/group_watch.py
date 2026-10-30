@@ -49,6 +49,8 @@ from pathlib import Path
 
 runpy.run_path(str(Path(__file__).resolve().parents[2] / "_runtime" / "bootstrap.py"))["activate"]()
 from agent_skill_toolkit.core import board_store  # noqa: E402
+from agent_skill_toolkit.workflows.group_board import render as board_render  # noqa: E402
+from agent_skill_toolkit.workflows.group_board import review as board_review  # noqa: E402
 from agent_skill_toolkit.workflows.intake import gate  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -270,7 +272,8 @@ def _post_results(gid, group_type, sender_name, sender_id, original, result_text
     if len(quoted) > 160:
         quoted = quoted[:160] + "…"
     # @Tên ở đầu (offset 0) để mention chuẩn; emoji/nội dung phía sau không ảnh hưởng.
-    body = f"📋 Kết quả cho yêu cầu “{quoted}”:\n\n{result_text}"
+    # kết quả agent là văn bản tự do: dòng nào trông như lệnh / thẻ bị vô hiệu (§3.3)
+    body = board_render.defuse(f"📋 Kết quả cho yêu cầu “{quoted}”:\n\n{result_text}")
     _post_tagged(gid, group_type, sender_name, sender_id, body)
 
 
@@ -325,13 +328,86 @@ def _auto_review_state():
         return orca_adapter, None, False
 
 
+def _board_on(gid) -> bool:
+    """Nhóm bật bảng việc (FCHAT_BOARD_GROUPS): review báo bằng thẻ R, không ack ngay."""
+    return str(gid) in {g.strip() for g in (rccfg.get("FCHAT_BOARD_GROUPS") or "").split(",") if g.strip()}
+
+
+def _post_card(gid, group_type, card, text, people):
+    """Gửi một thẻ (mention inline). True khi gửi được (kể cả chưa có echo — có thể đã tới, không gửi lặp)."""
+    content, metadata = send.with_mentions(text, people)
+    try:
+        res = send.send_text(gid, content, group_type or None, metadata=metadata, card_id=card["id"])
+    except Exception as e:  # noqa: BLE001
+        print(f"[{_now()}] [WARN] gửi thẻ {card['id']} lỗi: {e}", file=sys.stderr)
+        return False
+    ok = isinstance(res, dict) and not res.get("error")
+    print(f"[{_now()}]        -> thẻ {card['id']} ({card['state']}): {'đã gửi' if ok else res.get('message')}")
+    return ok
+
+
+def _review_cards(gid, group_type, sender_name, sender_id, res, started=None):
+    """Bảng việc: mỗi MR một thẻ R. Yêu cầu mới ⇒ im lặng (thẻ 'chờ bot' chỉ ra sau 3′ nếu chưa có kết quả);
+    MR chưa có commit mới từ lượt review trước ⇒ gửi lại thẻ cũ ngay."""
+    for j in res.get("jobs") or []:
+        # khoá theo MR (liên tiến trình): review_post có thể đang đăng kết quả của chính MR này
+        with board_review.lock(gid, board_review.ref_of(j)):
+            with _board_lock:
+                out = board_review.on_request(_board, gid, j, {"id": str(sender_id or ""), "name": sender_name or ""},
+                                              unchanged=bool(j.get("same_head")), now=started)
+            if out["send"]:
+                _post_card(gid, group_type, out["card"], *out["send"])
+
+
+def _job_info(job_id):
+    """Job review như hàng đợi đang giữ ({} = không đọc được)."""
+    res = _run_tool("review_queue.py", "show", str(job_id or ""))
+    return {} if not isinstance(res, dict) or res.get("error") else res
+
+
+def _card_tick(gid, now=None):
+    """Một lượt: thẻ 'chờ bot' sau 3′; quá 30′ ⇒ đối chiếu job (5′/lần): đã đăng ⇒ verdict, đã dừng ⇒ 'lỗi'.
+    Đọc thẻ → gửi → đánh dấu trong khoá theo MR (liên tiến trình): không bao giờ gửi 'chờ bot' sau kết quả."""
+    with _board_lock:
+        acks = board_review.due_acks(_board, gid, now=now)
+    for c in acks:
+        with board_review.lock(gid, c["ref"]):
+            with _board_lock:
+                due = board_review.ack_if_still_due(_board, gid, c["id"], now=now)
+            if due and _post_card(gid, None, due[0], *due[1]):
+                with _board_lock:
+                    board_review.mark_acked(_board, gid, due[0])
+    with _board_lock:
+        late = board_review.overdue_due(_board, gid, now=now)
+    for c in late:
+        job = _job_info(c["payload"].get("job_id"))                   # subprocess: ngoài mọi khoá
+        with board_review.lock(gid, c["ref"]):
+            with _board_lock:
+                out = board_review.reconcile_overdue(_board, gid, c["id"], job, now=now)
+            if out:
+                _post_card(gid, None, out[0], *out[1])
+
+
+def _card_timer(gid, interval=30):
+    """Nền (nhóm bật bảng việc): _card_tick mỗi `interval` giây."""
+    while True:
+        try:
+            _card_tick(gid)
+        except Exception as e:  # noqa: BLE001
+            print(f"[{_now()}] [WARN] hẹn giờ thẻ lỗi: {e}", file=sys.stderr)
+        time.sleep(interval)
+
+
 def _enqueue_review(gid, group_type, sender_name, sender_id, text):
     # vào store bền qua cổng vào (nguồn fchat, tin cậy thấp: chỉ review_mr) — F.5
+    board = _board_on(gid)
+    started = time.time()       # thứ tự lượt: yêu cầu bắt đầu xếp hàng trước lượt hiện tại = phản hồi cũ
     res = _run_tool("review_flow.py", "enqueue-text", text,
                     "--default-project", rccfg.get("FCHAT_REVIEW_DEFAULT_PROJECT") or "",
                     "--source", "fchat", "--group", str(gid), "--group-type", str(group_type or ""),
                     "--requester", sender_name or "", "--requester-id", str(sender_id or ""),
-                    "--priority", rccfg.get("FCHAT_REVIEW_PRIORITY") or "3")
+                    "--priority", rccfg.get("FCHAT_REVIEW_PRIORITY") or "3",
+                    *(["--skip-same-head"] if board else []))
     if res.get("error"):
         msg = res.get("message", "")
         print(f"[{_now()}] [review] không xếp được: {msg}")
@@ -341,9 +417,12 @@ def _enqueue_review(gid, group_type, sender_name, sender_id, text):
             _post_tagged(gid, group_type, sender_name, sender_id,
                          "🤖 Mình chưa thấy MR nào trong tin. Gửi link MR (…/-/merge_requests/123) giúp nhé.")
         else:
-            _post_tagged(gid, group_type, sender_name, sender_id, f"⚠️ Không nhận được yêu cầu review: {msg[:160]}")
+            _post_tagged(gid, group_type, sender_name, sender_id,
+                         board_render.defuse(f"⚠️ Không nhận được yêu cầu review: {board_render.one_line(msg, 160)}"))
         return
     jobs = res.get("added", [])
+    if board:
+        _review_cards(gid, group_type, sender_name, sender_id, res, started)
     for r in res.get("refused") or []:
         print(f"[{_now()}] [review] bỏ qua {r.get('ref')}: {r.get('reason')}")
     orca, auto_id, enabled = _auto_review_state()
@@ -358,6 +437,8 @@ def _enqueue_review(gid, group_type, sender_name, sender_id, text):
     else:
         mode = "đã xếp hàng (Orca/automation chưa sẵn sàng)"
     print(f"[{_now()}] [review] {sender_name}: jobs={jobs} -> {mode}")
+    if board:
+        return          # bảng việc: không ack ngay — thẻ 'chờ bot' ra sau 3′ nếu chưa có kết quả (§4.4)
     _post_tagged(gid, group_type, sender_name, sender_id,
                  f"🤖 Đã nhận yêu cầu review {', '.join(jobs)} — {mode}. Kết quả sẽ báo lại ở đây.")
 
@@ -735,6 +816,8 @@ def run(gid_target, idle_ping=20):
     for i in range(n_workers):
         threading.Thread(target=_worker, name=f"worker-{i+1}", daemon=True).start()
     threading.Thread(target=_sweeper, name="review-sweeper", daemon=True).start()
+    if _board_on(gid_target):
+        threading.Thread(target=_card_timer, args=(gid_target,), name="card-timer", daemon=True).start()
     retry = _MissedRetry()
     backoff = 2
     while True:

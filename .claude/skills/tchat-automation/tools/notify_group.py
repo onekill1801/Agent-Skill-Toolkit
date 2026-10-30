@@ -29,6 +29,9 @@ def main() -> int:
                    help="SUPER_PRIVATE/PRIVATE/PUBLIC (tự dò nếu bỏ trống)")
     p.add_argument("--user-id", dest="user_id", default=None, help="id người cần tag")
     p.add_argument("--user-name", dest="user_name", default=None, help="tên hiển thị để tag")
+    p.add_argument("--inline", action="store_true",
+                   help="text đã ghi '@Tên' tại chỗ (thẻ bảng việc) — mention đúng vị trí, không chèn tiền tố")
+    p.add_argument("--card-id", dest="card_id", default="", help="mã thẻ (R-7) ghi vào outbox")
     a = p.parse_args()
 
     missing = config.validate()
@@ -38,8 +41,8 @@ def main() -> int:
         return 1
 
     people = [(a.user_name, a.user_id)] if (a.user_id and a.user_name) else []
-    content, metadata = send.with_mentions_prefix(a.text, people)
-    res = send.send_text(a.group, content, a.group_type, metadata=metadata)
+    content, metadata = (send.with_mentions if a.inline else send.with_mentions_prefix)(a.text, people)
+    res = send.send_text(a.group, content, a.group_type, metadata=metadata, card_id=a.card_id)
     client.print_json(res)
     return 0 if not (isinstance(res, dict) and res.get("error")) else 1
 

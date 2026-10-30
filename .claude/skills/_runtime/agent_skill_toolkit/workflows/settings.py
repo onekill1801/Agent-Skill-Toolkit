@@ -88,6 +88,12 @@ CATALOG = [
        "multi", "read", choices=("read", "file", "bash"), restart=(GROUP_WATCH,), sensitive=True),
     _s("FCHAT_WATCH_TIMEOUT", "TChat", "Thời gian tối đa một lượt agent (giây)", "", "int", "1800",
        lo=60, hi=7200, restart=(GROUP_WATCH,)),
+    _s("FCHAT_BOARD_GROUPS", "TChat", "Nhóm bật bảng việc",
+       "id group (cách nhau dấu phẩy): review báo bằng thẻ R-n (không ack ngay; 'chờ bot' sau 3′; cùng commit ⇒ "
+       "trỏ thẻ cũ) — trống = kiểu cũ", "csv", "", item=_ID, restart=(GROUP_WATCH,)),
+    _s("FCHAT_CATCHUP_REPLY", "TChat", "Báo lệnh bị lỡ vào group",
+       "1 = sau khi bot khởi động lại/nhận chậm, gửi 1 tin báo người gửi lệnh gửi lại · 0 = chỉ ghi log (shadow)",
+       "bool", "0", restart=(GROUP_WATCH,)),
     # ---------------------------------------------------------------- Telegram
     _s("TELEGRAM_APPROVAL_TIMEOUT", "Telegram", "Chờ bấm Duyệt (giây)",
        "không bấm trong khoảng này thì yêu cầu tự bị từ chối", "int", "300", lo=30, hi=86400,

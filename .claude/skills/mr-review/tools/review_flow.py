@@ -478,17 +478,24 @@ REGISTRY = {KIND: STEPS}
 
 # ----------------------------------------------------------------------------- commands
 
+_JOB_BRIEF = ("id", "project_id", "iid", "project_path", "web_url", "title", "head_sha", "rerequested_head",
+              "verdict", "status")
+
+
 def enqueue(project, iid, role: str = "review", **request) -> dict:
     gate.admit(request.get("source") or "manual", KIND)     # before touching GitLab / the job file
     res = rq.add_job(project, iid, **request)
     job = res["job"]
+    brief = {k: job.get(k) for k in _JOB_BRIEF}
+    if res.get("same_head"):                                  # nothing new to review: no task
+        return {"job_id": job["id"], "job_duplicate": True, "same_head": True, "job": brief}
     with store_mod.Store() as st:
         task = gate.submit(st, request.get("source") or "manual", KIND, job["id"],
                            title=f"{job.get('project_path')}!{job['iid']} {job.get('title', '')}"[:200],
                            data={"job_id": job["id"], "role": role}, priority=int(job.get("priority", 5)),
                            requester_id=request.get("requester_id", ""))
     return {"job_id": job["id"], "job_duplicate": res["duplicate"], "task_id": task["id"],
-            "task_duplicate": task["duplicate"]}
+            "task_duplicate": task["duplicate"], "job": brief}
 
 
 def enqueue_text(text: str, default_project: str = "", role: str = "review", **request) -> dict:
@@ -499,19 +506,20 @@ def enqueue_text(text: str, default_project: str = "", role: str = "review", **r
         raise ValueError("no MR reference found in text")
     gate.admit(request.get("source") or "manual", KIND)
     ours = rc.config.get("GITLAB_URL") or ""
-    added, refused = [], []
+    added, refused, unchanged, jobs = [], [], [], []
     for r in refs:
         if "host" in r and not gate.host_ok(r["host"], ours):
             refused.append({"ref": f"{r['host']}/{r['project']}!{r['iid']}", "reason": "not our GitLab host"})
             continue
         try:
             out = enqueue(r["project"], r["iid"], role=role, **request)
-            added.append(out["job_id"])
+            (unchanged if out.get("same_head") else added).append(out["job_id"])
+            jobs.append({**out["job"], "same_head": bool(out.get("same_head"))})
         except (ValueError, RuntimeError) as e:
             refused.append({"ref": f"{r['project']}!{r['iid']}", "reason": str(e)[:200]})
-    if not added:
+    if not added and not unchanged:
         raise ValueError("no MR could be queued: " + "; ".join(f"{x['ref']}: {x['reason']}" for x in refused))
-    return {"added": added, "refused": refused}
+    return {"added": added, "refused": refused, "unchanged": unchanged, "jobs": jobs}
 
 
 _HEAD_CHECKED = {}     # task_id -> last time this process asked GitLab for the head (throttle)
@@ -596,6 +604,8 @@ def main(argv=None) -> int:
         p.add_argument(f"--{k}", default="manual" if k == "source" else "")
     p.add_argument("--priority", type=int, default=rq.PRIORITY_DEFAULT)
     p.add_argument("--role", default="review")
+    p.add_argument("--skip-same-head", action="store_true",
+                   help="MR already reviewed (posted) at its current head: record the request, no new round")
     p = sub.add_parser("work")
     p.add_argument("--once", action="store_true")
     p.add_argument("--interval", type=int, default=30)
@@ -612,7 +622,8 @@ def main(argv=None) -> int:
         elif a.cmd == "enqueue-text":
             out = enqueue_text(a.text, a.default_project, role=a.role, requester=a.requester,
                                requester_id=a.requester_id, source=a.source, group=a.group,
-                               group_type=a.group_type, priority=a.priority, note=a.text)
+                               group_type=a.group_type, priority=a.priority, note=a.text,
+                               skip_same_head=a.skip_same_head)
         elif a.cmd == "work":
             out = work(a.owner, a.once, a.interval)
         elif a.cmd == "reconcile":
