@@ -332,9 +332,10 @@ def doc() -> str:
         else:
             how = "file / nhúng"
         ck = checked.get(f"{e['folder']}/{e['name']}", {})
+        state = " · ".join(h + " " + mark.get(r.get("state"), "") for h, r in sorted(ck.items())) or "—"
         aliases = ", ".join(a.split(":", 1)[1] for a in e.get("aliases", [])[:4])
         L.append(f"| {e['folder']} | {e['name']} | {e.get('engine')} · {e.get('database') or '—'} | {how} | "
-                 f"{' · '.join(f'{h} {mark.get(r.get("state"), "")}' for h, r in sorted(ck.items())) or '—'} | {aliases} |")
+                 f"{state} | {aliases} |")
     L += ["", "## Cập nhật", "",
           "1. Sửa `work/dbeaver/catalog.json` (thêm/sửa entry) hoặc `platforms.json` (forward).",
           "2. `dbeaver_bundle.py check` (trên máy vào được mạng) → `build` → đóng DBeaver → `install` trên từng máy.",
