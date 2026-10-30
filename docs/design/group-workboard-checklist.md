@@ -14,6 +14,8 @@ Ký hiệu: ✅ xong · 🟡 đang làm / xong một phần · ⬜ chưa làm ·
 ## A. Việc của bạn (bot không tự làm được)
 
 ### A1. Bật những gì đã code xong (chưa chạy thật ở đâu)
+- [ ] 👤 **Đưa code lên ubuntu-c trước tiên**: máy Windows đi trước `origin` 13 commit (Pha 0b → 3), ubuntu-c đang ở
+      `c974fdb` (= origin) ⇒ `git push` từ Windows rồi `git pull` trên ubuntu-c (supervise tự nạp code mới).
 - [ ] 👤 Cài lại extension trong Chrome (`chrome://extensions` → Load unpacked / Reload) → v1.8.0.
 - [ ] 👤 Đồng bộ `work/task_lists.json` sang ubuntu-c: `python agentkit.py secret_sync push ubuntu-c --only work/task_lists.json`.
 - [ ] 👤 Đặt `FCHAT_BOARD_GROUPS=6883495a299a0f54343608e3` (dashboard → Cài đặt, hoặc
