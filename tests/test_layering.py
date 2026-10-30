@@ -37,6 +37,10 @@ EXCEPTIONS = {
         "ladder.load_spec/resolve_base/KIND: slices are proven by the verify ladder",
     ("agent_skill_toolkit.workflows.verify.ladder", "agent_skill_toolkit.workflows.refactor.ratchet"):
         "ratchet.parse_*/scan_isolated/compare: the `kind: ratchet` rung",
+    ("agent_skill_toolkit.integrations.gsheets", "agent_skill_toolkit.integrations.google_sa"):
+        "google_sa.access_token: Sheets calls authenticate as the service account",
+    ("agent_skill_toolkit.integrations.gsheets", "agent_skill_toolkit.integrations.google_oauth"):
+        "google_oauth.access_token: user-OAuth fallback when no service account is set",
 }
 # (runtime module, FULL script path it names) — subprocess / path edges AST imports cannot see. The whole
 # path is the identity: another `agent_runner.py` elsewhere is a different edge (Codex R R2 #2).
@@ -46,6 +50,7 @@ RUNTIME_EDGES = {
     ("agent_skill_toolkit.workflows.execution.agent_call", ".claude/skills/auto-dev/tools/agent_runner.py"):
         "agents run through agent_runner",
     ("agent_skill_toolkit.workflows.verify.unittest_junit", "unittest_junit.py"): "its own argparse prog name",
+    ("agent_skill_toolkit.core.filesync", "agentkit.py"): "marker file: the peer refuses a root that is not a toolkit",
     # CLI names quoted in instructions shown to a HUMAN (blocked-task messages), never executed
     ("agent_skill_toolkit.workflows.intake.atask_flow", "coordinator.py"): "tells the human how to accept",
     ("agent_skill_toolkit.workflows.proposal.flow", "proposals.py"): "tells the human how to go / decide",
@@ -65,6 +70,8 @@ SPAWNERS = {
     "agent_skill_toolkit.workflows.proposal.flow": "git rev-parse for the input key",
     "agent_skill_toolkit.workflows.execution.agent_call": "agent_runner",
     "agent_skill_toolkit.workflows.security.scan": "git log -p for secrets in history (security audit)",
+    "agent_skill_toolkit.integrations.secret_sync": "ssh to the peer machine (filesync ops run there)",
+    "agent_skill_toolkit.integrations.google_sa": "openssl dgst -sign for the service-account JWT (stdlib has no RSA)",
 }
 SPAWN_CALLS = {"subprocess.run", "subprocess.Popen", "subprocess.call", "subprocess.check_call",
                "subprocess.check_output", "os.system", "os.popen", "proc.run", "ctx.run", "os.startfile"}
