@@ -98,7 +98,9 @@ Bot cần workload k8s, container chính, tiền tố git tag của MỖI env; e
 - [x] Spike S7: `create_task` không có tham số người tạo ⇒ thẻ T sẽ ghi "tạo bằng tài khoản <chủ nhóm>"
 - [x] Lệnh `@bot tạo task: … | giao: @X | hạn: … | mô tả: … | list: <mã>` → thẻ T nháp; `xác nhận / huỷ / xong / xác nhận xong T-n`; `@bot list task`
 - [x] Idempotency (marker mã thẻ trong mô tả) + đối soát mọi trang khi timeout/5xx; đua 2 worker chỉ 1 lượt tạo
-- [ ] 👤 1 task thật: trong nhóm gõ `@bot tạo task: Thử bot | giao: tôi` → `xác nhận T-1` → kiểm trên aTask (list Task BE)
+- [x] Task thật qua đúng luồng bot (máy Windows, 30/10): **BPT-35** tạo trong Task BE, hạn đúng, đóng được (Hoàn thành).
+      Lộ + đã sửa: hạn phải là instant UTC; aTask trả mã task trễ (đợi chỉ mục).
+- [ ] 👤 Thử trong nhóm thật sau khi code lên ubuntu-c: `@bot tạo task: Thử bot` → `xác nhận T-1`
 - [ ] 👤 Người được giao cần hồ sơ `work/team.json` có `--fchat-id` + `--atask-id` (A2); chưa có ⇒ chỉ tạo không giao
 
 **4 — deploy** (⛔ S1 + pipeline)
