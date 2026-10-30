@@ -14,7 +14,8 @@ Ký hiệu: ✅ xong · 🟡 đang làm / xong một phần · ⬜ chưa làm ·
 ## A. Việc của bạn (bot không tự làm được)
 
 ### A1. Bật những gì đã code xong (chưa chạy thật ở đâu)
-- [ ] 👤 Cài lại extension trong Chrome (`chrome://extensions` → Load unpacked / Reload) → v1.7.1.
+- [ ] 👤 Cài lại extension trong Chrome (`chrome://extensions` → Load unpacked / Reload) → v1.8.0.
+- [ ] 👤 Đồng bộ `work/task_lists.json` sang ubuntu-c: `python agentkit.py secret_sync push ubuntu-c --only work/task_lists.json`.
 - [ ] 👤 Đặt `FCHAT_BOARD_GROUPS=6883495a299a0f54343608e3` (dashboard → Cài đặt, hoặc
       `python agentkit.py toolkit_settings set FCHAT_BOARD_GROUPS 6883495a299a0f54343608e3`).
 - [ ] 👤 Restart tab `group_watch` trên ubuntu-c (đổi `.env` không tự nạp lại; commit mới thì tự nạp).
@@ -43,7 +44,7 @@ Ký hiệu: ✅ xong · 🟡 đang làm / xong một phần · ⬜ chưa làm ·
       Kèm S2 ✅ (requestId được trả lại). ⇒ Pha 3/4 hết bị chặn bởi S1.
 - [ ] 👤 **S4** — bạn tự sửa / reply / thả reaction / ghim 1 tin trong Saved Messages trong lúc bot nghe WS (chỉ đọc)
       → biết định dạng để sửa thẻ tại chỗ (Pha 5).
-- [ ] 👤 Project/list aTask mặc định cho lệnh tạo task (Pha 3).
+- [x] 👤 List aTask: mặc định **#6 Backend Project Task › Task BE**, cho chọn `list: <mã>` trong `work/task_lists.json` (30/10).
 - [x] 👤 **Pipeline deploy (S8 ❌):** chọn **(b) cho dev** (30/10) — dev deploy "HEAD lúc chạy" (`allow_unpinned`), bot so
       SHA thực sau build. Sandbox/demo qua chat vẫn chặn tới khi pipeline nhận SHA/tag.
 - [x] Giờ tổng hợp: dùng 08:30 (đổi bằng `FCHAT_ENV_DIGEST_AT`).
@@ -67,9 +68,9 @@ Bot cần workload k8s, container chính, tiền tố git tag của MỖI env; e
 | 1b | `review lại R-n`, `@bot tôi là ai`, `@bot ping`, `@bot help`, quyền theo `team.json` | ✅ | `aaf8eb9` — Codex ACCEPT (2 vòng) |
 | 2a | `@bot env <repo>`, `@bot MR <số> <repo> ở đâu?` + ✅ qua Jenkins, tag mới hơn, cờ revert | ✅ | `c42c9d1` + `cc61114` — Codex ACCEPT |
 | 2b | Thẻ `E-<repo>-<env>` tự động + bản tổng hợp; shadow mặc định | 🟡 | `cc61114` — Codex ACCEPT (3 vòng); còn: chạy shadow 2 ngày (A1) |
-| 3 | Task aTask: nháp T-n → `xác nhận T-n` → tạo; `xong T-n` (hỏi lại) | ⬜ | S1 ✅; còn chờ project/list aTask (A3); S7 🟡 = tạo bằng tài khoản bạn |
+| 3 | Task aTask: nháp T-n → `xác nhận T-n` → tạo; `xong T-n` (hỏi lại) | 🟡 | code xong, Codex ACCEPT (3 vòng); còn: 1 task thật bạn xác nhận (A1) |
 | 4 | Deploy dev: D-n → người KHÁC duyệt → Jenkins → đợi rollout | ⬜ | S1 ✅; còn chờ quyền deploy/approve (A2); pipeline: (b) dev "HEAD lúc chạy" |
-| 5 | Extension bật lệnh mới; sửa thẻ tại chỗ nếu S4 đạt | 🟡 | v1.7.1 (git local `179fb78`); Task/Deploy chờ pha 3/4 |
+| 5 | Extension bật lệnh mới; sửa thẻ tại chỗ nếu S4 đạt | 🟡 | v1.8.0: bật Task; Deploy chờ pha 4 |
 
 ### Chi tiết từng pha
 **1b**
@@ -93,8 +94,10 @@ Bot cần workload k8s, container chính, tiền tố git tag của MỖI env; e
 
 **3 — task aTask** (⛔ S1)
 - [x] Spike S7: `create_task` không có tham số người tạo ⇒ thẻ T sẽ ghi "tạo bằng tài khoản <chủ nhóm>"
-- [ ] Lệnh `@bot tạo task: … | giao: @X | hạn: …` → thẻ T nháp; `xác nhận / huỷ / xong T-n`
-- [ ] Idempotency (mã thẻ) + đối soát khi timeout; 1 task thật bạn xác nhận
+- [x] Lệnh `@bot tạo task: … | giao: @X | hạn: … | mô tả: … | list: <mã>` → thẻ T nháp; `xác nhận / huỷ / xong / xác nhận xong T-n`; `@bot list task`
+- [x] Idempotency (marker mã thẻ trong mô tả) + đối soát mọi trang khi timeout/5xx; đua 2 worker chỉ 1 lượt tạo
+- [ ] 👤 1 task thật: trong nhóm gõ `@bot tạo task: Thử bot | giao: tôi` → `xác nhận T-1` → kiểm trên aTask (list Task BE)
+- [ ] 👤 Người được giao cần hồ sơ `work/team.json` có `--fchat-id` + `--atask-id` (A2); chưa có ⇒ chỉ tạo không giao
 
 **4 — deploy** (⛔ S1 + pipeline)
 - [x] Spike S8: job không nhận SHA/tag, không có job `-ops` ⇒ chờ lựa chọn A3
@@ -106,6 +109,7 @@ Bot cần workload k8s, container chính, tiền tố git tag của MỖI env; e
 - [x] v1.6.0: thẻ chỉ từ bot, nhãn 🤖 Bot / Bạn, chế độ chủ nhóm, thẻ E, banner bot im lặng
 - [x] v1.7.0: nút "Review lại R-n", bật `@bot tôi là ai / ping / help`
 - [x] v1.7.1: bật `@bot env` / `@bot MR … ở đâu`
+- [x] v1.8.0: bật Task (ô List, nút Xong cho cả người yêu cầu, nút Xác nhận xong)
 - [x] Đưa thư mục extension vào git (local, `179fb78`)
 - [ ] Bật Task / Deploy khi bot hỗ trợ (pha 3/4)
 

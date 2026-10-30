@@ -1,10 +1,11 @@
 """What an identity (core.identity.resolve) may do — design §3.4. Checked when a command is received.
 
-Phase 1b: `review`; 2a: `env` (read-only, any member not blocked by the registry); task / deploy / approve rows are added with their phases.
+Phase 1b: `review`; 2a: `env` (read-only, any member not blocked by the registry); 3: `task` (draft / confirm /
+cancel — the card also checks "same requester"), `task_done` (closing — the card checks requester or assignee).
 """
 
 # action -> required perm; None = any member the registry does not block (read-only questions)
-ACTIONS = {"review": "review", "env": None}
+ACTIONS = {"review": "review", "env": None, "task": "task", "task_done": None}
 
 
 def check(action: str, ident: dict) -> tuple:

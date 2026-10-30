@@ -4,6 +4,8 @@
     @bot tôi là ai        the sender's identity, links and permissions
     @bot ping             is the bot alive (heartbeat, backlog)
     @bot help             what can I type
+    @bot tạo task: …      draft an aTask task T-n (phase 3) · xác nhận / huỷ / xong / xác nhận xong T-n
+    @bot list task        the aTask lists a task may go to
 
 A member's `@bot …` command must start with the prefix; `review lại R-n` needs none. The owner's messages
 reach here with the prefix already stripped (prefixed=True). Replies are rendered here; the caller sends them.
@@ -22,6 +24,12 @@ _CMDS = (
     ("help", re.compile(r"^(?:help|giúp|hướng dẫn)\s*\??\s*$", re.I), True),
     ("env", re.compile(r"^env\s+([\w.\-/]+)\s*\??\s*$", re.I), True),
     ("mr_where", re.compile(r"^mr\s*!?(\d+)\s+([\w.\-/]+)(?:\s+ở\s+đâu)?\s*\??\s*$", re.I), True),
+    ("task_create", re.compile(r"^tạo\s+task\s*:\s*(.+)$", re.I | re.S), True),
+    ("task_lists", re.compile(r"^(?:list\s+task|task\s+list|lists?)\s*\??\s*$", re.I), True),
+    ("task_confirm_done", re.compile(r"^xác\s+nhận\s+xong\s+(T-\d+)\s*$", re.I), False),
+    ("task_confirm", re.compile(r"^xác\s+nhận\s+(T-\d+)\s*$", re.I), False),
+    ("task_cancel", re.compile(r"^(?:huỷ|hủy)\s+(T-\d+)\s*$", re.I), False),
+    ("task_done", re.compile(r"^xong\s+(T-\d+)\s*$", re.I), False),
 )
 
 HELP_LINES = (
@@ -31,7 +39,11 @@ HELP_LINES = (
     "@bot ping — bot còn chạy không",
     "@bot env <repo> — repo đang chạy phiên bản/commit nào ở từng môi trường (kèm link tự kiểm)",
     "@bot MR <số> <repo> ở đâu? — MR đã merge chưa, đã có ở môi trường nào",
-    "Sắp có: tạo task aTask, deploy dev/sandbox + duyệt",
+    "@bot tạo task: <tiêu đề> | giao: @<người> | hạn: dd/mm/yyyy | mô tả: … | list: <mã> — nháp thẻ T-n",
+    "xác nhận T-<số> — tạo task trên aTask (người tạo nháp) · huỷ T-<số> — bỏ nháp",
+    "xong T-<số> rồi xác nhận xong T-<số> — đóng task (người yêu cầu / người được giao)",
+    "@bot list task — các list aTask được phép",
+    "Sắp có: deploy dev + duyệt",
 )
 
 

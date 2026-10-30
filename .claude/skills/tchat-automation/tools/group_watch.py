@@ -52,8 +52,10 @@ from agent_skill_toolkit.core import board_store, identity, policy  # noqa: E402
 from agent_skill_toolkit.workflows.group_board import commands as board_commands  # noqa: E402
 from agent_skill_toolkit.workflows.group_board import envmap  # noqa: E402
 from agent_skill_toolkit.integrations import gitlab as gitlab_api  # noqa: E402
+from agent_skill_toolkit.integrations import atask as atask_api  # noqa: E402
 from agent_skill_toolkit.workflows.group_board import render as board_render  # noqa: E402
 from agent_skill_toolkit.workflows.group_board import review as board_review  # noqa: E402
+from agent_skill_toolkit.workflows.group_board import task as board_task  # noqa: E402
 from agent_skill_toolkit.workflows.intake import gate  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -602,8 +604,71 @@ def _env_command(gid, group_type, sender_name, sender_id, name, args):
     _post_inline(gid, group_type, board_render.defuse_body(text), [])
 
 
-def _board_command(gid, group_type, sender_name, sender_id, me, name, args):
+# ── Task aTask, thẻ T (Pha 3) ─────────────────────────────────────────────
+def _task_out(gid, group_type, out):
+    """Kết quả của board_task: thẻ (gửi như mọi thẻ) hoặc câu trả lời ngắn."""
+    if out.get("card"):
+        _post_card(gid, group_type, out["card"], *out["send"])
+    else:
+        _post_inline(gid, group_type, *out["reply"])
+
+
+def _task_command(gid, group_type, ident, name, args, mentions):
+    if name == "task_lists":
+        _post_inline(gid, group_type, board_task.lists_text(board_task.load_lists()), [])
+        return
+    if name == "task_create":
+        ok, fields = board_task.parse_create(args[0])
+        if ok != "ok":
+            _task_out(gid, group_type, board_task._reply(ident, fields))
+            return
+        entry = board_task.pick_list(board_task.load_lists(), fields["list"])
+        if not entry[0]:
+            _task_out(gid, group_type, board_task._reply(ident, entry[1]))
+            return
+        assignee, why = board_task.resolve_assignee(fields["assignee"], mentions, identity.load_team(),
+                                                    {"id": ident.get("fchat_id"), "name": ident.get("name")})
+        if why:
+            _task_out(gid, group_type, board_task._reply(ident, why))
+            return
+        with _board_lock:
+            out = board_task.draft(_board, gid, ident, fields, assignee, entry, _OWNER["name"])
+    elif name in ("task_confirm", "task_confirm_done"):
+        # gọi aTask NGOÀI _board_lock: thẻ đã được "giành" bằng revision trong store ⇒ chỉ một lượt thắng
+        fn = board_task.confirm if name == "task_confirm" else board_task.confirm_done
+        out = fn(_BoardProxy(), gid, args[0], ident, atask_api)
+    elif name == "task_cancel":
+        with _board_lock:
+            out = board_task.cancel(_board, gid, args[0], ident)
+    else:                                           # task_done
+        with _board_lock:
+            out = board_task.done(_board, gid, args[0], ident)
+    _task_out(gid, group_type, out)
+
+
+class _BoardProxy:
+    """Store qua _board_lock từng lời gọi (kết nối sqlite dùng chung giữa các luồng)."""
+
+    def __getattr__(self, attr):
+        fn = getattr(_board, attr)
+
+        def call(*a, **k):
+            with _board_lock:
+                return fn(*a, **k)
+        return call
+
+
+def _board_command(gid, group_type, sender_name, sender_id, me, name, args, mentions=()):
     ident = _identity(sender_id, sender_name, me)
+    if name.startswith("task_"):
+        action = "task" if name in ("task_create", "task_confirm", "task_cancel") else "task_done"
+        if name == "task_lists" or _allowed(gid, group_type, ident, action, sender_name, sender_id):
+            try:
+                _task_command(gid, group_type, ident, name, args, mentions)
+            except ValueError as e:                  # task_lists.json / team.json hỏng ⇒ không làm gì
+                _post_inline(gid, group_type, board_render.defuse(f"⚠️ @{sender_name}: cấu hình lỗi — {e}"),
+                             [(sender_name, sender_id)])
+        return
     if name == "review_again":
         if _allowed(gid, group_type, ident, "review", sender_name, sender_id):
             _review_again(gid, group_type, sender_name, sender_id, args[0])
@@ -673,14 +738,15 @@ def _sweeper(interval=30):
         time.sleep(interval)
 
 
-def _process_one(gid, group_type, sender_name, sender_id, text, me):
-    """Một lượt xử lý đầy đủ cho MỘT tin (chạy trong worker, tuần tự)."""
+def _process_one(gid, group_type, sender_name, sender_id, text, me, mentions=()):
+    """Một lượt xử lý đầy đủ cho MỘT tin (chạy trong worker, tuần tự). mentions = metadata.mentions của tin
+    (chỉ để CHỈ người — quyền và id aTask luôn lấy từ danh bạ)."""
     intent = _guess_intent(text)
     if _board_on(gid):
         # nhóm bật bảng việc: lệnh neo đầu dòng + quyền theo định danh (team.json; mặc định review+task)
         cmd = board_commands.parse(text, prefixed=bool(me) and sender_id == me)
         if cmd:
-            _board_command(gid, group_type, sender_name, sender_id, me, *cmd)
+            _board_command(gid, group_type, sender_name, sender_id, me, *cmd, mentions=mentions)
             return
         if intent == "review":
             if _allowed(gid, group_type, _identity(sender_id, sender_name, me), "review", sender_name, sender_id):
@@ -1020,7 +1086,8 @@ def _handle(obj, gid_target, me, kws):
         return
     # XẾP HÀNG thay vì spawn-rồi-bỏ: tin tới khi đang bận vẫn được xử lý sau.
     _inbox_set(gid, msg_id, "queued")
-    _work_q.put(((gid, group_type, sender_name, sender, content, me), (gid, msg_id)))
+    mentions = [m for m in ((data.get("metadata") or {}).get("mentions") or []) if isinstance(m, dict)]
+    _work_q.put(((gid, group_type, sender_name, sender, content, me, mentions), (gid, msg_id)))
     tag = "[CMD]" if is_command else "[queued]"
     print(f"[{_now()}] {tag} {sender_name}: {content!r}  (chờ xử lý: {_work_q.qsize()})")
 
