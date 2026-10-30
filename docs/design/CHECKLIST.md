@@ -224,3 +224,19 @@ Ký hiệu: ✅ xong + Codex đồng thuận · 🔁 đã code, đang review/s�
 | 2026-10-23 | F.25 | 1→3 | **GO** vòng 3 (NO-GO 1: HIGH repo lạ lồng trong clone đã khai bị nhận nhầm project → so danh tính git; MED `apply` đồng thời mất mục → khoá + tên sao lưu duy nhất; MED tra GitLab theo path không kiểm host. NO-GO 2: MED mục registry host khác che clone cùng path của host mình) |
 | 2026-10-23 | F.26 | 1→4 | **GO** vòng 4 (NO-GO 1: 4 HIGH host bị thay bằng host mặc định, gán trùng chọn bừa, job phụ nhận nhánh job chính, log ghép nhánh của repo khác + 3 MED; NO-GO 2: 2 HIGH log khác repo, gán động + 1 MED nhánh `$VAR` từ checkout; NO-GO 3: 2 HIGH log khác host, `env.X =` động) |
 | 2026-10-17 | Lộ trình sản phẩm (`docs/design/PRODUCT-ROADMAP.md`) | 1→4 | **GO** vòng 4 (v1–v3 GO-WITH-CHANGES: 7→3→1 HIGH; 2 LOW vòng 4 đã đưa vào v4.1) — thiết kế, chưa triển khai |
+
+---
+
+## 8. Bảng việc nhóm qua FPT Chat ([`group-workboard.md`](group-workboard.md) v3 — Codex + Fable ACCEPT 30/10)
+
+| # | Việc | Trạng thái | Commit | Codex | Ghi chú |
+|---|---|---|---|---|---|
+| 8.0 | Spike S1–S8 (senderId server-enforced, requestId echo, recall, edit/pin, GitLab API, job/k8s provenance, aTask tạo-thay, job nhận SHA) | ⛔ | | | S1 cần người dùng cho phép gửi 1 khung WS senderId sai vào Saved Messages |
+| 8.0b | Outbox trong `send.py` + inbox bền + `with_mentions` inline | ⬜ | | | |
+| 8.1a | Thẻ R thay `notice_text`; dedupe head SHA; hạn 30′; ack 3′ | ⬜ | | | không lệnh mới |
+| 8.1b | `review lại R-n`, `@bot tôi là ai`, policy review | ⬜ | | | |
+| 8.2a | `@bot env`, `MR … ở đâu` (đọc) | ⬜ | | | so tay 3×3 |
+| 8.2b | E tự động + tổng hợp 08:30, shadow 2 ngày | ⬜ | | | |
+| 8.3 | Task aTask (nháp → xác nhận) | ⬜ | | | cần S1 |
+| 8.4 | Deploy dev/sandbox + duyệt 4 mắt + ghim SHA | ⬜ | | | cần S1, S8 |
+| 8.5 | Extension bật lệnh; edit/pin nếu S4 | ⬜ | | | |
