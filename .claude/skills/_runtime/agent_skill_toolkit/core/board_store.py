@@ -143,6 +143,15 @@ class Board:
         self.db.execute("insert into board_meta(key, value) values (?, ?) "
                         "on conflict(key) do update set value=excluded.value", (key, value))
 
+    def meta_get(self, key: str, default=None):
+        """JSON value stored under `key` (board_meta), or default."""
+        v = self._meta(key)
+        return json.loads(v) if v is not None else default
+
+    def meta_set(self, key: str, value) -> None:
+        with self.s._tx():
+            self._set_meta(key, json.dumps(value, ensure_ascii=False))
+
     def watermark(self, group_id: str):
         """Highest messageIdInc recorded for the group; None = never watched (first run)."""
         v = self._meta(f"watermark:{group_id}")
@@ -255,20 +264,27 @@ class Board:
         d["payload"] = json.loads(d.get("payload") or "{}")
         return d
 
-    def card_open(self, group_id: str, kind: str, ref: str, title: str = "", payload: dict = None) -> dict:
+    def card_open(self, group_id: str, kind: str, ref: str, title: str = "", payload: dict = None,
+                  card_id: str = "") -> dict:
         """The card of (group, kind, ref) — created with the next `<kind>-<n>` code if missing (sequence and
-        insert in ONE transaction: two watchers never mint the same code). `created` key: True if new."""
+        insert in ONE transaction: two watchers never mint the same code), or with `card_id` when the code is
+        derived from the ref (E-<repo>-<env>). `created` key: True if new."""
         with self.s._tx():
             r = self.db.execute("select * from cards where group_id=? and kind=? and ref=?",
                                 (str(group_id), kind, ref)).fetchone()
             if r:
                 return {**self._card(r), "created": False}
-            row = self.db.execute("select next from seq where group_id=? and kind=?", (str(group_id), kind)).fetchone()
-            n = row["next"] if row else 1
-            self.db.execute("insert into seq(group_id, kind, next) values (?,?,?) "
-                            "on conflict(group_id, kind) do update set next=excluded.next", (str(group_id), kind, n + 1))
+            if card_id:
+                cid = card_id
+            else:
+                row = self.db.execute("select next from seq where group_id=? and kind=?",
+                                      (str(group_id), kind)).fetchone()
+                n = row["next"] if row else 1
+                self.db.execute("insert into seq(group_id, kind, next) values (?,?,?) "
+                                "on conflict(group_id, kind) do update set next=excluded.next",
+                                (str(group_id), kind, n + 1))
+                cid = f"{kind}-{n}"
             now = time.time()
-            cid = f"{kind}-{n}"
             self.db.execute("insert into cards(group_id, id, kind, ref, revision, state, title, payload, created, updated) "
                             "values (?,?,?,?,1,'new',?,?,?,?)",
                             (str(group_id), cid, kind, ref, title or "", json.dumps(payload or {}, ensure_ascii=False),

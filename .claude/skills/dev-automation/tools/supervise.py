@@ -17,6 +17,8 @@
   * Ctrl+C in the tab stops the tree and the supervisor; a second Ctrl+C during the stop is ignored.
   * `--heartbeat LABEL --stale-after S`: the daemon writes temp/heartbeat/<LABEL>.json each loop turn
     (daemon_common.heartbeat); no beat for S seconds (after it has run S seconds) = hung -> restarted.
+    `--alert`: also tell the owner on Telegram (first allowed chat of the approval bot), at most once per
+    ALERT_EVERY_S per daemon — a hung watcher is otherwise only visible in the health log.
 
 Output of the child goes to the same terminal. Stdlib only.
 """
@@ -42,6 +44,29 @@ POLL_S = 1.0                   # child liveness check
 WATCH_EVERY_S = 10.0           # code / config change check
 STOP_GRACE_S = 20.0            # graceful stop, then the whole tree is killed
 RELOAD = "code/cấu hình đổi"
+ALERT_EVERY_S = 1800
+_last_alert = {}
+
+
+def alert(name: str, text: str, send=None, now=None) -> bool:
+    """Telegram the owner (throttled per daemon). send(text) -> bool is a test seam. Never raises."""
+    now = time.monotonic() if now is None else now
+    if now - _last_alert.get(name, -ALERT_EVERY_S - 1) < ALERT_EVERY_S:
+        return False
+    _last_alert[name] = now
+    try:
+        if send is None:
+            sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "..", "remote-control", "tools"))
+            import tg_api
+            bot = tg_api.approval_bot()
+            chats = tg_api.allowed_chats(bot)
+            if not chats:
+                return False
+            return bool(tg_api.send_message(chats[0], text, bot=bot).get("ok"))
+        return bool(send(text))
+    except Exception as e:  # noqa: BLE001 — Telegram down must not stop the supervisor
+        dc.health_log(name, "alert_failed", str(e)[:200])
+        return False
 
 
 def _say(name: str, msg: str) -> None:
@@ -439,7 +464,7 @@ def _stale(heartbeat: str, stale_after: float, ran: float):
 
 
 def run(cmd: list, name: str, reload: bool = True, root: str = "", max_restarts: int = -1,
-        sleep=time.sleep, heartbeat: str = "", stale_after: float = 0) -> int:
+        sleep=time.sleep, heartbeat: str = "", stale_after: float = 0, alert_owner: bool = False) -> int:
     """Supervise `cmd` until Ctrl+C (or `max_restarts` restarts, for tests). Returns 0."""
     root = root or paths.toolkit_root()
     backoff, restarts, seen = BACKOFF_START, 0, None
@@ -466,6 +491,8 @@ def run(cmd: list, name: str, reload: bool = True, root: str = "", max_restarts:
                     reason = stale
                     dc.health_log(name, "stale", stale)
                     _say(name, f"{stale} — coi như treo, khởi động lại")
+                    if alert_owner:
+                        alert(name, f"⚠️ {name}: {stale} — supervise đang khởi động lại. Nếu lặp lại, kiểm tab/VPN/token.")
                     break
                 if reload and time.monotonic() - last_watch >= WATCH_EVERY_S:
                     last_watch = time.monotonic()
@@ -516,6 +543,7 @@ def main(argv=None) -> int:
     ap.add_argument("--no-reload", action="store_true", help="do not restart on a new commit / config change")
     ap.add_argument("--heartbeat", default="", help="label of the daemon's heartbeat (temp/heartbeat/<label>.json)")
     ap.add_argument("--stale-after", type=float, default=0, help="restart when the heartbeat is older than this (s)")
+    ap.add_argument("--alert", action="store_true", help="Telegram the owner when the heartbeat stops (throttled)")
     a = ap.parse_args(argv[:i])
     cmd = argv[i + 1:]
     if not cmd:
@@ -523,7 +551,7 @@ def main(argv=None) -> int:
         return 2
     script = next((x for x in cmd if x.endswith(".py")), cmd[0])
     return run(cmd, a.name or os.path.splitext(os.path.basename(script))[0], reload=not a.no_reload,
-               heartbeat=a.heartbeat, stale_after=a.stale_after)
+               heartbeat=a.heartbeat, stale_after=a.stale_after, alert_owner=a.alert)
 
 
 if __name__ == "__main__":

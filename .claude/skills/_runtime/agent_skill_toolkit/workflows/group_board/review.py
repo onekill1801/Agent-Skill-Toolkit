@@ -156,7 +156,7 @@ def reconcile_overdue(board, group: str, card_id: str, job: dict, now: float = N
     return None
 
 
-def on_result(board, group: str, job: dict, verdict: str, summary: str, requester: dict) -> tuple:
+def on_result(board, group: str, job: dict, verdict: str, summary: str, requester: dict, also=()) -> tuple:
     """The review of job.head_sha was posted (caller holds the card lock). Returns (card, (text, people)).
     A result for a head other than the round in progress is recorded but does not move the card."""
     card = _open(board, group, job)
@@ -169,11 +169,11 @@ def on_result(board, group: str, job: dict, verdict: str, summary: str, requeste
         card = board.card_update(group, card["id"], last_result={"head": head, "verdict": verdict, "summary": summary})
         note = (f"kết quả lượt trước ({verdict}) — đang review commit mới" if card["state"] == "pending"
                 else f"kết quả cho commit cũ ({verdict}) — thẻ giữ kết quả mới nhất")
-        return card, render.render_review(card, requester or p.get("requester"), note=note)
+        return card, render.render_review(card, requester or p.get("requester"), note=note, also=also)
     card = board.card_update(group, card["id"], state=render.VERDICT_STATE.get(verdict, "comment"),
                              summary=summary, head=head, round_head=head or p.get("round_head"), ack_sent=True,
                              # a result that OPENS the card's round (no request seen in the group yet) dates it:
                              # an older request answer arriving later is then caught by on_request's time check
                              **({} if p.get("requested_at") else {"requested_at": time.time()}),
                              **_payload(job))
-    return card, render.render_review(card, requester or p.get("requester"))
+    return card, render.render_review(card, requester or p.get("requester"), also=also)

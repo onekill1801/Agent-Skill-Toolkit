@@ -518,6 +518,28 @@ def _k8s_workload(key, t, target=None):
     return out
 
 
+PROV_CACHE_S = 3600
+_prov_cache = {}         # (job, version) -> (time, provenance); TTL: a later build may push the same version again
+
+
+def _provenance(job):
+    def lookup(version):
+        hit = _prov_cache.get((job, version))
+        if hit and time.time() - hit[0] < PROV_CACHE_S:
+            return hit[1]
+        try:
+            p = subprocess.run([sys.executable, os.path.join(_DEV_DIR, "jenkins.py"), "provenance", "--path", job,
+                                "--version", version], capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=240)
+            out = json.loads(p.stdout or "{}")
+        except (subprocess.TimeoutExpired, ValueError):
+            return None
+        if out.get("found"):
+            _prov_cache[(job, version)] = (time.time(), out)
+        return out
+    return lookup
+
+
 def _env_snapshots(key, proj):
     """Snapshot của từng env (cache 5′) — k8s đọc song song, GitLab tag → commit."""
     from concurrent.futures import ThreadPoolExecutor
@@ -530,7 +552,13 @@ def _env_snapshots(key, proj):
             hit = _env_cache.get((key, t["env"]))
         if hit and now - hit[0] < ENV_CACHE_S:
             return hit[1]
-        snap = envmap.snapshot(t, _k8s_workload(key, t) if t.get("target") else {}, gl.tag)
+        try:
+            snap = envmap.snapshot(t, _k8s_workload(key, t) if t.get("target") else {}, gl.tag,
+                                   _provenance(t["job"]) if t.get("job") else None, gl.tag_names)
+        except Exception as e:  # noqa: BLE001 — one env failing must not sink the whole answer (not cached)
+            print(f"[{_now()}] [WARN] env {key}/{t['env']}: {type(e).__name__}: {e}", file=sys.stderr)
+            return {"env": t["env"], "level": "unknown", "branch": t.get("branch") or "", "commit": "",
+                    "notes": [f"lỗi khi đọc ({type(e).__name__})"], "observed_at": now}
         with _env_cache_lock:
             _env_cache[(key, t["env"])] = (now, snap)
         return snap
@@ -569,7 +597,8 @@ def _env_command(gid, group_type, sender_name, sender_id, name, args):
             _post_inline(gid, group_type, f"🤖 @{sender_name}: không đọc được MR !{args[0]} của {key}.",
                          [(sender_name, sender_id)])
             return
-        text = envmap.mr_text(key, web, mr, envmap.mr_where(mr, snaps, gl.is_ancestor, gl.merged_mrs), snaps)
+        rows = envmap.mr_where(mr, snaps, gl.is_ancestor, gl.merged_mrs, gl.compare_commits)
+        text = envmap.mr_text(key, web, mr, rows, snaps)
     _post_inline(gid, group_type, board_render.defuse_body(text), [])
 
 

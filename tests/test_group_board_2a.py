@@ -97,6 +97,93 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(envmap.snapshot(fci, {}, tag)["notes"], ["chưa khai workload k8s cho env này"])
 
 
+class ProvenanceTest(unittest.TestCase):
+    """✅ = pod digest == the digest build N pushed for THAT image repo, build N printed the commit it built and
+    pushed the git tag, and the tag still points at that commit."""
+
+    def sbx(self):
+        return {**{x["env"]: x for x in envmap.env_targets(PROJECT)}["sandbox"], "job": "job/S/job/etask"}
+
+    def prov(self, **kw):
+        base = {"found": True, "number": 282, "result": "FAILURE", "url": "http://j/282/", "failed_stages": [],
+                "pushes": [{"image": "registry/x/prod-kyta-etask", "digest": "sha256:" + HEX_A}],
+                "commit_sha": "c" * 40, "tags_pushed": ["prod-econ.0.198.45"]}
+        return lambda v: {**base, **kw} if v == "0.198.45" else {"found": False}
+
+    def snap(self, *pods, **kw):
+        return envmap.snapshot(self.sbx(), workload(*(pods or (pod("a"),))), tag, self.prov(**kw))
+
+    def test_verified(self):
+        s = self.snap(pod("a"), pod("b"))
+        self.assertEqual((s["level"], s["build"]["number"]), ("verified", 282))
+        self.assertIn("mọi stage báo SUCCESS — lỗi nằm ngoài stage", " ".join(s["notes"]))
+        s = self.snap(failed_stages=["Deploy"])
+        self.assertIn("bước lỗi: Deploy", " ".join(s["notes"]))
+        s = self.snap(failed_stages=None)
+        self.assertIn("không đọc được danh sách stage", " ".join(s["notes"]))
+
+    def test_not_verified(self):
+        other = {"image": "registry/x/prod-kyta-etask", "digest": "sha256:" + "b" * 64}
+        self.assertEqual(self.snap(pushes=[other])["level"], "drift")                        # re-pushed image
+        self.assertEqual(self.snap(pushes=[{"image": "registry/x/gateway", "digest": "sha256:" + HEX_A}])["level"],
+                         "inferred")                                                         # another repo's digest
+        two = [{"image": "registry/x/prod-kyta-etask", "digest": "sha256:" + HEX_A}, other]
+        self.assertEqual(self.snap(pushes=two)["level"], "inferred")                         # ambiguous pushes
+        self.assertEqual(self.snap(tags_pushed=[])["level"], "inferred")                     # tag push failed
+        self.assertEqual(self.snap(commit_sha="")["level"], "inferred")                      # no commit printed
+        s = self.snap(commit_sha="d" * 40)
+        self.assertEqual(s["level"], "drift")                                                # the tag was moved
+        self.assertIn("tag bị dời", " ".join(s["notes"]))
+        self.assertEqual(envmap.snapshot(self.sbx(), workload(pod("a")), tag, lambda v: {"found": False})["level"],
+                         "inferred")
+        self.assertEqual(self.snap(pod("a"), pod("b", digest="c" * 64))["level"], "drift")  # drift never verified
+        no_job = {**self.sbx(), "job": ""}
+        self.assertEqual(envmap.snapshot(no_job, workload(pod("a")), tag, self.prov())["level"], "inferred")
+
+    def test_find_provenance(self):
+        import jenkins
+        d1, d2 = "sha256:" + HEX_A, "sha256:" + "b" * 64
+        log = "\n".join(["Commit SHA: " + "c" * 40,
+                          "+ docker push reg/x/prod-kyta-etask:0.198.45", "0.198.45: digest: " + d1 + " size: 1414",
+                          "+ docker push reg/x/gateway:0.198.45", "0.198.45: digest: " + d2 + " size: 9",
+                          "+ git tag -a prod-econ.0.198.45 -m x",
+                          " * [new tag]         prod-econ.0.198.45 -> prod-econ.0.198.45"])
+        out = jenkins.find_provenance(log, "0.198.45")
+        self.assertEqual(out["pushes"], [{"image": "reg/x/prod-kyta-etask", "digest": d1},
+                                         {"image": "reg/x/gateway", "digest": d2}])
+        self.assertEqual((out["commit_sha"], out["tags_pushed"]), ("c" * 40, ["prod-econ.0.198.45"]))
+        failed_tag = log.replace(" * [new tag]         prod-econ.0.198.45 -> prod-econ.0.198.45",
+                                 "fatal: tag 'prod-econ.0.198.45' already exists")
+        self.assertEqual(jenkins.find_provenance(failed_tag, "0.198.45")["tags_pushed"], [])   # Codex R1 #2
+        two_sha = log + "\nCommit SHA: " + "d" * 40
+        self.assertEqual(jenkins.find_provenance(two_sha, "0.198.45")["commit_sha"], "")
+        self.assertEqual(jenkins.find_provenance("IMAGE_LAST_VER: 0.0.1273\n+ git tag -a dev.0.0.1274", "0.0.1273"), {})
+        self.assertEqual(jenkins.find_provenance("10.198.45: digest: " + d1, "0.198.45"), {})
+
+
+class ExtrasTest(unittest.TestCase):
+    def test_newer_tags(self):
+        names = ["dev.0.0.1274", "dev.0.0.1273", "dev.0.0.999", "dev.0.0.1280-rc", "dev.0.0.12740", "devx.0.0.2000"]
+        self.assertEqual(envmap.newer_tags("dev.", "0.0.1273", names), ["dev.0.0.12740", "dev.0.0.1274"])
+        sbx = {x["env"]: x for x in envmap.env_targets(PROJECT)}["sandbox"]
+        s = envmap.snapshot(sbx, workload(pod("a")), tag, None, lambda p: ["prod-econ.0.199.45", "prod-econ.0.198.45"])
+        self.assertEqual(s["newer_tags"], ["prod-econ.0.199.45"])
+        self.assertIn("có bản build mới hơn chưa chạy ở đây: prod-econ.0.199.45", s["notes"])
+
+    def test_revert_flag(self):
+        m = "m" * 40
+        self.assertTrue(envmap.reverted_in([{"title": "x", "message": f"This reverts commit {m}."}], m, "Fix A"))
+        self.assertTrue(envmap.reverted_in([{"title": 'Revert "Fix A"', "message": ""}], m, "Fix A"))
+        self.assertFalse(envmap.reverted_in([{"title": 'Revert "Fix ABC"', "message": ""}], m, "Fix A"))  # R1 #5
+        self.assertFalse(envmap.reverted_in([{"title": "Fix B", "message": ""}], m, "Fix A"))
+        snaps = [{"env": "dev", "commit": "d" * 40, "level": "verified"}]
+        mr = {"iid": 7, "state": "merged", "title": "Fix A", "merge_commit_sha": m}
+        rows = envmap.mr_where(mr, snaps, lambda a, b: True, lambda b, t: [],
+                               lambda f, t: [{"title": 'Revert "Fix A"'}])
+        self.assertEqual((rows[0]["verdict"], rows[0]["revert"]), ("có", True))       # flagged, not denied
+        self.assertIn("có commit revert sau đó, kiểm tay", rows[0]["detail"])
+
+
 class MrWhereTest(unittest.TestCase):
     SNAPS = [{"env": "dev", "commit": "d" * 40, "branch": "merge/rfc", "level": "inferred"},
              {"env": "sandbox", "commit": "s" * 40, "branch": "merge/rfc-into-vitess"},
@@ -202,6 +289,8 @@ class GL:
     def get_merge_request(self, iid): return {"iid": iid, "state": "opened", "title": "T", "web_url": "u"}
     def is_ancestor(self, a, b): return True
     def merged_mrs(self, b, t): return []
+    def tag_names(self, prefix): return []
+    def compare_commits(self, a, b): return []
 g.gitlab_api.Client = GL
 out = {}
 g._env_command("G", "S", "Lan", "U1", "env", ("etask",))

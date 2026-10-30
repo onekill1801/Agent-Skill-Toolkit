@@ -19,6 +19,7 @@ Usage:
     python jenkins.py status --job my-service --number 42
     python jenkins.py console --job my-service --number 42 --tail 40
     python jenkins.py build --job my-service --dry-run
+    python jenkins.py provenance --path job/x/job/y --version 0.198.45 [--builds 40]   # read-only
 
 Output: a single JSON object.
 """
@@ -27,6 +28,7 @@ import argparse
 import base64
 import http.cookiejar
 import json
+import re
 import ssl
 import sys
 import time
@@ -222,6 +224,58 @@ def cmd_info(args) -> dict:
     }
 
 
+def find_provenance(log: str, version: str) -> dict:
+    """In one build log, the evidence tying <version> to an image digest and a commit (pure, tested):
+      pushes      [{image, digest}] — each `docker push <image>:<version>` with the digest docker reported for it
+      commit_sha  the `Commit SHA: <40 hex>` the build printed (one distinct value, else '')
+      tags_pushed git tags whose push succeeded (`* [new tag] <t> -> <t>`) and that end with <version>
+    {} when this build did not push <version>."""
+    v = re.escape(version)
+    pushes, image = [], None
+    for ln in log.splitlines():
+        m = re.match(rf"^\+ docker push (\S+):{v}\s*$", ln)
+        if m:
+            image = m.group(1)
+            continue
+        m = re.match(rf"^{v}: digest: (sha256:[0-9a-f]{{64}})\b", ln)
+        if m:
+            pushes.append({"image": image or "", "digest": m.group(1)})
+            image = None
+    if not pushes:
+        return {}
+    shas = set(re.findall(r"^Commit SHA: ([0-9a-f]{40})\s*$", log, re.M))
+    tags = re.findall(rf"^\s*\* \[new tag\]\s+(\S*{v}) -> \1\s*$", log, re.M)
+    return {"pushes": pushes, "commit_sha": next(iter(shas)) if len(shas) == 1 else "",
+            "tags_pushed": sorted(set(tags))}
+
+
+def cmd_provenance(args) -> dict:
+    """Read-only: the newest build (of the last --builds) whose log shows pushing <version>: number, result,
+    time, URL, failed stages (wfapi) and find_provenance() evidence. Ties a running image digest to a build,
+    the commit that build printed, and the git tag it pushed (group-workboard §5.1 "đã xác minh")."""
+    base, jp = _base(), _job_path(args)
+    st, _, body = _req("GET", f"{base}/{jp}/api/json?tree=builds[number,result,timestamp,url]{{0,{int(args.builds)}}}")
+    if st != 200 or not body:
+        return {"error": True, "status": st, "message": f"build list failed: HTTP {st}"}
+    for b in json.loads(body).get("builds") or []:
+        st, _, log = _req("GET", f"{base}/{jp}/{b['number']}/consoleText")
+        if st != 200:
+            continue
+        found = find_provenance(log, args.version)
+        if found:
+            failed = None                                   # None = stage view unavailable; [] = no stage failed
+            st, _, wf = _req("GET", f"{base}/{jp}/{b['number']}/wfapi/describe")
+            if st == 200 and wf:
+                try:
+                    failed = [x.get("name") for x in json.loads(wf).get("stages") or []
+                              if x.get("status") in ("FAILED", "ABORTED", "UNSTABLE")]
+                except ValueError:
+                    failed = None
+            return {"found": True, "version": args.version, "number": b["number"], "result": b.get("result"),
+                    "timestamp": b.get("timestamp"), "url": b.get("url"), "failed_stages": failed, **found}
+    return {"found": False, "version": args.version, "searched": int(args.builds)}
+
+
 def cmd_jobs(args) -> dict:
     """Read-only: list child jobs/folders under a path (root if none) — for discovery."""
     base = _base()
@@ -272,6 +326,9 @@ def main() -> int:
 
     sub.add_parser("info", parents=[common])  # read-only job summary
     sub.add_parser("jobs", parents=[common])   # read-only: list child jobs/folders
+    pv = sub.add_parser("provenance", parents=[common])   # read-only: build that pushed a version
+    pv.add_argument("--version", required=True)
+    pv.add_argument("--builds", type=int, default=40)
 
     args = parser.parse_args()
     err = project_config.apply_args(args, mutating=args.action in ("trigger", "build"))
@@ -294,6 +351,8 @@ def main() -> int:
             out = cmd_info(args)
         elif args.action == "jobs":
             out = cmd_jobs(args)
+        elif args.action == "provenance":
+            out = cmd_provenance(args)
         else:
             out = {"number": args.number, "console_tail": _console(args, args.number, args.tail)}
     except ValueError as e:

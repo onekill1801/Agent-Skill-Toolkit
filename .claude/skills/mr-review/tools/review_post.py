@@ -857,34 +857,44 @@ def board_groups() -> set:
     return {g.strip() for g in (rc.config.get("FCHAT_BOARD_GROUPS") or "").split(",") if g.strip()}
 
 
-def card_notice(job: dict, review: dict, r: dict):
-    """(text, card_id, people) — the R card of this MR in the requester's group, updated to the verdict; None
-    when the group has no workboard or the board store is unavailable (the plain notice is sent instead).
+def card_notice(job: dict, review: dict, rs):
+    """(text, card_id, people) — the R card of this MR in the requesters' group (one dict or a list of the
+    same group), updated to the verdict and naming every requester; None when the group has no workboard or
+    the board store is unavailable (the plain notice is sent instead).
     Caller holds board_review.lock(group, ref) until the card is SENT (ordering with the watcher's timer)."""
+    rs = rs if isinstance(rs, list) else [rs]
+    r = rs[0]
     if r.get("group") not in board_groups():
         return None
+    people = [{"id": x.get("by_id") or "", "name": x.get("by") or ""} for x in rs if x.get("by")]
     try:
         from agent_skill_toolkit.core import board_store
         from agent_skill_toolkit.workflows.group_board import review as board_review
         with board_store.Board() as b:
             card, (text, people) = board_review.on_result(
                 b, r["group"], job, review["verdict"], _counts(review.get("findings", [])),
-                {"id": r.get("by_id") or "", "name": r.get("by") or ""} if r.get("by") else None)
+                people[0] if people else None, also=people[1:])
         return text, card["id"], people
     except Exception as e:  # noqa: BLE001 — a board problem must not swallow the notice
         print(f"[WARN] board card for {job.get('id')}: {type(e).__name__}: {e}", file=sys.stderr)
         return None
 
 
-def _send_notice(job: dict, review: dict, r: dict, text: str) -> tuple:
-    """Board group: card update + send under the MR's card lock; other groups: the plain notice."""
+def _send_notice(job: dict, review: dict, rs: list, text: str) -> tuple:
+    """Board group: card update + send under the MR's card lock (one card for every requester in `rs`);
+    other groups: the plain notice to rs[0] (one notice per person — `rs` has one entry there)."""
+    r = rs[0]
     if r.get("group") not in board_groups():
         return _send_one(r, text)
     from agent_skill_toolkit.workflows.group_board import review as board_review
     try:
         with board_review.lock(r["group"], board_review.ref_of(job), timeout=60):
-            card = card_notice(job, review, r)
-            return _send_one(r, *card) if card else _send_one(r, text)
+            card = card_notice(job, review, rs)
+            if card:
+                return _send_one(r, *card)
+            if len(rs) > 1:      # the plain notice tags ONE person: never report the others as told — retry later
+                return "failed", "thẻ bảng việc lỗi — sẽ thử lại cho cả nhóm người yêu cầu"
+            return _send_one(r, text)
     except TimeoutError:                                       # nothing sent: `failed` is retried by sweep
         return "failed", "thẻ bảng việc đang bận — thử lại sau"
 
@@ -894,12 +904,12 @@ def _send_one(r: dict, text: str, card_id: str = "", people=None) -> tuple:
     args = [sys.executable, script, "--group", r["group"], "--text", text]
     if r.get("group_type"):
         args += ["--group-type", r["group_type"]]
-    # a card names the person in place ("Yêu cầu: @Tên", the name as RENDERED) — mention inline at that spot
-    name = (people[0][0] if people else "") if card_id else r.get("by")
-    if r.get("by_id") and name:
-        args += ["--user-id", r["by_id"], "--user-name", name]
+    # a card names the people in place ("Yêu cầu: @A · Cùng hỏi: @B", names as RENDERED) — inline mentions
     if card_id:
-        args += ["--inline", "--card-id", card_id]
+        args += ["--inline", "--card-id", card_id, "--people", json.dumps([list(p) for p in (people or [])],
+                                                                         ensure_ascii=False)]
+    elif r.get("by_id") and r.get("by"):
+        args += ["--user-id", r["by_id"], "--user-name", r["by"]]
     env = {k: v for k, v in os.environ.items() if k not in _STALE_ENV}
     try:
         p = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -965,19 +975,31 @@ def deliver_notices(jid: str, review: dict = None, force: bool = False) -> list:
         return []
     review = review or load_review(job, job.get("review_file", ""))
     text, out = notice_text(job, review), []
+    # a workboard group gets ONE card naming every due requester; other groups: one notice per person
+    boards, batches = board_groups(), []
     for k in keys:
-        def mark(j, k=k):
-            n = j["notices"][k]
-            n.update(state="sending", at=rc.now(), attempts=(0 if force else n.get("attempts", 0)) + 1)
+        g = reqs[k].get("group")
+        hit = next((b for b in batches if g in boards and b[0] == g), None)
+        if hit:
+            hit[1].append(k)
+        else:
+            batches.append((g, [k]))
+    for _g, ks in batches:
+        def mark(j, ks=ks):
+            for k in ks:
+                n = j["notices"][k]
+                n.update(state="sending", at=rc.now(), attempts=(0 if force else n.get("attempts", 0)) + 1)
         if _update_posted(jid, note_id, mark) is None:
             break                                              # replaced meanwhile: this delivery is obsolete
-        state, err = _send_notice(job, review, reqs[k], text)
+        state, err = _send_notice(job, review, [reqs[k] for k in ks], text)
 
-        def record(j, k=k, state=state, err=err):
-            j["notices"][k].update(state=state, at=rc.now(), error=err)
-            rc.log_event(j, "notified" if state == "sent" else f"notify_{state}", **({"error": err[:120]} if err else {}))
+        def record(j, ks=ks, state=state, err=err):
+            for k in ks:
+                j["notices"][k].update(state=state, at=rc.now(), error=err)
+            rc.log_event(j, "notified" if state == "sent" else f"notify_{state}", recipients=len(ks),
+                         **({"error": err[:120]} if err else {}))
         _update_posted(jid, note_id, record)
-        out.append({"key": k, "state": state, "error": err})
+        out += [{"key": k, "state": state, "error": err} for k in ks]
     return out
 
 

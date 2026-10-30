@@ -20,7 +20,7 @@ VERDICT_STATE = {"APPROVE": "approve", "COMMENT": "comment", "REQUEST_CHANGES": 
 # a line a member (or the watcher's keyword prefilter) could read as a request: bot prefix, card header, card
 # verbs, and the free-form requests the watcher acts on (review / build / deploy / tạo task / MR …)
 _CMD_LINE = re.compile(r"^\s*(@bot\b|🤖\s*\[|(duyệt|từ chối|xác nhận|huỷ|hủy|xong|deploy lại|review lại)\s+[RTDE]-"
-                       r"|(review|build|deploy|merge|tạo task|mr\b(?!:)|lên dev|!review|!build|/review|/build))", re.I)
+                       r"|(review|build|deploy|merge|tạo task|mr\s*!?\d|lên dev|!review|!build|/review|/build))", re.I)
 
 
 def one_line(text, limit: int = 0) -> str:
@@ -39,8 +39,9 @@ def _value(text, limit=200) -> str:
     return one_line(text, limit).replace(" · ", " – ")
 
 
-def render_review(card: dict, requester: dict = None, note: str = "") -> tuple:
-    """(text, people) for an R card. requester = {id, name} written on 'Yêu cầu' (mention target)."""
+def render_review(card: dict, requester: dict = None, note: str = "", also=()) -> tuple:
+    """(text, people) for an R card. requester = {id, name} written on 'Yêu cầu' (mention target); `also` =
+    more requesters of the same MR, named on a 'Cùng hỏi' line (one card for all of them)."""
     p = card.get("payload") or {}
     title = f"{p.get('project_path') or '?'}!{p.get('iid') or '?'}"
     if p.get("mr_title"):
@@ -52,6 +53,11 @@ def render_review(card: dict, requester: dict = None, note: str = "") -> tuple:
         head.append(f"Yêu cầu: @{_value(requester['name'], 60)}")
         people.append((_value(requester["name"], 60), requester.get("id") or ""))
     lines.append(" · ".join(head))
+    more = [x for x in also or () if x.get("name") and x.get("id") != (requester or {}).get("id")]
+    if more:
+        names = [_value(x["name"], 60) for x in more]
+        lines.append("Cùng hỏi: " + ", ".join(f"@{n}" for n in names))
+        people += [(n, x.get("id") or "") for n, x in zip(names, more)]
     if p.get("summary"):
         lines.append(f"Kết quả: {_value(p['summary'])}")
     if note:

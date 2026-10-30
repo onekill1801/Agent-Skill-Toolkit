@@ -3,8 +3,9 @@
 Inputs are injected (k8s workload JSON from `k8s.py workload`, GitLab lookups) so this module stays pure.
 Every answer carries its SOURCE and a verification level, and a link to check by hand:
 
-  ✅ đã xác minh   pod digest == digest of a Jenkins build whose commit is known  (NOT implemented yet:
-                   needs build provenance — never claimed by this version)
+  ✅ đã xác minh   every pod runs ONE digest == the digest Jenkins build N reported when pushing THAT image
+                   repository at that version (no other digest pushed for it), build N printed the commit it
+                   built, pushed the git tag successfully, and the tag still points at that commit
   🟡 suy ra        every pod runs the spec image, ready; the image tag maps to a git tag (same NAME — the same
                    artifact is assumed, not proven)
   ❔ chưa xác minh no k8s access / no workload declared / no git tag for that version
@@ -59,9 +60,24 @@ def _version(image: str) -> str:
     return last.split(":", 1)[1] if ":" in last else ""
 
 
-def snapshot(t: dict, workload: dict, tag_lookup) -> dict:
+def _vkey(v: str):
+    return tuple(int(x) if x.isdigit() else x for x in re.split(r"[.\-]", v or ""))
+
+
+def newer_tags(prefix: str, version: str, names: list) -> list:
+    """Tags `<prefix><v>` with v > version (numeric compare) — built but not running here."""
+    out = []
+    for n in names or []:
+        v = n[len(prefix):] if n.startswith(prefix) else ""
+        if v and re.fullmatch(r"[0-9]+(\.[0-9]+)*", v) and _vkey(v) > _vkey(version):
+            out.append(n)
+    return sorted(out, key=lambda n: _vkey(n[len(prefix):]), reverse=True)
+
+
+def snapshot(t: dict, workload: dict, tag_lookup, provenance=None, tag_names=None) -> dict:
     """t = one env_targets() item; workload = `k8s.py workload` JSON or an error dict;
-    tag_lookup(name) -> {commit_id, created_at} | error dict."""
+    tag_lookup(name) -> {commit_id, created_at} | error dict;
+    provenance(version) -> `jenkins.py provenance` JSON (found, number, result, url, digest, git_tag) | None."""
     s = {"env": t["env"], "branch": t.get("branch") or "", "scanned_at": t.get("scanned_at") or "",
          "level": "unknown", "version": "", "commit": "", "tag": "", "notes": [], "observed_at": time.time()}
     if not t.get("target"):
@@ -103,6 +119,40 @@ def snapshot(t: dict, workload: dict, tag_lookup) -> dict:
         return s
     s["commit"], s["commit_at"] = tag["commit_id"], tag.get("created_at") or ""   # build time: unknown
     s["level"] = "drift" if drift else "inferred"
+    if tag_names and re.fullmatch(r"[0-9]+(\.[0-9]+)*", s["version"]):
+        newer = newer_tags(t["tag_prefix"], s["version"], tag_names(t["tag_prefix"]))
+        if newer:
+            s["newer_tags"] = newer[:3]
+            s["notes"].append(f"có bản build mới hơn chưa chạy ở đây: {', '.join(newer[:3])}")
+    if drift or not provenance or not t.get("job"):
+        return s
+    prov = provenance(s["version"]) or {}
+    if not prov.get("found"):
+        s["notes"].append("không tìm thấy build Jenkins đã push phiên bản này (trong các build gần nhất)")
+        return s
+    n = prov.get("number")
+    s["build"] = {k: prov.get(k) for k in ("number", "result", "url", "timestamp")}
+    pod_digest, repo = next(iter(digests)), spec_img.rsplit(":", 1)[0]
+    pushed = {p.get("digest") for p in prov.get("pushes") or [] if p.get("image") == repo}
+    if prov.get("result") not in (None, "SUCCESS"):
+        failed = prov.get("failed_stages")
+        where = ("bước lỗi: " + ", ".join(failed)) if failed else             ("mọi stage báo SUCCESS — lỗi nằm ngoài stage, xem log" if failed == [] else "không đọc được danh sách stage")
+        s["notes"].append(f"Jenkins ghi build #{n} là {prov.get('result')} ({where})")
+    if not pushed:
+        s["notes"].append(f"build #{n} không push image này ({repo.rsplit('/', 1)[-1]}) — commit chỉ suy ra")
+    elif len(pushed) > 1:
+        s["notes"].append(f"build #{n} push nhiều digest cho cùng image — không xác minh được")
+    elif pod_digest not in pushed:
+        s["notes"].append(f"digest pod ≠ digest build #{n} đã push — image đã bị đẩy lại?")
+        s["level"] = "drift"
+    elif s["tag"] not in (prov.get("tags_pushed") or []) or not prov.get("commit_sha"):
+        s["notes"].append(f"build #{n} không ghi commit hoặc không push được git tag {s['tag']} — commit chỉ suy ra")
+    elif prov["commit_sha"] != s["commit"]:
+        s["notes"].append(f"git tag {s['tag']} giờ trỏ {s['commit'][:8]} nhưng build #{n} đã build "
+                          f"{prov['commit_sha'][:8]} — tag bị dời?")
+        s["level"] = "drift"
+    else:
+        s["level"] = "verified"
     return s
 
 
@@ -111,8 +161,20 @@ def mr_commit(mr: dict) -> str:
     return mr.get("merge_commit_sha") or mr.get("squash_commit_sha") or mr.get("sha") or ""
 
 
-def mr_where(mr: dict, snaps: list, is_ancestor, merged_mrs) -> list:
-    """[{env, verdict, detail, via}] — is_ancestor(a, b) -> bool|None; merged_mrs(branch, title) -> [mr]."""
+def reverted_in(commits, mr_sha: str, title: str) -> bool:
+    """A commit between the MR and the env commit reverts it (git's default revert message / title)."""
+    for c in commits or []:
+        msg = f"{c.get('title') or ''}\n{c.get('message') or ''}"
+        if mr_sha and f"This reverts commit {mr_sha}" in msg:
+            return True
+        if title and (c.get("title") or "").strip() == f'Revert "{title}"':
+            return True
+    return False
+
+
+def mr_where(mr: dict, snaps: list, is_ancestor, merged_mrs, compare=None) -> list:
+    """[{env, verdict, detail, via, revert}] — is_ancestor(a, b) -> bool|None; merged_mrs(branch, title) -> [mr];
+    compare(frm, to) -> commits | None (revert check: "có" + a later revert = flagged, not denied)."""
     if mr.get("state") != "merged":
         return [{"env": s["env"], "verdict": "chưa merge", "detail": f"MR đang {mr.get('state') or '?'}", "via": None}
                 for s in snaps]
@@ -128,7 +190,11 @@ def mr_where(mr: dict, snaps: list, is_ancestor, merged_mrs) -> list:
             continue
         anc = is_ancestor(commit, s["commit"])
         if anc is True:
-            out.append({"env": s["env"], "verdict": "có", "via": None, "detail": "commit của MR nằm trong commit env"})
+            row = {"env": s["env"], "verdict": "có", "via": None, "detail": "commit của MR nằm trong commit env"}
+            if compare and reverted_in(compare(commit, s["commit"]), commit, mr.get("title") or ""):
+                row["detail"] += " — ⚠ có commit revert sau đó, kiểm tay"
+                row["revert"] = True
+            out.append(row)
             continue
         if anc is None:
             out.append({"env": s["env"], "verdict": "không xác định", "detail": "GitLab không trả lời", "via": None})
@@ -176,7 +242,10 @@ def env_text(repo: str, web: str, snaps: list) -> str:
             lines.append("  ↳ " + "; ".join(s["notes"]))
         if s.get("tag") and web:
             lines.append(f"  🔗 {web}/-/tags/{s['tag']}")
-    lines.append("Mức: 🟡 = khớp tên tag ảnh ↔ git tag (chưa đối chiếu digest với bản build) · ❔ thiếu nguồn/quyền · ⚠ lệch."
+        if (s.get("build") or {}).get("url"):
+            lines.append(f"  🔗 build #{s['build']['number']}: {s['build']['url']}")
+    lines.append("Mức: ✅ = digest pod trùng digest build Jenkins đã push và build đó tạo git tag · 🟡 = chỉ khớp tên tag"
+                 " ảnh ↔ git tag · ❔ thiếu nguồn/quyền · ⚠ lệch."
                  " Giờ tạo ReplicaSet ≈ giờ triển khai (rollback dùng lại bản cũ thì không đúng)")
     return "\n".join(lines)
 

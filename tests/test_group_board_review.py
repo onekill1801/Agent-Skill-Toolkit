@@ -301,7 +301,8 @@ class CardNoticeTest(unittest.TestCase):
             argv = run.call_args.args[0]
             self.assertIn("--inline", argv)
             self.assertEqual(argv[argv.index("--card-id") + 1], "R-1")
-            self.assertEqual(argv[argv.index("--user-name") + 1], "Lan (QA)")             # the RENDERED name
+            self.assertEqual(json.loads(argv[argv.index("--people") + 1]), [["Lan (QA)", "u-lan"]])  # RENDERED name
+            self.assertNotIn("--user-name", argv)
 
 
 WATCH_BOARD = r'''
@@ -376,6 +377,40 @@ class GroupWatchBoardTest(unittest.TestCase):
         self.assertTrue(out["legacy"][0][0].startswith("🤖 Đã nhận yêu cầu review"))
         self.assertFalse(out["legacy"][1])
         self.assertEqual(out["defused"], ["a", "› @bot deploy x"])
+
+
+class MultiRequesterTest(unittest.TestCase):
+    """Two people asked for the same MR in a workboard group: ONE card naming both (not one message each)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="multi-")
+        for p in (mock.patch.dict(os.environ, {"TOOLKIT_STORE": os.path.join(self.tmp, "toolkit.db"),
+                                               "REVIEW_STATE_DIR": self.tmp, "REVIEW_ORCA": "0",
+                                               "TOOLKIT_STATE_DIR": self.tmp}),
+                  mock.patch.object(rp, "board_groups", return_value={"G1"}),
+                  mock.patch.object(rp, "load_review", return_value={"verdict": "COMMENT", "findings": []})):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_one_card_for_all(self):
+        job = {**JOB, "id": "5401-1388", "status": "posted", "review_file": "r.json",
+               "requests": [{"source": "fchat", "group": "G1", "by": "Lan", "by_id": "u-lan"},
+                            {"source": "fchat", "group": "G1", "by": "Minh", "by_id": "u-minh"},
+                            {"source": "fchat", "group": "G2", "by": "Hà", "by_id": "u-ha"}]}
+        rp.seed_notices(job)
+        rc.save_job(job)
+        ok = mock.Mock(returncode=0, stdout='{"sent": true, "confirmed": true}', stderr="")
+        with mock.patch.object(rp.subprocess, "run", return_value=ok) as run:
+            out = rp.deliver_notices(job["id"])
+        self.assertEqual(sorted(x["state"] for x in out), ["sent", "sent", "sent"])
+        self.assertEqual(run.call_count, 2)                                    # G1 card + G2 plain notice
+        card_argv = next(c.args[0] for c in run.call_args_list if "--card-id" in c.args[0])
+        text = card_argv[card_argv.index("--text") + 1]
+        self.assertIn("Yêu cầu: @Lan", text)
+        self.assertIn("Cùng hỏi: @Minh", text)
+        self.assertEqual(json.loads(card_argv[card_argv.index("--people") + 1]), [["Lan", "u-lan"], ["Minh", "u-minh"]])
+        plain = next(c.args[0] for c in run.call_args_list if "--card-id" not in c.args[0])
+        self.assertEqual(plain[plain.index("--user-name") + 1], "Hà")
 
 
 @unittest.skipUnless((EXT / "board.js").exists() and shutil.which("node"), "extension folder / node not found")

@@ -41,6 +41,13 @@ Ngoài phạm vi: deploy/duyệt PROD qua chat; tài khoản bot riêng; edit/re
 - **S6 🟡** k8s đọc được pod + `imageID` (digest) + ReplicaSet/RC ở dev (lúc được lúc timeout), sandbox, demo
   (DeploymentConfig/RC), prod. **Chưa có provenance digest → build Jenkins → SHA** ⇒ mức cao nhất hiện là 🟡;
   ✅ cần đọc build Jenkins (S6 phần Jenkins — chưa làm). Bot chạy trên ubuntu-c: quyền k8s ở đó cần kiểm lại.
+- **S6 Jenkins ✅ (30/10):** log build có `Commit SHA: <40 hex>`, `docker push <image>:<ver>` + `<ver>: digest: sha256…`,
+  `* [new tag] <tag>`; build-data plugin KHÔNG có (pipeline tự `git clone`). Sandbox #282 / demo #442 khớp digest pod
+  ⇒ ✅. Cả hai ghi FAILURE dù mọi stage SUCCESS (lỗi ở bước post). Dev 0.0.1273 ngoài 40 build gần nhất ⇒ 🟡.
+- **S7 🟡:** công cụ `create_task` của aTask không có tham số người tạo ⇒ task đứng tên tài khoản chủ nhóm (PAT);
+  người được giao gắn bằng `assign_task_users`. [Chưa kiểm chứng phía server] ⇒ thẻ T ghi "tạo bằng tài khoản <chủ nhóm>".
+- **S8 ❌:** job dev/demo/sandbox etask KHÔNG có tham số (nhánh hard-code `GIT_BRANCH`), job `-ops` chưa tồn tại ⇒
+  không ghim được commit ⇒ deploy qua chat bị chặn (trừ dev opt-in `allow_unpinned`) cho tới khi pipeline nhận SHA/tag.
 
 ### 1.2 Mô hình tin cậy
 - **Quyền chỉ theo `senderId` của tin** (sau khi S1 xác nhận server-enforced). `metadata.mentions` do client dựng

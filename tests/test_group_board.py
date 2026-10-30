@@ -340,6 +340,16 @@ class HeartbeatTest(unittest.TestCase):
             self.assertIn("heartbeat dừng", self.sv._stale("gw", 180, 600))
         self.assertIsNone(self.sv._stale("", 180, 600))                  # watchdog off
 
+    def test_alert_throttled(self):
+        sent = []
+        self.sv._last_alert.clear()
+        self.assertTrue(self.sv.alert("gw", "x", send=lambda t: sent.append(t) or True, now=1000))
+        self.assertFalse(self.sv.alert("gw", "y", send=lambda t: sent.append(t) or True, now=1000 + 60))
+        self.assertTrue(self.sv.alert("gw", "z", send=lambda t: sent.append(t) or True, now=1000 + self.sv.ALERT_EVERY_S + 1))
+        self.assertTrue(self.sv.alert("other", "w", send=lambda t: sent.append(t) or True, now=1001))
+        self.assertEqual(sent, ["x", "z", "w"])
+        self.assertFalse(self.sv.alert("boom", "q", send=lambda t: 1 / 0, now=5))           # never raises
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -120,6 +120,33 @@ class Client:
             return None
         return r.get("id") == ancestor
 
+    def tag_names(self, prefix: str, pages: int = 3) -> list:
+        """Tag names starting with `prefix`, newest-updated first, up to `pages` × 100 (a bound — callers say
+        so); [] on error."""
+        out = []
+        for page in range(1, pages + 1):
+            q = urllib.parse.urlencode({"search": "^" + prefix, "order_by": "updated", "sort": "desc",
+                                        "per_page": 100, "page": page})
+            r = request(self._api(f"/repository/tags?{q}"))
+            if not isinstance(r, list):
+                break
+            out += [t.get("name") for t in r if str(t.get("name") or "").startswith(prefix)]
+            if len(r) < 100:
+                break
+        return out
+
+    def commit_mrs(self, sha: str):
+        """MRs that contain commit `sha` (any state — callers filter merged / target branch); None on error
+        (callers must not read an API failure as "no MR")."""
+        r = request(self._api(f"/repository/commits/{urllib.parse.quote(str(sha), safe='')}/merge_requests"))
+        return r if isinstance(r, list) else None
+
+    def compare_commits(self, frm: str, to: str):
+        """Commits reachable from `to` but not from `frm` ([{id, title, message}]); None on error."""
+        q = urllib.parse.urlencode({"from": frm, "to": to, "straight": "false"})
+        r = request(self._api(f"/repository/compare?{q}"))
+        return r.get("commits") if isinstance(r, dict) and not r.get("error") else None
+
     def merged_mrs(self, target_branch: str, search: str, limit: int = 20) -> list:
         """Merged MRs into `target_branch` whose title/description match `search` (port detection); [] on error."""
         q = urllib.parse.urlencode({"state": "merged", "target_branch": target_branch, "search": search,
