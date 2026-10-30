@@ -138,12 +138,16 @@ def _login(engine: str, host: str, port: int, user: str, password: str, db, time
         return "error", msg[:120]
 
 
-def check(only: str = "", timeout: int = 8) -> dict:
+def check(only: str = "", timeout: int = 8, label: str = "") -> dict:
+    """Results are kept PER MACHINE (`label`, default the hostname): reachability differs by network.
+    LOCAL/* entries are skipped — they only mean something on their own machine."""
     cat, fw = _load("catalog.json"), forwards()
     results = _load("check.json", {})
+    label = label or socket.gethostname()
     summary = {}
     for e in cat["connections"]:
-        if e.get("engine") not in ("mysql", "postgres") or not e["folder"].startswith(only):
+        if e.get("engine") not in ("mysql", "postgres") or not e["folder"].startswith(only) \
+                or e["folder"].startswith("LOCAL"):
             continue
         host, port = ("127.0.0.1", local_port(fw[e["forward"]])) if e.get("forward") else (e["host"], int(e["port"]))
         tried, seen, chosen = [], set(), None
@@ -162,11 +166,17 @@ def check(only: str = "", timeout: int = 8) -> dict:
             if status == "unreachable":
                 break
         state = "ok" if chosen else (tried[-1]["status"] if tried else "no-credentials")
-        results[f"{e['folder']}/{e['name']}"] = {"state": state, "chosen": chosen, "tried": tried,
-                                                  "endpoint": f"{host}:{port}", "at": time.strftime("%Y-%m-%d %H:%M")}
+        results.setdefault(f"{e['folder']}/{e['name']}", {})[label] = {
+            "state": state, "chosen": chosen, "tried": tried, "endpoint": f"{host}:{port}",
+            "at": time.strftime("%Y-%m-%d %H:%M")}
         summary[state] = summary.get(state, 0) + 1
     _save("check.json", results)
-    return {"summary": summary, "file": os.path.join(base_dir(), "check.json")}
+    return {"label": label, "summary": summary, "file": os.path.join(base_dir(), "check.json")}
+
+
+def _chosen(checked: dict) -> str:
+    """The candidate that logged in on any machine ('' if none)."""
+    return next((r["chosen"] for r in checked.values() if isinstance(r, dict) and r.get("chosen")), "")
 
 
 # --------------------------------------------------------------------------- build
@@ -184,7 +194,8 @@ def display_name(e: dict, fw: dict) -> str:
 
 
 def _creds_for(e: dict, checked: dict) -> dict:
-    order = ([checked["chosen"]] if checked.get("chosen") else []) + [e["template"]] + e["candidates"]
+    chosen = _chosen(checked)
+    order = ([chosen] if chosen else []) + [e["template"]] + e["candidates"]
     for key in order:
         _, cred = source_conn(key)
         if (cred.get("#connection") or {}).get("user") or (cred.get("#connection") or {}).get("password"):
@@ -276,8 +287,8 @@ def doc() -> str:
     cat, fw = _load("catalog.json"), forwards()
     checked = _load("check.json", {})
     access = project_config.load_platform(PLATFORM).get("k8s_access") or {}
-    mark = {"ok": "✅", "auth": "❌ login", "unreachable": "⛔ không tới", "unsupported": "⚠️ auth MySQL8",
-            "error": "⚠️", "no-credentials": "— chưa lưu login"}
+    mark = {"ok": "✅", "auth": "❌ sai login", "unreachable": "⛔ không tới", "unsupported": "🟡 tới được (MySQL 8, chưa thử login)",
+            "error": "⚠️ lỗi", "no-credentials": "— chưa lưu login"}
     L = ["# Kết nối DB (DBeaver project `Kyta`) — cách vào từng DB", "",
          f"Sinh bởi `dbeaver_bundle.py doc` lúc {time.strftime('%Y-%m-%d %H:%M')} từ `work/dbeaver/catalog.json` "
          "và `work/platforms.json` (econtract.forwards). Không chứa mật khẩu.", "",
@@ -299,7 +310,8 @@ def doc() -> str:
     L += ["", "## Kết nối theo môi trường", "",
           "Cột *Vào bằng*: **fwd** = mở forward ở trên rồi nối `localhost:<cổng>`; **trực tiếp** = mạng nội bộ "
           "(máy công ty / VPN FortiClient); **public** = Internet; **LAB/LOCAL** = máy riêng, chỉ chạy trên máy đó. "
-          "Cột *Kiểm*: lần `dbeaver_bundle.py check` gần nhất (đăng nhập `select 1`).", ""]
+          "Cột *Kiểm*: lần `dbeaver_bundle.py check` gần nhất trên từng máy (đăng nhập `select 1`; ⛔ = timeout/cổng đóng "
+          "từ máy đó — có thể cần mạng khác hoặc DB đã ngừng; LOCAL không kiểm).", ""]
     cur = None
     for e in sorted(cat["connections"], key=lambda e: (e["folder"].split("/")[0] not in ("PROD", "UAT", "SANDBOX", "SIT"),
                                                          ["PROD", "UAT", "SANDBOX", "SIT"].index(e["folder"].split("/")[0])
@@ -322,7 +334,7 @@ def doc() -> str:
         ck = checked.get(f"{e['folder']}/{e['name']}", {})
         aliases = ", ".join(a.split(":", 1)[1] for a in e.get("aliases", [])[:4])
         L.append(f"| {e['folder']} | {e['name']} | {e.get('engine')} · {e.get('database') or '—'} | {how} | "
-                 f"{mark.get(ck.get('state'), '')} | {aliases} |")
+                 f"{' · '.join(f'{h} {mark.get(r.get("state"), "")}' for h, r in sorted(ck.items())) or '—'} | {aliases} |")
     L += ["", "## Cập nhật", "",
           "1. Sửa `work/dbeaver/catalog.json` (thêm/sửa entry) hoặc `platforms.json` (forward).",
           "2. `dbeaver_bundle.py check` (trên máy vào được mạng) → `build` → đóng DBeaver → `install` trên từng máy.",
@@ -340,6 +352,7 @@ def main(argv=None) -> int:
     p = sub.add_parser("check")
     p.add_argument("--only", default="", help="folder prefix, e.g. PROD or SANDBOX/eDrive")
     p.add_argument("--timeout", type=int, default=8)
+    p.add_argument("--label", default="", help="name of this machine in check.json (default: hostname)")
     sub.add_parser("build")
     p = sub.add_parser("install")
     p.add_argument("--workspace", default="")
@@ -351,7 +364,7 @@ def main(argv=None) -> int:
         if a.cmd == "collect":
             out = collect(a.label, a.workspace or ds.default_workspace())
         elif a.cmd == "check":
-            out = check(a.only, a.timeout)
+            out = check(a.only, a.timeout, a.label)
         elif a.cmd == "build":
             out = build()
         elif a.cmd == "install":
