@@ -185,12 +185,44 @@ def _conn_id(entry: dict, driver: str) -> str:
     return f"{driver}-kyta-{hashlib.sha1((entry['folder'] + '/' + entry['name']).encode()).hexdigest()[:16]}"
 
 
+def _remote(f: dict) -> str:
+    """'svc/haproxy-db-prod' + '25432:5432' -> 'haproxy-db-prod:5432'."""
+    return f"{f['target'].split('/', 1)[-1]}:{str(f['ports']).split(':')[1]}"
+
+
 def display_name(e: dict, fw: dict) -> str:
+    """The navigator label says where the bytes go: ':25432 ⇐ haproxy-db-prod:5432 [prod-pg-kyta]'."""
     if e.get("forward"):
-        return f"{e['name']} · fwd :{local_port(fw[e['forward']])}"
+        f = fw[e["forward"]]
+        return f"{e['name']} · :{local_port(f)} ⇐ {_remote(f)} [{e['forward']}]"
     if e.get("host"):
         return f"{e['name']} · {e['host']}:{e['port']}"
     return e["name"]
+
+
+def description(e: dict, fw: dict, access: dict) -> str:
+    """Connection description (DBeaver: Edit Connection → General): how to reach it and where that is configured."""
+    env = e["folder"].split("/")[0]
+    if e.get("forward"):
+        f = fw[e["forward"]]
+        a = access.get(f.get("access", ""), {})
+        prod = " --allow-prod" if f.get("prod") else ""
+        return "\n".join([
+            f"PORT-FORWARD `{e['forward']}`: localhost:{local_port(f)} -> {a.get('namespace')}/{f['target']}:"
+            f"{str(f['ports']).split(':')[1]} ({f.get('what', '')})",
+            f"k8s: kubeconfig {a.get('kubeconfig')} · context {a.get('context')}",
+            f"Config: work/platforms.json -> econtract.forwards.{e['forward']} (access `{f.get('access')}` in "
+            "econtract.k8s_access)",
+            f"Open (toolkit root): python agentkit.py podfwd start-saved --platform econtract --only {e['forward']}{prod}",
+            "Check: python agentkit.py podfwd list · Doc: work/memory/db-connections.md · Catalog: work/dbeaver/catalog.json"])
+    if env.startswith(("LOCAL", "LAB")):
+        return f"{env}: only on that machine/network. Catalog: work/dbeaver/catalog.json"
+    if e.get("host") and "azure.com" in e["host"]:
+        return f"PUBLIC {e['host']}:{e['port']} (Azure, customer). Doc: work/memory/db-connections.md"
+    if e.get("host"):
+        return (f"DIRECT {e['host']}:{e['port']} — no forward; office network (company machine / FortiClient VPN). "
+                "Doc: work/memory/db-connections.md")
+    return "Catalog: work/dbeaver/catalog.json"
 
 
 def _creds_for(e: dict, checked: dict) -> dict:
@@ -206,6 +238,7 @@ def _creds_for(e: dict, checked: dict) -> dict:
 def build() -> dict:
     cat, fw = _load("catalog.json"), forwards()
     checked = _load("check.json", {})
+    access = project_config.load_platform(PLATFORM).get("k8s_access") or {}
     folders, conns, creds, models, drivers = {}, {}, {}, {}, {}
     for e in cat["connections"]:
         tmpl, _ = source_conn(e["template"])
@@ -216,6 +249,7 @@ def build() -> dict:
             path = "/".join(parts[:i + 1])
             folders.setdefault(path, {"parent": "/".join(parts[:i])} if i else {})
         c["name"], c["folder"] = display_name(e, fw), e["folder"]
+        c["description"] = description(e, fw, access)
         cfg = c.setdefault("configuration", {})
         if e.get("forward"):
             cfg.update(configurationType="MANUAL", host="localhost", port=str(local_port(fw[e["forward"]])))
@@ -278,7 +312,11 @@ def install(workspace: str, force: bool = False) -> dict:
     proj = ds.read_project(src)
     ds.write_project(workspace, name, proj["data"], proj["creds"],
                      comment="Merged from every machine by dbeaver_bundle.py — edit work/dbeaver/catalog.json, not here")
-    return {"installed": dst, "connections": len(proj["data"].get("connections", {})), "backup": backup}
+    out = {"installed": dst, "connections": len(proj["data"].get("connections", {})), "backup": backup}
+    if not ds.registered(workspace, name):
+        out["next"] = (f"DBeaver does not list `{name}` yet: File > Import > General > Existing Projects into Workspace, "
+                       f"root = {workspace}, tick {name}, UNtick 'Copy projects into workspace' (once per machine)")
+    return out
 
 
 # --------------------------------------------------------------------------- doc

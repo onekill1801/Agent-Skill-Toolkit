@@ -35,8 +35,12 @@ class StoreTest(unittest.TestCase):
         data = {"folders": {"PROD": {}}, "connections": {"c1": {"name": "x", "folder": "PROD"}}}
         path = ds.write_project(ws, "Kyta", data, {"c1": {"#connection": {"user": "a"}}})
         self.assertTrue(os.path.isfile(os.path.join(path, ".project")))
-        self.assertTrue(os.path.isdir(os.path.join(ws, ".metadata", ".plugins", "org.eclipse.core.resources",
-                                                   ".projects", "Kyta")))
+        self.assertFalse(ds.registered(ws, "Kyta"))          # files only — DBeaver import registers it
+        root = os.path.join(ws, ".metadata", ".plugins", "org.eclipse.core.resources", ".root")
+        os.makedirs(root)
+        with open(os.path.join(root, "7.tree"), "wb") as f:
+            f.write(b"\x00\x04Kyta\x00")
+        self.assertTrue(ds.registered(ws, "Kyta"))
         self.assertEqual(ds.projects(ws), ["Kyta"])
         back = ds.read_project(path)
         self.assertEqual(back["data"], data)

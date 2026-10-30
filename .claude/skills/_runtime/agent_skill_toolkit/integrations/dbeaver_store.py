@@ -7,7 +7,8 @@ CLI (stdlib has no AES); the payload goes over stdin, never argv. Nothing here p
 
     from agent_skill_toolkit.integrations import dbeaver_store as ds
     proj = ds.read_project("<workspace>/General")       # {"name", "data", "creds"}
-    ds.write_project("<workspace>", "Kyta", data, creds)  # + .project + registration
+    ds.write_project("<workspace>", "Kyta", data, creds)  # files only: DBeaver lists a NEW project only after
+                                                           # File > Import > Existing Projects into Workspace (once)
 """
 
 import json
@@ -88,8 +89,9 @@ def read_project(path: str) -> dict:
 
 
 def write_project(workspace: str, name: str, data: dict, creds: dict, comment: str = "") -> str:
-    """Write <workspace>/<name> (.project, .dbeaver/data-sources.json, credentials-config.json) and
-    register it in the Eclipse metadata so DBeaver lists it. Returns the project path."""
+    """Write <workspace>/<name> (.project, .dbeaver/data-sources.json, credentials-config.json). Returns the path.
+    It does NOT register the project: DBeaver/Eclipse keep the project list in .metadata/.plugins/
+    org.eclipse.core.resources/.root/<n>.tree (binary, not touched here) — see registered()."""
     path = os.path.join(workspace, name)
     os.makedirs(os.path.join(path, ".dbeaver"), exist_ok=True)
     with open(os.path.join(path, ".project"), "w", encoding="utf-8", newline="\n") as f:
@@ -98,6 +100,18 @@ def write_project(workspace: str, name: str, data: dict, creds: dict, comment: s
         json.dump(data, f, ensure_ascii=False, indent="\t")
     with open(os.path.join(path, ".dbeaver", "credentials-config.json"), "wb") as f:
         f.write(encrypt_credentials(creds))
-    os.makedirs(os.path.join(workspace, ".metadata", ".plugins", "org.eclipse.core.resources", ".projects", name),
-                exist_ok=True)
     return path
+
+
+def registered(workspace: str, name: str) -> bool:
+    """Whether DBeaver knows the project: its name appears in the workspace resource tree."""
+    root = os.path.join(workspace, ".metadata", ".plugins", "org.eclipse.core.resources", ".root")
+    try:
+        trees = [f for f in os.listdir(root) if f.endswith(".tree")]
+    except OSError:
+        return False
+    for t in trees:
+        with open(os.path.join(root, t), "rb") as f:
+            if name.encode() in f.read():
+                return True
+    return False
