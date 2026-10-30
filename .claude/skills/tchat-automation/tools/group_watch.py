@@ -50,6 +50,8 @@ from pathlib import Path
 runpy.run_path(str(Path(__file__).resolve().parents[2] / "_runtime" / "bootstrap.py"))["activate"]()
 from agent_skill_toolkit.core import board_store, identity, policy  # noqa: E402
 from agent_skill_toolkit.workflows.group_board import commands as board_commands  # noqa: E402
+from agent_skill_toolkit.workflows.group_board import envmap  # noqa: E402
+from agent_skill_toolkit.integrations import gitlab as gitlab_api  # noqa: E402
 from agent_skill_toolkit.workflows.group_board import render as board_render  # noqa: E402
 from agent_skill_toolkit.workflows.group_board import review as board_review  # noqa: E402
 from agent_skill_toolkit.workflows.intake import gate  # noqa: E402
@@ -474,6 +476,103 @@ def _review_again(gid, group_type, sender_name, sender_id, card_id):
     print(f"[{_now()}] [review] {sender_name}: review lại {card['id']} -> {_kick_auto_review()}")
 
 
+# ── Bản đồ môi trường, chỉ đọc (Pha 2a) ───────────────────────────────────
+ENV_CACHE_S = 300
+_env_cache = {}          # (project, env) -> (time, snapshot)
+_env_cache_lock = threading.Lock()
+
+
+def _registry() -> dict:
+    path = os.path.join(os.environ.get("WORK_DIR") or os.path.join(rccfg.repo_root(), "work"), "projects.json")
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    return data.get("projects", data) if isinstance(data, dict) else {}
+
+
+def _env_repo(name, reg):
+    """Registry key of `name` (key or last path segment), only if listed in FCHAT_ENV_REPOS."""
+    allowed = {x.strip().lower() for x in (rccfg.get("FCHAT_ENV_REPOS") or "").split(",") if x.strip()}
+    n = (name or "").strip().lower()
+    for key, proj in reg.items():
+        if not isinstance(proj, dict):
+            continue
+        if n in (key.lower(), str(proj.get("repo_path") or "").rsplit("/", 1)[-1].lower()):
+            return key if key.lower() in allowed else None
+    return None
+
+
+def _k8s_workload(key, t, target=None):
+    script = os.path.join(_DEV_DIR, "k8s.py")
+    target = target or t["target"]
+    try:
+        p = subprocess.run([sys.executable, script, "workload", "--project", key, "--env", t["env"], target],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+        out = json.loads(p.stdout or "{}")
+    except subprocess.TimeoutExpired:
+        return {"error": True, "kind": "timeout"}
+    except ValueError:
+        return {"error": True, "kind": "output"}
+    # registry gives only a name: an OpenShift env runs it as a DeploymentConfig, not a Deployment
+    if out.get("error") and out.get("kind") == "not_found" and target.startswith("deployment/"):
+        return _k8s_workload(key, t, "dc/" + target.split("/", 1)[1])
+    return out
+
+
+def _env_snapshots(key, proj):
+    """Snapshot của từng env (cache 5′) — k8s đọc song song, GitLab tag → commit."""
+    from concurrent.futures import ThreadPoolExecutor
+    targets = envmap.env_targets(proj, show_prod=(rccfg.get("FCHAT_ENV_SHOW_PROD") or "0") == "1")
+    gl = gitlab_api.Client(proj.get("gitlab_project_id"))
+    now = time.time()
+
+    def one(t):
+        with _env_cache_lock:
+            hit = _env_cache.get((key, t["env"]))
+        if hit and now - hit[0] < ENV_CACHE_S:
+            return hit[1]
+        snap = envmap.snapshot(t, _k8s_workload(key, t) if t.get("target") else {}, gl.tag)
+        with _env_cache_lock:
+            _env_cache[(key, t["env"])] = (now, snap)
+        return snap
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        return list(ex.map(one, targets))
+
+
+def _gitlab_web(proj) -> str:
+    base = (rccfg.get("GITLAB_URL") or "").rstrip("/")
+    return f"{base}/{proj['repo_path']}" if base and proj.get("repo_path") else ""
+
+
+def _env_command(gid, group_type, sender_name, sender_id, name, args):
+    try:
+        reg = _registry()
+    except (OSError, ValueError) as e:
+        _post_inline(gid, group_type, f"⚠️ @{sender_name}: bot không đọc được danh sách project ({type(e).__name__}).",
+                     [(sender_name, sender_id)])
+        return
+    repo = args[0] if name == "env" else args[1]
+    key = _env_repo(repo, reg)
+    if not key:
+        _post_inline(gid, group_type, f"🤖 @{sender_name}: chưa bật bản đồ môi trường cho '{board_render.one_line(repo, 40)}' "
+                                      f"— {_OWNER['name']} khai repo trong FCHAT_ENV_REPOS.", [(sender_name, sender_id)])
+        return
+    proj = reg[key]
+    snaps = _env_snapshots(key, proj)
+    web = _gitlab_web(proj)
+    if name == "env":
+        text = envmap.env_text(key, web, snaps)
+    else:
+        gl = gitlab_api.Client(proj.get("gitlab_project_id"))
+        mr = gl.get_merge_request(int(args[0]))
+        if not isinstance(mr, dict) or mr.get("error"):
+            _post_inline(gid, group_type, f"🤖 @{sender_name}: không đọc được MR !{args[0]} của {key}.",
+                         [(sender_name, sender_id)])
+            return
+        text = envmap.mr_text(key, web, mr, envmap.mr_where(mr, snaps, gl.is_ancestor, gl.merged_mrs), snaps)
+    _post_inline(gid, group_type, board_render.defuse_body(text), [])
+
+
 def _board_command(gid, group_type, sender_name, sender_id, me, name, args):
     ident = _identity(sender_id, sender_name, me)
     if name == "review_again":
@@ -493,6 +592,9 @@ def _board_command(gid, group_type, sender_name, sender_id, me, name, args):
         _post_inline(gid, group_type, board_commands.ping_text(hb, {"commands": n}, pending), [])
     elif name == "help":
         _post_inline(gid, group_type, board_commands.help_text(), [])
+    elif name in ("env", "mr_where"):
+        if _allowed(gid, group_type, ident, "env", sender_name, sender_id):
+            _env_command(gid, group_type, sender_name, sender_id, name, args)
 
 
 def _enqueue_review(gid, group_type, sender_name, sender_id, text):

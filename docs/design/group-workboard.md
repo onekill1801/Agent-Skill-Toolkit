@@ -32,6 +32,16 @@ Ngoài phạm vi: deploy/duyệt PROD qua chat; tài khoản bot riêng; edit/re
 | S7 | aTask: tạo thay người khác (created_by) | §6 | Thẻ T ghi rõ "tạo bằng tài khoản <chủ nhóm>" |
 | S8 | Job deploy nào nhận tham số SHA/tag (hoặc ops job sinh từ registry nhận SHA) | Ghim commit §3.5 | Repo/env đó không deploy qua chat (trừ dev opt-in) |
 
+**Kết quả spike (30/10, etask, chỉ đọc, máy Windows):**
+- **S5 ✅** tags API (`/repository/tags/<name>` → commit), `compare` (có `web_url` để tự kiểm), `merge_base`
+  (ancestor), `/commits/:sha/merge_requests` (một commit có thể thuộc cả MR đang mở ⇒ lọc merged + nhánh đích)
+  đều dùng được với token hiện tại. Tiền tố tag: dev `dev.`, demo `demo.`, sandbox `prod-econ.`; **prod 0.197.45
+  không có git tag** ⇒ commit prod = không xác định. Ví dụ thật: !1395 (merge/rfc) có ở demo, KHÔNG là tổ tiên
+  của sandbox (sandbox build `merge/rfc-into-vitess`, bản port !1396 khác tiêu đề) ⇒ đúng ca "không thấy commit gốc".
+- **S6 🟡** k8s đọc được pod + `imageID` (digest) + ReplicaSet/RC ở dev (lúc được lúc timeout), sandbox, demo
+  (DeploymentConfig/RC), prod. **Chưa có provenance digest → build Jenkins → SHA** ⇒ mức cao nhất hiện là 🟡;
+  ✅ cần đọc build Jenkins (S6 phần Jenkins — chưa làm). Bot chạy trên ubuntu-c: quyền k8s ở đó cần kiểm lại.
+
 ### 1.2 Mô hình tin cậy
 - **Quyền chỉ theo `senderId` của tin** (sau khi S1 xác nhận server-enforced). `metadata.mentions` do client dựng
   (`send.py:77-99`) ⇒ **không bao giờ dùng mention để cấp quyền**; mention chỉ chọn đối tượng, resolve lại qua danh bạ

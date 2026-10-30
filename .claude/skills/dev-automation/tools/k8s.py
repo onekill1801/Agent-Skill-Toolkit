@@ -420,6 +420,45 @@ def cmd_deploys(args) -> dict:
     return {"namespace": t["namespace"], "count": len(deps), "deployments": deps}
 
 
+def workload_snapshot(target: str, obj: dict, pods: list, owners: dict) -> dict:
+    """What ONE workload runs (env map, group-workboard §5.1): spec images, every pod's running image + digest
+    (imageID) + readiness, and when the ReplicaSet / ReplicationController each pod belongs to was created
+    (= when that template rolled out — not the build time). Pure: inputs are kubectl JSON."""
+    tmpl = ((obj.get("spec") or {}).get("template") or {}).get("spec") or {}
+    out_pods = []
+    for p in pods:
+        md, st = p.get("metadata") or {}, p.get("status") or {}
+        owner = next(iter(md.get("ownerReferences") or []), {})
+        out_pods.append({
+            "name": md.get("name"), "phase": st.get("phase"),
+            "owner": f"{owner.get('kind', '')}/{owner.get('name', '')}".strip("/"),
+            "owner_created": owners.get(f"{owner.get('kind', '')}/{owner.get('name', '')}"),
+            "containers": [{"name": c.get("name"), "image": c.get("image"), "image_id": c.get("imageID"),
+                            "ready": bool(c.get("ready"))} for c in st.get("containerStatuses") or []]})
+    return {"target": target, "kind": obj.get("kind"), "name": (obj.get("metadata") or {}).get("name"),
+            "spec_images": {c.get("name"): c.get("image") for c in tmpl.get("containers") or []},
+            "replicas": (obj.get("spec") or {}).get("replicas"), "pods": out_pods}
+
+
+def cmd_workload(args) -> dict:
+    t = resolve_target(args)
+    if args.target.startswith("-") or "/" not in args.target:
+        raise K8sError("usage", f"target must be kind/name (deployment/x, dc/x): {args.target!r}")
+    obj = _json(t, ["get", args.target])
+    pods = _json(t, ["get", "pods", "-l", selector_for(t, args.target)]).get("items", [])
+    owners = {}
+    for p in pods:
+        for o in (p.get("metadata") or {}).get("ownerReferences") or []:
+            key = f"{o.get('kind')}/{o.get('name')}"
+            kind = {"ReplicaSet": "replicaset", "ReplicationController": "replicationcontroller"}.get(o.get("kind"))
+            if kind and key not in owners:
+                try:
+                    owners[key] = (_json(t, ["get", f"{kind}/{o.get('name')}"]).get("metadata") or {}).get("creationTimestamp")
+                except K8sError:
+                    owners[key] = None
+    return {"namespace": t["namespace"], **workload_snapshot(args.target, obj, pods, owners)}
+
+
 def cmd_events(args) -> dict:
     t = resolve_target(args)
     items = _json(t, ["get", "events"]).get("items", [])
@@ -648,6 +687,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--grep")
     p.add_argument("--errors", action="store_true", help="keep only error lines (text/JSON/glog styles)")
     p.add_argument("-C", "--context-lines", type=int, default=0)
+    p = target_opts(sub.add_parser("workload", help="one workload: spec images, pod image digests, rollout time"))
+    p.add_argument("target", help="deployment/NAME or dc/NAME")
     p = target_opts(sub.add_parser("get"))
     p.add_argument("kind")
     p.add_argument("name", nargs="?")
@@ -657,7 +698,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 COMMANDS = {"doctor": cmd_doctor, "forwards": cmd_forwards, "contexts": cmd_contexts, "access": cmd_access, "pods": cmd_pods,
             "deploys": cmd_deploys, "events": cmd_events, "describe": cmd_describe,
-            "logs": cmd_logs, "get": cmd_get}
+            "logs": cmd_logs, "get": cmd_get, "workload": cmd_workload}
 
 
 def main(argv=None) -> int:

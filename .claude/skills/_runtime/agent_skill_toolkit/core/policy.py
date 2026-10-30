@@ -1,17 +1,20 @@
 """What an identity (core.identity.resolve) may do — design §3.4. Checked when a command is received.
 
-Phase 1b covers `review` only; task / deploy / approve rows are added with their phases.
+Phase 1b: `review`; 2a: `env` (read-only, any member not blocked by the registry); task / deploy / approve rows are added with their phases.
 """
 
-ACTIONS = {"review": "review"}
+# action -> required perm; None = any member the registry does not block (read-only questions)
+ACTIONS = {"review": "review", "env": None}
 
 
 def check(action: str, ident: dict) -> tuple:
     """(allowed, reason). Unknown action = refused."""
-    need = ACTIONS.get(action)
-    if not need:
+    if action not in ACTIONS:
         return False, f"lệnh '{action}' chưa được hỗ trợ"
+    need = ACTIONS[action]
     perms = set(ident.get("perms") or ())
+    if need is None:
+        return (True, "") if perms else (False, "danh bạ chặn tài khoản này")
     if need in perms or "admin" in perms:
         return True, ""
     return False, f"chưa có quyền '{need}'"

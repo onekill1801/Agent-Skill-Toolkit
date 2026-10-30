@@ -103,5 +103,29 @@ class Client:
     def get_merge_request(self, mr_iid: int) -> dict:
         return request(self._api(f"/merge_requests/{int(mr_iid)}"))
 
+    # ------------------------------------------------------------- read-only refs (env map, workboard §5)
+    def tag(self, name: str) -> dict:
+        """{name, commit_id, created_at} of a git tag, or an error dict (status 404 = no such tag)."""
+        r = request(self._api("/repository/tags/" + urllib.parse.quote(str(name), safe="")))
+        if isinstance(r, dict) and r.get("error"):
+            return r
+        c = r.get("commit") or {}
+        return {"name": r.get("name"), "commit_id": c.get("id") or "", "created_at": c.get("created_at") or ""}
+
+    def is_ancestor(self, ancestor: str, of: str):
+        """True/False: `ancestor` is reachable from `of` (merge_base(a, b) == a). None = could not tell."""
+        q = urllib.parse.urlencode([("refs[]", ancestor), ("refs[]", of)])
+        r = request(self._api(f"/repository/merge_base?{q}"))
+        if not isinstance(r, dict) or r.get("error"):
+            return None
+        return r.get("id") == ancestor
+
+    def merged_mrs(self, target_branch: str, search: str, limit: int = 20) -> list:
+        """Merged MRs into `target_branch` whose title/description match `search` (port detection); [] on error."""
+        q = urllib.parse.urlencode({"state": "merged", "target_branch": target_branch, "search": search,
+                                    "in": "title", "per_page": limit})
+        r = request(self._api(f"/merge_requests?{q}"))
+        return r if isinstance(r, list) else []
+
     def add_mr_comment(self, mr_iid: int, body: str) -> dict:
         return request(self._api(f"/merge_requests/{int(mr_iid)}/notes"), method="POST", data={"body": body})

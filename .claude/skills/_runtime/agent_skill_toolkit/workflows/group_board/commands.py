@@ -20,6 +20,8 @@ _CMDS = (
     ("whoami", re.compile(r"^(?:tôi là ai|whoami)\s*\??\s*$", re.I), True),
     ("ping", re.compile(r"^ping\b", re.I), True),
     ("help", re.compile(r"^(?:help|giúp|hướng dẫn)\s*\??\s*$", re.I), True),
+    ("env", re.compile(r"^env\s+([\w.\-/]+)\s*\??\s*$", re.I), True),
+    ("mr_where", re.compile(r"^mr\s*!?(\d+)\s+([\w.\-/]+)(?:\s+ở\s+đâu)?\s*\??\s*$", re.I), True),
 )
 
 HELP_LINES = (
@@ -27,7 +29,9 @@ HELP_LINES = (
     "review lại R-<số> — review lượt mới cho MR của thẻ (sau khi đã sửa)",
     "@bot tôi là ai — định danh + quyền của bạn",
     "@bot ping — bot còn chạy không",
-    "Sắp có: tạo task aTask, deploy dev/sandbox + duyệt, @bot env <repo>",
+    "@bot env <repo> — repo đang chạy phiên bản/commit nào ở từng môi trường (kèm link tự kiểm)",
+    "@bot MR <số> <repo> ở đâu? — MR đã merge chưa, đã có ở môi trường nào",
+    "Sắp có: tạo task aTask, deploy dev/sandbox + duyệt",
 )
 
 

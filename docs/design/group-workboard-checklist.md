@@ -19,6 +19,8 @@ Ký hiệu: ✅ xong · 🟡 đang làm / xong một phần · ⬜ chưa làm ·
       `--heartbeat group_watch-6883495a299a0f54343608e3 --stale-after 180`.
 - [ ] 👤 Thử trong nhóm: gửi `@bot ping`, `@bot tôi là ai`, một link MR → xem thẻ R-n ra sau ≤ 3′ hoặc kèm kết quả.
 - [ ] 👤 Sau 1–2 ngày thấy ổn: bật báo lệnh bị lỡ `FCHAT_CATCHUP_REPLY=1` (hiện chỉ ghi log).
+- [ ] 👤 Bật bản đồ môi trường: `FCHAT_ENV_REPOS=etask` (thêm repo khác khi đã khai `envmap` — mục A4). Prod ẩn;
+      muốn hiện: `FCHAT_ENV_SHOW_PROD=1`. Thử `@bot env etask`, `@bot MR 1395 etask ở đâu?`.
 
 ### A2. Danh bạ + quyền (`work/team.json`, hiện CHƯA có file)
 - [ ] 👤 Tạo hồ sơ thành viên: `python agentkit.py team bootstrap --stdin` (từ danh sách participant) hoặc
@@ -27,11 +29,18 @@ Ký hiệu: ✅ xong · 🟡 đang làm / xong một phần · ⬜ chưa làm ·
 - [ ] 👤 Quyết: ai có `deploy:dev|sandbox|demo`, ai có `approve:<env>` → `team perms <key> --add deploy:dev`.
       (Mặc định ai cũng `review` + `task`; muốn bỏ: `--remove task`.)
 
+### A4. Khai môi trường cho từng repo (registry `work/projects.json`, mục `environments.<env>.envmap`)
+Bot cần biết workload k8s, container chính và tiền tố git tag của MỖI env. etask đã khai xong (dev, demo, sandbox).
+Repo khác: thêm `{"workload": "deployment/<tên>" hoặc "dc/<tên>", "container": "<tên>", "git_tag_prefix": "<tiền tố>."}`
+— hoặc nhờ tôi dò (pod + GitLab tags) như đã làm với etask.
+- [ ] 👤 Chọn repo cần theo dõi (ngoài etask).
+- [ ] 👤 Kiểm quyền k8s trên **ubuntu-c** (máy chạy bot): `python agentkit.py k8s access --project etask --env dev|sandbox|demo`.
+
 ### A3. Quyết định còn mở (cần trước pha tương ứng)
 - [ ] 👤 **S1** — cho phép gửi 1 khung WS với `senderId` SAI vào *Saved Messages của bạn* để xem server có ép
       định danh không. ⛔ Chặn Pha 3 (task) và Pha 4 (deploy).
 - [ ] 👤 **S4** — bạn tự sửa / reply / thả reaction / ghim 1 tin trong Saved Messages trong lúc bot nghe WS (chỉ đọc) → biết định dạng để sửa thẻ tại chỗ.
-- [ ] 👤 Danh sách repo cho bản đồ môi trường; có hiện prod không (mặc định: tắt).
+- [x] Bản đồ môi trường: code dùng `FCHAT_ENV_REPOS` + prod tắt mặc định (bạn chỉ cần khai — A1/A4).
 - [ ] 👤 Project/list aTask mặc định cho lệnh tạo task.
 - [ ] 👤 Giờ gửi bản tổng hợp môi trường (đề xuất 08:30).
 - [ ] 👤 Quyền k8s của máy chạy bot (ubuntu-c) theo env — để biết env nào xác minh được ✅.
@@ -45,7 +54,7 @@ Ký hiệu: ✅ xong · 🟡 đang làm / xong một phần · ⬜ chưa làm ·
 | 0b | Outbox (phân biệt tin bot / chủ nhóm), inbox bền, catch-up không chạy lệnh cũ, heartbeat | ✅ | `d0b06cd` — Codex ACCEPT |
 | 1a | Thẻ R-n thay tin "🔎 Review…", không ack ngay, chờ bot 3′, quá hạn 30′, head chưa đổi ⇒ trỏ thẻ cũ | ✅ | `3364820` — Codex ACCEPT (7 vòng) |
 | 1b | `review lại R-n`, `@bot tôi là ai`, `@bot ping`, `@bot help`, quyền theo `team.json` | ✅ | `aaf8eb9` — Codex ACCEPT (2 vòng) |
-| 2a | Đọc môi trường: `@bot env <repo>`, `@bot MR <số> <repo> ở đâu?` (+ link tự kiểm, mức xác minh) | ⬜ | cần A3: danh sách repo; spike S5, S6 |
+| 2a | Đọc môi trường: `@bot env <repo>`, `@bot MR <số> <repo> ở đâu?` (+ link tự kiểm, mức xác minh) | ✅ | (commit 2a) — Codex ACCEPT (3 vòng); etask chạy thật OK |
 | 2b | Tin `E-<repo>-<env>` tự động khi env đổi phiên bản + bản tổng hợp; chạy shadow 2 ngày | ⬜ | sau 2a; cần giờ tổng hợp |
 | 3 | Task aTask: nháp T-n → `xác nhận T-n` → tạo; `xong T-n` (hỏi lại) | ⛔ | cần S1, S7, project/list mặc định |
 | 4 | Deploy dev/sandbox: D-n → người KHÁC duyệt → Jenkins (ghim commit) → đợi rollout | ⛔ | cần S1, S8, quyền deploy/approve |
@@ -60,14 +69,15 @@ Ký hiệu: ✅ xong · 🟡 đang làm / xong một phần · ⬜ chưa làm ·
 - [ ] Cảnh báo Telegram cho bạn khi heartbeat dừng (hiện supervise chỉ khởi động lại + ghi log)
 
 **2a — bản đồ môi trường (đọc)**
-- [ ] Spike S5: GitLab tags API, `merge_base`, `/commits/:sha/merge_requests` với token hiện tại
-- [ ] Spike S6: job nào có git tag / build SHA / digest; quyền đọc pod theo env
-- [ ] `integrations/k8s`: workload (Deployment + DeploymentConfig) + digest pod + rollout
-- [ ] `integrations/gitlab`: tags, compare, commit→MR, sha merge/squash
-- [ ] `integrations/jenkins`: build info + SHA thực của build
-- [ ] `envmap`: snapshot + mức xác minh ✅/🟡/❔/⚠ + "MR có ở env X?" 4 mức
-- [ ] Lệnh `@bot env`, `@bot MR … ở đâu` (+ link compare/build/tag)
-- [ ] So tay 3 repo × 3 env khớp link
+- [x] Spike S5: GitLab tags API, `merge_base`, `/commits/:sha/merge_requests` với token hiện tại
+- [~] Spike S6: k8s (digest pod, RS/RC) ✅ ở 4 env; phía Jenkins (build ↔ digest ↔ SHA) chưa làm
+- [x] `k8s.py workload`: Deployment + DeploymentConfig + digest pod + giờ tạo RS/RC
+- [x] `integrations/gitlab`: tag, ancestor, MR port cùng tiêu đề, sha merge/squash/ff
+- [ ] `integrations/jenkins`: build info + SHA thực + digest ⇒ mới trả được ✅ đã xác minh
+- [x] `envmap`: snapshot + mức 🟡/❔/⚠ (✅ chờ Jenkins) + "MR có ở env X?" 4 mức
+- [x] Lệnh `@bot env`, `@bot MR … ở đâu` (+ link tag / compare)
+- [~] So tay: etask 3 env khớp kiến thức đã biết; còn 2 repo nữa (chờ A4)
+- [ ] Cờ "có revert — kiểm tay"; báo "có tag mới hơn chưa lên env" (vd dev.0.0.1274 có tag, pod vẫn 1273)
 
 **2b — báo tự động**
 - [ ] `env_watch.py` (daemon, supervise, backoff 429, cache)
@@ -90,6 +100,7 @@ Ký hiệu: ✅ xong · 🟡 đang làm / xong một phần · ⬜ chưa làm ·
 **5 — extension**
 - [x] v1.6.0: thẻ chỉ từ bot, nhãn 🤖 Bot / Bạn, chế độ chủ nhóm, thẻ E, banner bot im lặng
 - [x] v1.7.0: nút "Review lại R-n", bật `@bot tôi là ai / ping / help`
+- [x] v1.7.1: bật `@bot env` / `@bot MR … ở đâu` trong bảng lệnh
 - [ ] Bật Task / Deploy / Env khi bot hỗ trợ (`BOT_SUPPORTS`)
 - [ ] Đưa thư mục extension vào git (hiện không có lịch sử thay đổi)
 

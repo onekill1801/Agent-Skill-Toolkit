@@ -91,6 +91,12 @@ CATALOG = [
     _s("FCHAT_BOARD_GROUPS", "TChat", "Nhóm bật bảng việc",
        "id group (cách nhau dấu phẩy): review báo bằng thẻ R-n (không ack ngay; 'chờ bot' sau 3′; cùng commit ⇒ "
        "trỏ thẻ cũ) — trống = kiểu cũ", "csv", "", item=_ID, restart=(GROUP_WATCH,)),
+    _s("FCHAT_ENV_REPOS", "TChat", "Repo trả lời @bot env / MR ở đâu",
+       "khoá project trong work/projects.json, cách nhau dấu phẩy (vd etask) — trống = tắt bản đồ môi trường",
+       "csv", "", item=r"[\w.\-]{1,60}", restart=(GROUP_WATCH,)),
+    _s("FCHAT_ENV_SHOW_PROD", "TChat", "Bản đồ môi trường có hiện prod",
+       "1 = trả lời cả env prod (chỉ đọc: phiên bản, commit, link) · 0 = ẩn prod", "bool", "0",
+       restart=(GROUP_WATCH,), sensitive=True),
     _s("FCHAT_CATCHUP_REPLY", "TChat", "Báo lệnh bị lỡ vào group",
        "1 = sau khi bot khởi động lại/nhận chậm, gửi 1 tin báo người gửi lệnh gửi lại · 0 = chỉ ghi log (shadow)",
        "bool", "0", restart=(GROUP_WATCH,)),
