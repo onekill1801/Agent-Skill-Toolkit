@@ -96,6 +96,7 @@ python gitlab_api.py whoami                         # user GitLab hiện tại
 python gitlab_api.py my-review-mrs [reviewer|assignee|both]   # MR gắn tên tôi (toàn project)
 python mr_watch.py [--who ...] [--interval 300] [--once] [--no-spawn] [--mode store|terminal]   # poll MR gắn tên tôi → xếp task review_mr vào store (mặc định; `review_flow.py work` chạy) · terminal = mở Claude như cũ
 python supervise.py --name N [--no-reload] -- <lệnh daemon>   # GIỮ DAEMON CHẠY: thoát/lỗi → tự chạy lại (2→60 s); commit mới/.env/agents.json đổi → chạy lại để dùng code mới
+python orca_tabs.py list | ensure [--dry-run]   # daemon chạy thành TAB Orca nhìn thấy được: mở lại tab nào mất supervisor (work/daemon_tabs.json, riêng từng máy); timer OS gọi ensure mỗi phút → Orca bật lại là tab về
 python daemon_common.py status   # tình trạng các daemon (last event: started/transient/fatal/recovered) từ temp/daemon_health.jsonl
 python ../auto-dev/tools/verify.py plan|start --repo DIR [--base B] [--spec F] | work [--once] | status   # THANG KIỂM: build→test liên quan→suite→review chéo, tự sửa tới xanh (spec đọc từ base ref; không chạy trên nhánh mặc định)
 python ../auto-dev/tools/refactor.py survey --repo DIR [--depth 2] | ratchet check|init|tighten --repo DIR | program new|approve|status | snapshot|metrics record --rung R   # LÀN LỚN: khảo sát module/vòng phụ thuộc/điểm nóng + bánh cóc kiến trúc (ngoại lệ chỉ giảm; bậc `kind: ratchet` trong thang kiểm)
