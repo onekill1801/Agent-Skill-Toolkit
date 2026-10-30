@@ -293,14 +293,15 @@ class ResolveCmdTest(unittest.TestCase):
         os.makedirs(lib)
         open(os.path.join(lib, "extra.jar"), "w").close()
         with open(os.path.join(self.tmp, "target", "cp.txt"), "w", encoding="utf-8") as f:
-            f.write(os.pathsep.join([r"C:\m2\a.jar", r"C:\m2\b.jar"]))
+            jars = [r"C:\m2\a.jar", r"C:\m2\b.jar"] if os.name == "nt" else [r"\m2\a.jar", r"\m2\b.jar"]
+            f.write(os.pathsep.join(jars))
         out = local_app._write_argfile(self.tmp)
         self.assertTrue(out["ok"])
         self.assertEqual(out["entries"], 4)   # classes + 2 jar + extra.jar
         with open(out["argfile"], encoding="utf-8") as f:
             content = f.read()
         self.assertTrue(content.startswith('-cp "target/classes;'))
-        self.assertIn("C:/m2/a.jar", content)          # backslash -> forward slash
+        self.assertIn(jars[0].replace("\\", "/"), content)  # backslash -> forward slash
         self.assertIn("src/main/resources/lib/extra.jar", content)
         self.assertNotIn("\\", content)
 

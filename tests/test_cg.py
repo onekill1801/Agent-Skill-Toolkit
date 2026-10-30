@@ -54,6 +54,7 @@ class CgTest(unittest.TestCase):
     def test_bad_refs_give_no_hunks(self):
         self.assertEqual(cg._hunks(self.d, "--output=/tmp/x", self.head), {})
 
+    @unittest.skipUnless(os.name == "nt", "Windows npm .cmd shim")
     def test_windows_cmd_shim_resolved_to_node_script(self):
         """npm's codegraph.cmd cannot be run without cmd.exe, which would re-parse MR titles."""
         from unittest import mock

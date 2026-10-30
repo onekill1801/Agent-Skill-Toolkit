@@ -27,6 +27,7 @@ class ResolveTest(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp(prefix="winexec-")
 
+    @unittest.skipUnless(os.name == "nt", "Windows npm .cmd shim")
     def test_npm_shim_to_node_script(self):
         shim = _write(os.path.join(self.d, "tool.cmd"),
                       '@ECHO off\n"%_prog%"  "%dp0%\\node_modules\\pkg\\bin\\tool.js" %*\n')

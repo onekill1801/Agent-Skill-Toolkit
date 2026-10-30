@@ -160,6 +160,7 @@ class TraceTest(Base):
             {"file": "src/main/java/com/acme/api/InvoiceController.java", "line": 3,
              "symbol": "com.acme.api.InvoiceController.post"}])
 
+    @unittest.skipUnless(os.name == "nt", "Windows backslash paths in the trace")
     def test_python_trace_with_absolute_paths(self):
         text = (f'Traceback (most recent call last):\n  File "{self.repo}\\.claude\\tools\\helper.py", line 2, in '
                 'create_invoice_py\n  File "C:\\Python\\lib\\json\\decoder.py", line 9, in decode\n')
@@ -223,6 +224,7 @@ class Round1FixesTest(Base):
         self.assertEqual(cc.trace(self.repo, text)["frames"],
                          [{"file": "src/main/java/com/acme/Servlet.java", "line": 2, "symbol": "com.acme.Servlet.run"}])
 
+    @unittest.skipUnless(os.name == "nt", "Windows backslash paths in the trace")
     def test_windows_node_paths_with_spaces(self):                           # #5
         p = os.path.join(self.repo, "web app", "src", "app.js")
         os.makedirs(os.path.dirname(p), exist_ok=True)
