@@ -243,6 +243,15 @@ nguồn env lệch; mục tiêu sản phẩm: % thẻ R có phản hồi ngườ
 định. 4. Giờ bản tổng hợp. 5. Quyền k8s của máy chạy bot theo env. 6. Cho phép làm spike S1 (gửi 1 khung WS với
 senderId sai vào Saved Messages của chính bạn).
 
+## 11b. Quyết định của người dùng (30/10)
+- **Giữ chung tài khoản** chủ nhóm cho bot (không xin tài khoản bot riêng). Phân biệt 3 vai:
+  bot = tin khớp outbox (bot) / giọng `🤖…` (extension) · chủ nhóm = tin từ id đó không khớp outbox, lệnh phải có
+  `@bot ` · thành viên = senderId khác. Chủ nhóm duyệt deploy + cấp quyền qua Telegram.
+- **Quyền mặc định**: thành viên `review` + `task`; `deploy:<env>`/`approve:<env>` cấp riêng từng người; chủ nhóm `admin`.
+- **Heartbeat** (Pha 0b): `temp/heartbeat/group_watch-<gid>.json` mỗi 30 s; `supervise.py --heartbeat group_watch-<gid>
+  --stale-after 180` khởi động lại khi treo. Extension suy "bot im lặng" từ chat (lệnh ≥ 3′ chưa có tin bot).
+  Còn lại: `@bot ping` (1b), cảnh báo Telegram cho chủ nhóm khi stale.
+
 ## 12. Điều kiện khi code (P2 từ vòng 3 — Codex + Fable)
 - Kiểm hai người duyệt khác nhau theo **identity đã xác minh** (không chỉ khác senderId).
 - Trả lời sau khởi động lại chỉ cho tin inbox `status=new` (supervise khởi động lại thường xuyên ⇒ tránh lặp tin).

@@ -48,6 +48,7 @@ import time
 from pathlib import Path
 
 runpy.run_path(str(Path(__file__).resolve().parents[2] / "_runtime" / "bootstrap.py"))["activate"]()
+from agent_skill_toolkit.core import board_store  # noqa: E402
 from agent_skill_toolkit.workflows.intake import gate  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -439,15 +440,184 @@ def _worker_count():
 def _worker():
     """Một worker trong pool: rút từng tin khỏi hàng đợi và xử lý, không bỏ sót.
     Nhiều worker chạy song song → nhiều tác vụ cùng lúc. Lỗi ở một tin KHÔNG giết
-    worker (các tin sau vẫn chạy)."""
+    worker (các tin sau vẫn chạy). Kết quả ghi vào inbox (done / error)."""
     while True:
-        item = _work_q.get()
+        item, key = _work_q.get()
+        status, outcome = "done", ""
         try:
             _process_one(*item)
         except Exception as e:  # noqa: BLE001
+            status, outcome = "error", str(e)
             print(f"[{_now()}] [WARN] xử lý tin lỗi, bỏ qua tin này: {e}", file=sys.stderr)
         finally:
+            if key:
+                _inbox_set(key[0], key[1], status, outcome)
             _work_q.task_done()
+
+
+# ── Inbox / outbox bền (group-workboard §3.2–§3.3) ─────────────────────────
+# Một kết nối SQLite dùng chung giữa luồng WS và các worker → mọi lời gọi đi qua khoá.
+_board = None
+_board_lock = threading.RLock()
+STALE_S = 15 * 60            # lệnh cũ hơn lúc nhận ⇒ không chạy, báo gửi lại
+MISSED_WINDOW_S = 12 * 3600  # catch-up: chỉ báo lệnh trong 12 giờ qua
+HEARTBEAT_S = 30
+
+
+def _board_call(fn, *a, **k):
+    with _board_lock:
+        return getattr(_board, fn)(*a, **k)
+
+
+def _inbox_set(gid, msg_id, status, outcome=""):
+    try:
+        _board_call("inbox_set", gid, msg_id, status, outcome)
+    except Exception as e:  # noqa: BLE001
+        print(f"[{_now()}] [WARN] ghi inbox lỗi ({status}): {e}", file=sys.stderr)
+
+
+def _beat(gid, state="ok"):
+    if daemon_common is not None:   # nhãn theo nhóm: nhiều watcher không che nhau
+        daemon_common.heartbeat(heartbeat_label(gid), group=str(gid), state=state)
+
+
+def heartbeat_label(gid):
+    return f"group_watch-{gid}"
+
+
+def _msg_key(m):
+    """Khoá inbox của một tin: theo messageIdInc khi có (WS và lịch sử cùng một dạng), không thì id."""
+    inc = m.get("messageIdInc")
+    return f"inc:{inc}" if inc is not None else (m.get("id") or None)
+
+
+def _is_command(m, content, me, kws):
+    """Tin lịch sử này có phải lệnh cho bot? (catch-up: báo lệnh bị lỡ, KHÔNG chạy lại)."""
+    if m.get("senderId") == me:
+        return _strip_self_prefix(content) is not None
+    return _looks_like_request(content, kws) and _guess_intent(content) in ("review", "build")
+
+
+def _missed_text(rows):
+    def one(r):
+        at = time.strftime('%H:%M', time.localtime(r.get("created_at") or r.get("received") or 0))
+        tail = " (đang chạy dở thì bot dừng — kiểm lại)" if r.get("outcome") == "interrupted" else ""
+        return f"lệnh lúc {at} của {r.get('sender_name') or r.get('sender_id') or '?'}{tail}"
+    parts = [one(r) for r in rows[:5]]
+    more = f" và {len(rows) - 5} lệnh khác" if len(rows) > 5 else ""
+    return ("🤖 Bot vừa khởi động lại hoặc nhận chậm — chưa xử lý: " + ", ".join(parts) + more +
+            ". Gửi lại giúp nhé (bot không tự chạy lệnh cũ).")
+
+
+def _flush_missed(gid):
+    """Báo MỘT tin gộp cho mọi lệnh `missed` (≤ 12 giờ). Chỉ đánh dấu đã báo khi gửi được (lỗi ⇒ giữ
+    `missed`, lần catch-up sau thử lại). Mặc định shadow (chỉ log) tới khi FCHAT_CATCHUP_REPLY=1."""
+    rows = _board_call("inbox_by_status", gid, ("missed",))
+    now = time.time()
+    live = [r for r in rows if now - (r.get("created_at") or r.get("received") or 0) <= MISSED_WINDOW_S]
+    for r in rows:
+        if r not in live:
+            _inbox_set(gid, r["message_id"], "expired")
+    if not live:
+        return None
+    text = _missed_text(live)
+    if (rccfg.get("FCHAT_CATCHUP_REPLY") or "0") != "1":
+        print(f"[{_now()}] [missed] (shadow, FCHAT_CATCHUP_REPLY=0) sẽ báo: {text}")
+        status = "missed_shadow"
+    else:
+        try:
+            res = send.send_text(gid, text, None)
+        except Exception as e:  # noqa: BLE001 — có thể đã gửi? WS chưa mở thì chưa; coi như chưa, thử lại sau
+            print(f"[{_now()}] [WARN] báo lệnh lỡ lỗi, thử lại sau: {e}", file=sys.stderr)
+            return False
+        if not isinstance(res, dict) or res.get("error"):
+            print(f"[{_now()}] [WARN] báo lệnh lỡ không gửi được, thử lại sau: {(res or {}).get('message')}",
+                  file=sys.stderr)
+            return False
+        status = "missed_reported"   # sent (cả khi chưa có echo: có thể đã tới — không gửi lặp)
+        print(f"[{_now()}] [missed] đã báo {len(live)} lệnh bị lỡ")
+    for r in live:
+        _inbox_set(gid, r["message_id"], status)
+    return True
+
+
+class _MissedRetry:
+    """Thử báo lại lệnh lỡ khi lần gửi trước lỗi (không đợi lần kết nối lại): 60 s, gấp đôi tới 15 phút."""
+    BASE, CAP = 60.0, 900.0
+
+    def __init__(self):
+        self.delay, self.next_at = self.BASE, 0.0
+
+    def tick(self, gid, now=None):
+        now = time.time() if now is None else now
+        if now < self.next_at:
+            return
+        try:
+            ok = _flush_missed(gid)
+        except Exception as e:  # noqa: BLE001
+            print(f"[{_now()}] [WARN] thử báo lệnh lỡ lỗi: {e}", file=sys.stderr)
+            ok = False
+        self.delay = min(self.delay * 2, self.CAP) if ok is False else self.BASE
+        self.next_at = now + self.delay
+
+
+def _history_rows(r):
+    data = r.get("data") if isinstance(r.get("data"), dict) else r
+    return data.get("regulars") or []
+
+
+CATCHUP_PAGE, CATCHUP_MAX_PAGES = 50, 20
+
+
+def _fetch_since(gid, wm):
+    """Tin từ watermark tới hiện tại (lùi từng trang tới khi gặp watermark / quá 12 giờ / hết trang).
+    Trả (rows, complete): complete=False khi không đọc lùi được tới watermark."""
+    rows, seen, around = [], set(), None
+    for _ in range(CATCHUP_MAX_PAGES):
+        params = {"limit": CATCHUP_PAGE}
+        if around is not None:
+            params["messageIdInc"] = around
+        r = client.api_get(f"/message-query/group/{gid}/message", params)
+        if not isinstance(r, dict) or r.get("error"):
+            return rows, False
+        page = [m for m in _history_rows(r) if m.get("messageIdInc") is not None and m["messageIdInc"] not in seen]
+        if not page:
+            return rows, wm is None
+        rows += page
+        seen.update(m["messageIdInc"] for m in page)
+        oldest = min(page, key=lambda m: m["messageIdInc"])
+        if wm is None or oldest["messageIdInc"] <= wm + 1:
+            return rows, True
+        if time.time() - board_store.parse_ts(oldest.get("createdAt")) > MISSED_WINDOW_S:
+            return rows, True        # cũ hơn cửa sổ báo — không cần đọc tiếp
+        around = oldest["messageIdInc"] - CATCHUP_PAGE   # trang trước: quanh X trả X-L+1 … X+L
+    return rows, False
+
+
+def _catch_up(gid, me, kws):
+    """Sau mỗi lần (kết nối lại): đọc lịch sử từ watermark, ghi mọi tin chưa thấy vào inbox — KHÔNG BAO GIỜ
+    thực thi. Lệnh gửi trong lúc bot dừng (≤ 12 giờ, sau watermark) ⇒ `missed`, báo một lần
+    (_flush_missed). Lần chạy đầu (chưa có watermark) chỉ ghi, không báo."""
+    wm = _board_call("watermark", gid)
+    rows, complete = _fetch_since(gid, wm)
+    if not complete:
+        print(f"[{_now()}] [catch-up] không đọc lùi được tới watermark {wm} — có thể có lệnh bị lỡ không báo được")
+    now = time.time()
+    for m in sorted(rows, key=lambda x: x.get("messageIdInc") or 0):
+        if m.get("type") != "TEXT" or not _msg_key(m):
+            continue
+        inc = m.get("messageIdInc")
+        created = board_store.parse_ts(m.get("createdAt"))
+        content = m.get("content") or ""
+        status = "history"
+        if wm is not None and inc is not None and inc > wm and not listen._looks_encrypted(content) \
+                and created and now - created <= MISSED_WINDOW_S and _is_command(m, content, me, kws):
+            bot = m.get("senderId") == me and _board_call("is_bot_message", gid, m.get("requestId") or "",
+                                                          content, created, inc)
+            status = "history" if bot else "missed"
+        _board_call("inbox_record", gid, _msg_key(m), message_inc=inc, sender_id=m.get("senderId") or "",
+                    sender_name=(m.get("user") or {}).get("displayName") or "", created_at=created, status=status)
+    _flush_missed(gid)
 
 
 # ── Lệnh của CHÍNH chủ tài khoản (chống loop vô hạn) ──────────────────────
@@ -470,7 +640,7 @@ def _strip_self_prefix(content):
     return None
 
 
-def _handle(obj, gid_target, me, kws, seen):
+def _handle(obj, gid_target, me, kws):
     data = obj.get("data") or {}
     if data.get("type") != "TEXT":
         return
@@ -481,42 +651,74 @@ def _handle(obj, gid_target, me, kws, seen):
     if not sender:
         return
     inc = data.get("messageIdInc")
-    key = (gid, inc)
-    if key in seen:
+    msg_id = _msg_key(data)
+    if not msg_id:
         return
-    seen.add(key)
+    created = board_store.parse_ts(data.get("createdAt"))
+    sender_name = (data.get("user") or {}).get("displayName") or sender
+    try:   # inbox bền: tin đã thấy (kể cả trước khi khởi động lại) không bao giờ chạy lần hai
+        if not _board_call("inbox_record", gid, msg_id, message_inc=inc, sender_id=sender, sender_name=sender_name,
+                           created_at=created):
+            return
+    except Exception as e:  # noqa: BLE001 — không chắc "chỉ một lần" ⇒ không làm gì
+        print(f"[{_now()}] [WARN] inbox lỗi, bỏ qua tin: {e}", file=sys.stderr)
+        return
 
     content = data.get("content")
     if crypto and listen._looks_encrypted(content):
         content = crypto.decrypt_if_needed(content)   # E2E → plaintext nếu có key
     if listen._looks_encrypted(content):              # vẫn ciphertext (không key/lỗi) → bỏ
         print(f"[{_now()}] [SKIP] tin mã hoá E2E (không giải được) — bỏ qua.")
+        _inbox_set(gid, msg_id, "ignored", "encrypted")
         return
 
     # Tin của CHÍNH chủ tài khoản: chỉ xử lý khi có TIỀN TỐ lệnh (vd "@bot review
     # MR 412"). Tin bot tự đăng (ack/kết quả) KHÔNG có tiền tố → bỏ qua, chống loop.
     is_command = False
     if sender == me:
+        # Tài khoản chủ nhóm = người + bot dùng chung. Tin khớp outbox = bot tự gửi → bỏ. Không đọc được
+        # outbox ⇒ không phân biệt được ⇒ KHÔNG chạy lệnh nào từ tài khoản này (fail-closed).
+        try:
+            how = _board_call("is_bot_message", gid, data.get("requestId") or "", content, created, inc)
+        except Exception as e:  # noqa: BLE001
+            print(f"[{_now()}] [WARN] outbox không đọc được — chặn lệnh từ tài khoản chủ: {e}", file=sys.stderr)
+            _inbox_set(gid, msg_id, "blocked", f"outbox: {e}")
+            return
+        if how:
+            _inbox_set(gid, msg_id, "bot", how)
+            return
         cmd = _strip_self_prefix(content)
         if cmd is None:
-            return  # tin tự đăng / chat thường của mình
+            _inbox_set(gid, msg_id, "owner_chat")
+            return  # chat thường của chủ nhóm
         content = cmd
         is_command = True  # lệnh tường minh của chủ → bỏ qua prefilter từ khoá
 
     group = data.get("group") or {}
     group_type = group.get("type") or group.get("groupType") or "SUPER_PRIVATE"
-    sender_name = (data.get("user") or {}).get("displayName") or sender
 
     if not is_command and not _looks_like_request(content, kws):
+        _inbox_set(gid, msg_id, "ignored")
         print(f"[{_now()}] [skip] {sender_name}: {content!r}  (không khớp từ khoá)")
         return
+    if created and time.time() - created > STALE_S:
+        _inbox_set(gid, msg_id, "missed", "stale")
+        _flush_missed(gid)
+        return
     # XẾP HÀNG thay vì spawn-rồi-bỏ: tin tới khi đang bận vẫn được xử lý sau.
-    _work_q.put((gid, group_type, sender_name, sender, content, me))
+    _inbox_set(gid, msg_id, "queued")
+    _work_q.put(((gid, group_type, sender_name, sender, content, me), (gid, msg_id)))
     tag = "[CMD]" if is_command else "[queued]"
     print(f"[{_now()}] {tag} {sender_name}: {content!r}  (chờ xử lý: {_work_q.qsize()})")
 
 
 def run(gid_target, idle_ping=20):
+    global _board
+    _board = board_store.Board()
+    # tin đã ghi nhưng process trước chết khi chưa xử lý xong ⇒ báo gửi lại (không chạy lại: có thể đã chạy dở)
+    n = _board_call("inbox_mark_unfinished", gid_target)
+    if n:
+        print(f"[{_now()}] [missed] {n} lệnh dở dang từ lần chạy trước — sẽ báo người gửi")
     me = client.api_get("/user/me").get("id")
     if not me:
         _hlog("fatal", "cannot resolve current user (token bad?)")
@@ -533,7 +735,7 @@ def run(gid_target, idle_ping=20):
     for i in range(n_workers):
         threading.Thread(target=_worker, name=f"worker-{i+1}", daemon=True).start()
     threading.Thread(target=_sweeper, name="review-sweeper", daemon=True).start()
-    seen = set()
+    retry = _MissedRetry()
     backoff = 2
     while True:
         try:
@@ -543,8 +745,18 @@ def run(gid_target, idle_ping=20):
             print(f"[{_now()}] connected.")
             _hlog("recovered" if backoff > 2 else "connected")
             backoff = 2
+            try:
+                _catch_up(gid_target, me, kws)
+            except Exception as e:  # noqa: BLE001
+                print(f"[{_now()}] [WARN] catch-up lỗi: {e}", file=sys.stderr)
             last_ping = time.time()
+            last_beat = 0.0
+            retry.next_at = time.time() + retry.delay        # catch-up vừa thử báo
             while True:
+                if time.time() - last_beat >= HEARTBEAT_S:
+                    _beat(gid_target)
+                    last_beat = time.time()
+                retry.tick(gid_target)
                 try:
                     msg = ws.recv()
                 except (socket.timeout, TimeoutError):
@@ -561,7 +773,7 @@ def run(gid_target, idle_ping=20):
                 except Exception:
                     o = None
                 if isinstance(o, dict) and o.get("type") == "message":
-                    _handle(o, gid_target, me, kws, seen)
+                    _handle(o, gid_target, me, kws)
                 if time.time() - last_ping > idle_ping:
                     ws.send_text("ping")
                     last_ping = time.time()
@@ -571,6 +783,7 @@ def run(gid_target, idle_ping=20):
             return
         except Exception as e:  # noqa: BLE001
             _hlog("transient", f"reconnect in {backoff}s — {e}")
+            _beat(gid_target, state=f"reconnecting: {str(e)[:80]}")
             print(f"[{_now()}] lỗi kết nối: {e}; thử lại sau {backoff}s", file=sys.stderr)
             tokens.refresh(verbose=False)
             time.sleep(backoff)
@@ -593,6 +806,7 @@ if __name__ == "__main__":
               file=sys.stderr)
         sys.exit(1)
     if a.once is not None:
+        _board = board_store.Board()
         me = client.api_get("/user/me").get("id")
         _process_one(a.group, "SUPER_PRIVATE", "test", "", a.once, me)
         sys.exit(0)

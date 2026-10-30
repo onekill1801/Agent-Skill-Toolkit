@@ -232,11 +232,11 @@ Ký hiệu: ✅ xong + Codex đồng thuận · 🔁 đã code, đang review/s�
 | # | Việc | Trạng thái | Commit | Codex | Ghi chú |
 |---|---|---|---|---|---|
 | 8.0 | Spike S1–S8 (senderId server-enforced, requestId echo, recall, edit/pin, GitLab API, job/k8s provenance, aTask tạo-thay, job nhận SHA) | ⛔ | | | S1 cần người dùng cho phép gửi 1 khung WS senderId sai vào Saved Messages |
-| 8.0b | Outbox trong `send.py` + inbox bền + `with_mentions` inline | ⬜ | | | |
+| 8.0b | Outbox trong `send.py` + inbox bền + `with_mentions` inline + heartbeat | ✅ | (commit này) | ACCEPT (vòng 3) | `core/board_store.py` (outbox ghi trước khi mở WS, fail-closed; inbox khoá theo inc, unique + migration gộp trùng; watermark); `group_watch`: tin bot khớp outbox bị bỏ, chủ nhóm cần `@bot`; catch-up lùi trang tới watermark chỉ ghi `history`, lệnh lỡ/stale/dở dang (crash) báo 1 lần, gửi lỗi thì thử lại 60 s→15′; mặc định shadow (`FCHAT_CATCHUP_REPLY=1` mới gửi); heartbeat `group_watch-<gid>` + `supervise --heartbeat/--stale-after`. Codex vòng 1: 4 P1, vòng 2: 2 P1, vòng 3 ACCEPT (`temp/codex/workboard/p0b/`). P2 hoãn 1a: lọc dòng lệnh trong kết quả agent |
 | 8.1a | Thẻ R thay `notice_text`; dedupe head SHA; hạn 30′; ack 3′ | ⬜ | | | không lệnh mới |
 | 8.1b | `review lại R-n`, `@bot tôi là ai`, policy review | ⬜ | | | |
 | 8.2a | `@bot env`, `MR … ở đâu` (đọc) | ⬜ | | | so tay 3×3 |
 | 8.2b | E tự động + tổng hợp 08:30, shadow 2 ngày | ⬜ | | | |
 | 8.3 | Task aTask (nháp → xác nhận) | ⬜ | | | cần S1 |
 | 8.4 | Deploy dev/sandbox + duyệt 4 mắt + ghim SHA | ⬜ | | | cần S1, S8 |
-| 8.5 | Extension bật lệnh; edit/pin nếu S4 | ⬜ | | | |
+| 8.5 | Extension bật lệnh; edit/pin nếu S4 | 🟡 | | | v1.6.0 (ngoài git): `boardBots` (thẻ chỉ từ bot), nhãn 🤖 Bot/Bạn, chế độ chủ nhóm (`@bot` tự thêm, duyệt qua Telegram), thẻ E + chip env, bỏ ô nhánh deploy, banner bot im lặng; golden `node tests/board.test.js` 6/6; bơm lên trang thật OK. Chưa bật lệnh mới (chờ bot) |

@@ -15,6 +15,8 @@
     while its task is re-run elsewhere. On Windows the tree lives in a Job Object with KILL_ON_JOB_CLOSE:
     even if the supervisor itself is killed or the tab is closed, Windows ends the whole tree.
   * Ctrl+C in the tab stops the tree and the supervisor; a second Ctrl+C during the stop is ignored.
+  * `--heartbeat LABEL --stale-after S`: the daemon writes temp/heartbeat/<LABEL>.json each loop turn
+    (daemon_common.heartbeat); no beat for S seconds (after it has run S seconds) = hung -> restarted.
 
 Output of the child goes to the same terminal. Stdlib only.
 """
@@ -425,8 +427,19 @@ def _finish(tree, name: str, sleep, interrupted: bool = False) -> bool:
     return interrupted
 
 
+def _stale(heartbeat: str, stale_after: float, ran: float):
+    """Reason text when the child's heartbeat is older than stale_after (it had time to beat), else None."""
+    if not heartbeat or not stale_after or ran < stale_after:
+        return None
+    hb = dc.last_heartbeat(heartbeat)
+    age = hb.get("age")
+    if age is None or age > stale_after:
+        return f"heartbeat dừng {'(chưa từng ghi)' if age is None else f'{round(age)} s'}"
+    return None
+
+
 def run(cmd: list, name: str, reload: bool = True, root: str = "", max_restarts: int = -1,
-        sleep=time.sleep) -> int:
+        sleep=time.sleep, heartbeat: str = "", stale_after: float = 0) -> int:
     """Supervise `cmd` until Ctrl+C (or `max_restarts` restarts, for tests). Returns 0."""
     root = root or paths.toolkit_root()
     backoff, restarts, seen = BACKOFF_START, 0, None
@@ -447,6 +460,12 @@ def run(cmd: list, name: str, reload: bool = True, root: str = "", max_restarts:
             while reason is None:
                 if tree.poll() is not None:
                     reason = f"thoát mã {tree.returncode}"
+                    break
+                stale = _stale(heartbeat, stale_after, time.monotonic() - started)
+                if stale:
+                    reason = stale
+                    dc.health_log(name, "stale", stale)
+                    _say(name, f"{stale} — coi như treo, khởi động lại")
                     break
                 if reload and time.monotonic() - last_watch >= WATCH_EVERY_S:
                     last_watch = time.monotonic()
@@ -495,13 +514,16 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="supervise.py")
     ap.add_argument("--name", default="")
     ap.add_argument("--no-reload", action="store_true", help="do not restart on a new commit / config change")
+    ap.add_argument("--heartbeat", default="", help="label of the daemon's heartbeat (temp/heartbeat/<label>.json)")
+    ap.add_argument("--stale-after", type=float, default=0, help="restart when the heartbeat is older than this (s)")
     a = ap.parse_args(argv[:i])
     cmd = argv[i + 1:]
     if not cmd:
         print("supervise.py: missing command after --", file=sys.stderr)
         return 2
     script = next((x for x in cmd if x.endswith(".py")), cmd[0])
-    return run(cmd, a.name or os.path.splitext(os.path.basename(script))[0], reload=not a.no_reload)
+    return run(cmd, a.name or os.path.splitext(os.path.basename(script))[0], reload=not a.no_reload,
+               heartbeat=a.heartbeat, stale_after=a.stale_after)
 
 
 if __name__ == "__main__":

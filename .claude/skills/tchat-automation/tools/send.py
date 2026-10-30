@@ -33,8 +33,10 @@ Usage:
 
 import argparse
 import json
+import runpy
 import sys
 import uuid
+from pathlib import Path
 
 import client
 import config
@@ -99,8 +101,37 @@ def with_mentions_prefix(body, people):
     return content, {"mentions": mentions}
 
 
+def with_mentions(text, people):
+    """Mentions INLINE where they appear (group-workboard §4.3): every '@<displayName>' of `people` found in
+    `text` gets a metadata.mentions entry at its code-point offset. Returns (text, metadata). Longer names
+    win over a shorter one they contain ('@Anh Tuan' is not also '@Anh'); people not found are not pinged."""
+    mentions, taken = [], []
+    for name, uid in sorted((p for p in people if p[0] and p[1]), key=lambda p: -len(p[0])):
+        tok, start = f"@{name}", 0
+        while True:
+            i = text.find(tok, start)
+            if i < 0:
+                break
+            start = i + len(tok)
+            if any(a < start and i < b for a, b in taken):
+                continue
+            taken.append((i, start))
+            mentions.append({"userId": uid, "target": name, "length": len(tok), "offset": i})
+    mentions.sort(key=lambda m: m["offset"])
+    return text, ({"mentions": mentions} if mentions else {})
+
+
+def _outbox():
+    runpy.run_path(str(Path(__file__).resolve().parents[2] / "_runtime" / "bootstrap.py"))["activate"]()
+    from agent_skill_toolkit.core import board_store
+    return board_store.Board()
+
+
 def send_text(group_id, content, group_type=None, sender_id=None, timeout=10,
-              metadata=None) -> dict:
+              metadata=None, request_id=None, card_id="") -> dict:
+    """Send one TEXT message. The toolkit posts from the OWNER's account, so the message is written to the
+    outbox (board_store) BEFORE the socket opens — the group watcher then knows it is the bot's, not a
+    command the owner typed. No outbox = nothing is sent (fail closed)."""
     sender_id = sender_id or _resolve_sender_id()
     if not group_type:
         group_type, _ = _resolve_group_type(group_id)
@@ -108,16 +139,27 @@ def send_text(group_id, content, group_type=None, sender_id=None, timeout=10,
         return {"error": True, "status": 0,
                 "message": "could not resolve groupType; pass --group-type explicitly"}
 
-    frame = build_frame(group_id, content, sender_id, group_type, metadata=metadata)
+    frame = build_frame(group_id, content, sender_id, group_type, request_id=request_id, metadata=metadata)
     req_id = frame["data"]["requestId"]
+    try:
+        board = _outbox()
+        board.outbox_begin(group_id, content, req_id, card_id)
+    except Exception as e:  # noqa: BLE001
+        return {"error": True, "status": 0, "message": f"outbox unavailable — message not sent: {e}"}
 
-    ws = ws_client.WebSocket(
-        config.ws_url(),
-        subprotocols=[tokens.ensure_fresh()],
-        origin=config.web_origin(),
-        timeout=timeout,
-        verify=config.verify_ssl(),
-    )
+    try:
+        ws = ws_client.WebSocket(
+            config.ws_url(),
+            subprotocols=[tokens.ensure_fresh()],
+            origin=config.web_origin(),
+            timeout=timeout,
+            verify=config.verify_ssl(),
+        )
+    except BaseException as e:
+        board.outbox_done(req_id, "failed", error=f"connect: {e}")    # nothing left the machine
+        board.close()
+        raise
+    state, inc = "uncertain", None
     try:
         ws.send_text(json.dumps(frame))
         # read frames briefly to catch the echo confirming our requestId
@@ -138,6 +180,8 @@ def send_text(group_id, content, group_type=None, sender_id=None, timeout=10,
                 if isinstance(d, dict) and d.get("requestId") == req_id and d.get("messageIdInc"):
                     confirmed = obj
                     break
+        state = "sent" if confirmed else "unconfirmed"
+        inc = ((confirmed or {}).get("data") or {}).get("messageIdInc")
         return {
             "sent": True,
             "requestId": req_id,
@@ -146,6 +190,10 @@ def send_text(group_id, content, group_type=None, sender_id=None, timeout=10,
         }
     finally:
         ws.close()
+        try:
+            board.outbox_done(req_id, state, message_inc=inc)
+        finally:
+            board.close()
 
 
 def recall_message(group_id, message_id_inc, sender_id=None, timeout=10) -> dict:
