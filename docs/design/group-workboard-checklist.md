@@ -44,7 +44,7 @@ Ký hiệu: ✅ xong · 🟡 đang làm / xong một phần · ⬜ chưa làm ·
 |---|---|---|---|
 | 0b | Outbox (phân biệt tin bot / chủ nhóm), inbox bền, catch-up không chạy lệnh cũ, heartbeat | ✅ | `d0b06cd` — Codex ACCEPT |
 | 1a | Thẻ R-n thay tin "🔎 Review…", không ack ngay, chờ bot 3′, quá hạn 30′, head chưa đổi ⇒ trỏ thẻ cũ | ✅ | `3364820` — Codex ACCEPT (7 vòng) |
-| 1b | `review lại R-n`, `@bot tôi là ai`, `@bot ping`, `@bot help`, quyền theo `team.json` | ✅ | (commit 1b) — Codex ACCEPT (2 vòng) |
+| 1b | `review lại R-n`, `@bot tôi là ai`, `@bot ping`, `@bot help`, quyền theo `team.json` | ✅ | `aaf8eb9` — Codex ACCEPT (2 vòng) |
 | 2a | Đọc môi trường: `@bot env <repo>`, `@bot MR <số> <repo> ở đâu?` (+ link tự kiểm, mức xác minh) | ⬜ | cần A3: danh sách repo; spike S5, S6 |
 | 2b | Tin `E-<repo>-<env>` tự động khi env đổi phiên bản + bản tổng hợp; chạy shadow 2 ngày | ⬜ | sau 2a; cần giờ tổng hợp |
 | 3 | Task aTask: nháp T-n → `xác nhận T-n` → tạo; `xong T-n` (hỏi lại) | ⛔ | cần S1, S7, project/list mặc định |
