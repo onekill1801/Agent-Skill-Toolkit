@@ -10,6 +10,7 @@ error, timeout, unreadable body) also carries "uncertain": True — reconcile be
 import json
 import ssl
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from agent_skill_toolkit.core import env
@@ -25,7 +26,15 @@ def base_url() -> str:
 
 
 def task_link(code: str) -> str:
-    return f"{base_url()}/task/{code}" if code else ""
+    """Web link of a task: ATASK_WEB_URL, else the scheme+host of ATASK_BASE_URL (the API base may carry a
+    path, e.g. …/services/etask, that the web UI does not have)."""
+    if not code:
+        return ""
+    web = env.get("ATASK_WEB_URL", "").strip().rstrip("/")
+    if not web:
+        u = urllib.parse.urlsplit(base_url())
+        web = f"{u.scheme}://{u.netloc}"
+    return f"{web}/task/{code}"
 
 
 def _ssl_context() -> ssl.SSLContext:

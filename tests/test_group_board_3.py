@@ -175,7 +175,8 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(lines[0], "🤖 [T-1] Sửa lọc task")
         self.assertEqual(lines[1], "Trạng thái: chờ xác nhận · Yêu cầu: @Lan Nguyen · Giao: @Huy Tran")
         self.assertEqual(lines[2], "Hạn: 05/11/2026 · List: Backend Project Task › Task BE")
-        self.assertIn('gõ "xác nhận T-1"', text)
+        self.assertIn('gõ "xác nhận T-1" để tạo trên aTask, "huỷ T-1" để bỏ', text)
+        self.assertEqual(text.count("@Lan Nguyen"), 1)                                # tagged once per message
         self.assertEqual(people, [("Lan Nguyen", "U1"), ("Huy Tran", "U2")])
         self.assertEqual(out["card"]["state"], "draft")
         self.assertEqual(self.at.created, [])                                       # nothing on aTask yet
@@ -201,7 +202,8 @@ class FlowTest(unittest.TestCase):
         text = out["send"][0]
         self.assertIn("Trạng thái: đã tạo", text)
         self.assertIn("aTask: BPT-41", text)
-        self.assertIn("tạo bằng tài khoản Chung thay @Lan Nguyen", text)
+        self.assertIn("tạo bằng tài khoản Chung thay Lan Nguyen", text)
+        self.assertEqual((text.count("@Lan Nguyen"), text.count("@Huy Tran")), (1, 1))      # tagged once (Codex R4)
         self.assertIn("🔗 https://atask.example/task/BPT-41", text)
         again = task.confirm(self.b, "G", "T-1", LAN, self.at, now=1200.0)
         self.assertIn("đã tạo trên aTask rồi", again["reply"][0])
@@ -262,7 +264,7 @@ class FlowTest(unittest.TestCase):
         self.at.assign_result = {"error": True, "message": "not a member"}
         out = task.confirm(self.b, "G", "T-1", LAN, self.at, now=1100.0)
         self.assertEqual(out["card"]["state"], "created")
-        self.assertIn("CHƯA giao được cho @Huy Tran", out["send"][0])
+        self.assertIn("CHƯA giao được cho Huy Tran", out["send"][0])
 
     def test_done_asks_again(self):
         _draft(self.b)
@@ -330,6 +332,16 @@ class FlowTest(unittest.TestCase):
         out = task.confirm_done(self.b, "G", "T-1", LAN, self.at, now=2010.0)
         self.assertEqual(out["card"]["state"], "created")
         self.assertIn("aTask từ chối đóng", out["send"][0])
+
+
+class LinkTest(unittest.TestCase):
+    def test_web_link_drops_api_path(self):
+        vals = {"ATASK_BASE_URL": "https://etask.example.com/services/etask"}
+        with mock.patch.object(atask.env, "get", side_effect=lambda k, d="": vals.get(k, d)):
+            self.assertEqual(atask.task_link("BPT-1"), "https://etask.example.com/task/BPT-1")
+            vals["ATASK_WEB_URL"] = "https://web.example.com/"
+            self.assertEqual(atask.task_link("BPT-1"), "https://web.example.com/task/BPT-1")
+            self.assertEqual(atask.task_link(""), "")
 
 
 class MarkerSearchTest(unittest.TestCase):

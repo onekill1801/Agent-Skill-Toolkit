@@ -208,8 +208,8 @@ def draft(board, group: str, ident: dict, fields: dict, assignee, entry: tuple, 
                "drafted_at": now, "owner_name": owner_name}
     card = board.card_open(group, "T", f"draft:{uuid.uuid4().hex}", fields["title"], payload)
     card = board.card_update(group, card["id"], state="draft")
-    return _card(card, f"gõ \"xác nhận {card['id']}\" để tạo trên aTask · \"huỷ {card['id']}\" để bỏ "
-                       f"(nháp hết hạn sau 24 giờ) · task đứng tên tài khoản {owner_name}")
+    return _card(card, f"gõ \"xác nhận {card['id']}\" để tạo trên aTask, \"huỷ {card['id']}\" để bỏ "
+                       f"(nháp hết hạn sau 24 giờ); task đứng tên tài khoản {owner_name}")
 
 
 def _get(board, group, card_id):
@@ -280,13 +280,14 @@ def confirm(board, group: str, card_id: str, ident: dict, at, now: float = None)
         found = at.find_by_marker(p["title"], lst["list_id"], mk) or {}
         task = {**found, **{k: v for k, v in task.items() if v}}
     upd = {"task_id": task["id"], "code": task.get("taskCode") or "", "link": at.task_link(task.get("taskCode") or "")}
-    note = f"tạo bằng tài khoản {p.get('owner_name') or 'chủ nhóm'} thay @{render._value(p['requester'].get('name'), 60)}"
+    # names in notes are plain text: the people are already tagged once on the header line
+    note = f"tạo bằng tài khoản {p.get('owner_name') or 'chủ nhóm'} thay {render._value(p['requester'].get('name'), 60)}"
     asg = p.get("assignee") or {}
     if asg.get("atask") and not p.get("assigned"):
         r = at.assign_users(task["id"], [asg["atask"]])
         if r.get("error"):
             upd["assign_error"] = render.one_line(r.get("message"), 200)
-            note += f" · CHƯA giao được cho @{render._value(asg.get('name'), 60)} trên aTask — giao tay"
+            note += f"; CHƯA giao được cho {render._value(asg.get('name'), 60)} trên aTask — giao tay"
         else:
             upd["assigned"] = True
     card = board.card_update(group, card["id"], state="created", created_at=now, **upd)
@@ -358,4 +359,4 @@ def confirm_done(board, group: str, card_id: str, ident: dict, at, now: float = 
                             "aTask từ chối đóng: " + render.one_line(r.get("message"), 160)))
     card = board.card_update(group, card["id"], state="done", done_at=now)
     n = render._value(ident.get("name") or "?", 60)
-    return _card(card, f"đã đóng trên aTask theo xác nhận của @{n}")
+    return _card(card, f"đã đóng trên aTask theo xác nhận của {n}")
