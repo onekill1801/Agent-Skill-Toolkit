@@ -270,6 +270,10 @@ senderId sai vào Saved Messages của chính bạn).
   Còn lại: `@bot ping` (1b), cảnh báo Telegram cho chủ nhóm khi stale.
 - **S1 được phép** (30/10) — 1 khung WS `senderId` sai vào Saved Messages của chủ nhóm.
 - **S1 lần 1 (30/10) — chưa kết luận:** khung WS vào Saved Messages (`6890c423…`, type SAVED) với `senderId` của thành viên khác ⇒ server trả `error: oaep decoding error` cho đúng requestId, KHÔNG lưu tin (đọc lại lịch sử: không có). Saved Messages bắt nội dung mã hoá RSA-OAEP mà server tự giải ⇒ bị chặn ở bước nội dung, chưa tới bước định danh. Cần nơi nhận chấp nhận plaintext (nhóm chỉ có chủ nhóm) hoặc dò khoá mã hoá của web client. Kết quả: `temp/spike/s1.json` (ubuntu-c).
+- **S1 lần 2 (30/10 19:22) — ✅ ĐẠT:** nhóm "BOT" `6a2da248…` (SUPER_PRIVATE; chủ nhóm + 3 tài khoản hệ thống), khung
+  plaintext với `senderId` = tài khoản hệ thống "FPT" (thành viên nhóm) ⇒ echo và tin lưu đều mang `senderId` = chủ
+  token (`6810a541…`), messageIdInc 159; đã thu hồi (isDeletedForAll). ⇒ **server ép định danh theo token**, quyền theo
+  `senderId` dùng được (§1.2). Cùng lúc **S2 ✅**: echo + lịch sử trả đúng `requestId` client gửi. `temp/spike/s1-try2.json`.
 - **Pipeline (S8 ❌) — chọn (b) cho dev** (30/10): deploy dev qua chat chạy `allow_unpinned` — thẻ D ghi rõ "HEAD lúc
   chạy của <nhánh>", người duyệt duyệt nhánh chứ không phải commit; sau build bot so SHA thực (provenance) và ghi vào
   thẻ. Sandbox/demo/prod qua chat vẫn CHẶN tới khi pipeline nhận SHA/tag.
