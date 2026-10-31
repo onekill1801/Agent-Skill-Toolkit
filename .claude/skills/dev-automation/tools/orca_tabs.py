@@ -51,7 +51,7 @@ def load_config() -> dict:
 
 def _cmdlines() -> list:
     """argv of every process, as lists of strings (Linux /proc, else `ps`, Windows via PowerShell)."""
-    if os.path.isdir("/proc"):
+    if os.name != "nt" and os.path.isdir("/proc"):      # Windows: "/proc" = <ổ hiện tại>:\proc nếu thư mục đó tồn tại
         out = []
         for d in os.listdir("/proc"):
             if not d.isdigit():
