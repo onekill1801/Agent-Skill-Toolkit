@@ -76,14 +76,21 @@ def build_frame(group_id, content, sender_id, group_type, request_id=None,
     }
 
 
+def _u16(text: str) -> int:
+    """Length in UTF-16 code units — what the server (JavaScript) counts for mention offset/length. A code-point
+    offset is wrong after any emoji outside the BMP ('🤖' = 2 units): such a frame is silently dropped, no echo
+    (seen live 31/10: every card with an inline mention after '🤖 [' went unconfirmed)."""
+    return len(text.encode("utf-16-le")) // 2
+
+
 def with_mentions_prefix(body, people):
     """Prefix `body` with inline @mentions and return (content, metadata).
 
     `people` = list of (display_name, user_id); entries with a falsy id/name are
     skipped (text-only, no ping). Verified wire format (see SKILL.md): the literal
     '@<displayName>' sits in `content`, and metadata.mentions carries
-    {userId, target, length, offset} where `offset` is the CODE-POINT index of '@'
-    in content and `length` = len('@' + displayName). Use 'EVERYONE' as the id to
+    {userId, target, length, offset} where `offset` is the UTF-16 index of '@'
+    in content and `length` = UTF-16 length of '@' + displayName. Use 'EVERYONE' as the id to
     tag @All.
     """
     tokens, mentions, offset = [], [], 0
@@ -92,9 +99,9 @@ def with_mentions_prefix(body, people):
             continue
         tok = f"@{name}"
         mentions.append({"userId": uid, "target": name,
-                         "length": len(tok), "offset": offset})
+                         "length": _u16(tok), "offset": offset})
         tokens.append(tok)
-        offset += len(tok) + 1   # +1 for the space separating tokens / body
+        offset += _u16(tok) + 1   # +1 for the space separating tokens / body
     if not mentions:
         return body, {}
     content = " ".join(tokens) + (f" {body}" if body else "")
@@ -103,7 +110,7 @@ def with_mentions_prefix(body, people):
 
 def with_mentions(text, people):
     """Mentions INLINE where they appear (group-workboard §4.3): every '@<displayName>' of `people` found in
-    `text` gets a metadata.mentions entry at its code-point offset. Returns (text, metadata). Longer names
+    `text` gets a metadata.mentions entry at its UTF-16 offset. Returns (text, metadata). Longer names
     win over a shorter one they contain ('@Anh Tuan' is not also '@Anh'); people not found are not pinged."""
     mentions, taken = [], []
     for name, uid in sorted((p for p in people if p[0] and p[1]), key=lambda p: -len(p[0])):
@@ -116,7 +123,7 @@ def with_mentions(text, people):
             if any(a < start and i < b for a, b in taken):
                 continue
             taken.append((i, start))
-            mentions.append({"userId": uid, "target": name, "length": len(tok), "offset": i})
+            mentions.append({"userId": uid, "target": name, "length": _u16(tok), "offset": _u16(text[:i])})
     mentions.sort(key=lambda m: m["offset"])
     return text, ({"mentions": mentions} if mentions else {})
 

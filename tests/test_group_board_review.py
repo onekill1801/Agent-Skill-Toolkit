@@ -368,7 +368,10 @@ class GroupWatchBoardTest(unittest.TestCase):
         self.assertTrue(out["ack_text"].startswith("🤖 [R-1] idaas/etask!1388"))
         self.assertIn("Trạng thái: chờ bot · Yêu cầu: @Lan", out["ack_text"])
         m = out["ack_mention"][0]
-        self.assertEqual((m["userId"], out["ack_text"][m["offset"]:m["offset"] + m["length"]]), ("u-lan", "@Lan"))
+        t16 = out["ack_text"].encode("utf-16-le")                                        # UTF-16 offsets (live 31/10)
+        self.assertEqual((m["userId"], t16[2 * m["offset"]:2 * (m["offset"] + m["length"])].decode("utf-16-le")),
+                         ("u-lan", "@Lan"))
+        self.assertEqual(m["offset"], len(out["ack_text"][:out["ack_text"].index("@Lan")].encode("utf-16-le")) // 2)
         self.assertEqual(out["overdue"], ["Trạng thái: lỗi · Yêu cầu: @Lan"])
         self.assertEqual(len(out["same_head"]), 1)
         self.assertIn("chưa có commit mới", out["same_head"][0])

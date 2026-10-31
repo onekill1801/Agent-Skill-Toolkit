@@ -169,7 +169,8 @@ class SendOutboxTest(unittest.TestCase):
         text, ms = out["text"], out["mentions"]
         self.assertEqual([m["userId"] for m in ms], ["U2", "U1"])
         for m in ms:
-            self.assertEqual(text[m["offset"]:m["offset"] + m["length"]], "@" + m["target"])
+            # offsets are UTF-16 units (the server counts like JavaScript; live 31/10)
+            self.assertEqual(text.encode("utf-16-le")[2 * m["offset"]:2 * (m["offset"] + m["length"])].decode("utf-16-le"), "@" + m["target"])
         self.assertEqual(out["none"], ["không ai", {}])
 
 
