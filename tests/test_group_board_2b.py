@@ -292,6 +292,11 @@ try:
 except RuntimeError:
     pass
 out["crash_queue"] = [r["id"] for r in b.meta_get(ew.REQ_KEY)]
+# env_watch was down for > 12 h: old requests are dropped BEFORE anything is sent
+ew.gw._env_snapshots = lambda key, proj, show_prod=None: SNAPS["v"] + ([PR] if show_prod else [])
+b.meta_set(ew.REQ_KEY, [{"id": "old", "group": "G", "owner": False, "at": 1}])
+sent.clear()
+out["stale"] = [ew.serve_requests(b, now=1 + ew.REQ_MAX_AGE_S + 60), len(sent), b.meta_get(ew.REQ_KEY)]
 print(json.dumps(out, ensure_ascii=False))
 """
 
@@ -324,6 +329,7 @@ class TablePipelineTest(unittest.TestCase):
         self.assertEqual(got, ["G", "H"])
         self.assertEqual(out["o_retry"], [[], ["O"]])                                    # only O, then gone
         self.assertEqual(out["crash_queue"], ["r4"])                                     # nothing lost
+        self.assertEqual(out["stale"], [[], 0, []])                                        # > 12 h: dropped, not sent
 
 
 class OneSidedErrorTest(unittest.TestCase):

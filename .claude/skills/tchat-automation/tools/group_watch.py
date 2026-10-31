@@ -590,15 +590,14 @@ def _env_all(gid, group_type, sender_name, sender_id, me):
         _post_inline(gid, group_type, f"🤖 @{sender_name}: chưa bật bản đồ môi trường — {_OWNER['name']} khai repo trong "
                                       "FCHAT_ENV_REPOS.", [(sender_name, sender_id)])
         return
-    hb = daemon_common.last_heartbeat("env_watch") if daemon_common is not None else {}
-    if (hb or {}).get("age") is None or hb["age"] > ENV_WATCH_STALE_S:
-        _post_inline(gid, group_type, f"🤖 @{sender_name}: bảng môi trường do env_watch gửi mà env_watch chưa chạy — "
-                                      f"báo {_OWNER['name']}. Hỏi từng repo vẫn được: @bot env <repo>",
-                     [(sender_name, sender_id)])
-        return
     req = {"id": uuid.uuid4().hex, "group": str(gid), "owner": bool(me) and sender_id == me, "at": time.time()}
     with _board_lock:
         _board.meta_txn(lambda get, put: put("envtable:req", (get("envtable:req", []) or []) + [req]))
+    hb = daemon_common.last_heartbeat("env_watch") if daemon_common is not None else {}
+    if (hb or {}).get("age") is None or hb["age"] > ENV_WATCH_STALE_S:   # yêu cầu đã nằm trong hàng: không mất
+        _post_inline(gid, group_type, f"🤖 @{sender_name}: env_watch đang dừng — bảng môi trường sẽ tự gửi khi nó chạy "
+                                      f"lại (đã báo {_OWNER['name']} kiểm). Hỏi từng repo ngay bây giờ: @bot env <repo>",
+                     [(sender_name, sender_id)])
 
 
 ENV_WATCH_STALE_S = 120
@@ -1042,10 +1041,29 @@ def _fetch_since(gid, wm):
     return rows, False
 
 
+# Lệnh CHỈ ĐỌC (không đổi gì ở đâu): gửi lúc bot dừng mà chưa quá RESUME_READONLY_S ⇒ chạy khi bot lên lại, để thông
+# tin tiếp tục như bình thường. Lệnh ghi (tạo/xác nhận/đóng task, review…) vẫn chỉ báo "gửi lại" — chạy bù lệnh ghi
+# cũ có thể sai ngữ cảnh (người gửi đã làm cách khác, thẻ đã đổi).
+READONLY_CMDS = {"whoami", "ping", "help", "env", "env_all", "mr_where", "task_lists"}
+RESUME_READONLY_S = 30 * 60
+
+
+def _readonly_cmd(gid, content, sender_id, me):
+    """Tên lệnh chỉ đọc của tin (sau khi bỏ tiền tố chủ nhóm), hoặc None."""
+    if not _board_on(gid):
+        return None
+    if me and sender_id == me:
+        content = _strip_self_prefix(content)
+        if content is None:
+            return None
+    cmd = board_commands.parse(content, prefixed=bool(me) and sender_id == me)
+    return cmd[0] if cmd and cmd[0] in READONLY_CMDS else None
+
+
 def _catch_up(gid, me, kws):
-    """Sau mỗi lần (kết nối lại): đọc lịch sử từ watermark, ghi mọi tin chưa thấy vào inbox — KHÔNG BAO GIỜ
-    thực thi. Lệnh gửi trong lúc bot dừng (≤ 12 giờ, sau watermark) ⇒ `missed`, báo một lần
-    (_flush_missed). Lần chạy đầu (chưa có watermark) chỉ ghi, không báo."""
+    """Sau mỗi lần (kết nối lại): đọc lịch sử từ watermark, ghi mọi tin chưa thấy vào inbox. Lệnh gửi trong lúc bot
+    dừng (≤ 12 giờ, sau watermark): lệnh CHỈ ĐỌC ≤ 30′ ⇒ chạy bù (thông tin tiếp tục như thường); lệnh khác ⇒
+    `missed`, báo một lần (_flush_missed), không tự chạy. Lần chạy đầu (chưa có watermark) chỉ ghi, không báo."""
     wm = _board_call("watermark", gid)
     rows, complete = _fetch_since(gid, wm)
     if not complete:
@@ -1063,8 +1081,17 @@ def _catch_up(gid, me, kws):
             bot = m.get("senderId") == me and _board_call("is_bot_message", gid, m.get("requestId") or "",
                                                           content, created, inc)
             status = "history" if bot else "missed"
-        _board_call("inbox_record", gid, _msg_key(m), message_inc=inc, sender_id=m.get("senderId") or "",
-                    sender_name=(m.get("user") or {}).get("displayName") or "", created_at=created, status=status)
+            if status == "missed" and now - created <= RESUME_READONLY_S and \
+                    _readonly_cmd(gid, content, m.get("senderId"), me):
+                status = "resume"
+        name = (m.get("user") or {}).get("displayName") or ""
+        fresh = _board_call("inbox_record", gid, _msg_key(m), message_inc=inc, sender_id=m.get("senderId") or "",
+                            sender_name=name, created_at=created, status="queued" if status == "resume" else status)
+        if status == "resume" and fresh:
+            sender = m.get("senderId") or ""
+            text = _strip_self_prefix(content) if me and sender == me else content
+            print(f"[{_now()}] [resume] chạy bù lệnh chỉ đọc lúc bot dừng — {name or sender}: {text!r}")
+            _enqueue((gid, "SUPER_PRIVATE", name or sender, sender, text, me, _mentions(m)), (gid, _msg_key(m)))
     _flush_missed(gid)
 
 
@@ -1163,7 +1190,8 @@ def _handle(obj, gid_target, me, kws):
         _inbox_set(gid, msg_id, "ignored")
         print(f"[{_now()}] [skip] {sender_name}: {content!r}  (không khớp từ khoá)")
         return
-    if created and time.time() - created > STALE_S:
+    if created and time.time() - created > STALE_S and not (time.time() - created <= RESUME_READONLY_S and
+                                                             _readonly_cmd(gid, data.get("content") or "", sender, me)):
         _inbox_set(gid, msg_id, "missed", "stale")
         _flush_missed(gid)
         return

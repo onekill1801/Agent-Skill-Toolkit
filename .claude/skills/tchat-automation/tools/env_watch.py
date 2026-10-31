@@ -28,6 +28,7 @@ import group_watch as gw  # noqa: E402  (registry / snapshots / send helpers, Ph
 from agent_skill_toolkit.core import board_store, paths  # noqa: E402
 from agent_skill_toolkit.workflows.group_board import envmap, envwatch  # noqa: E402
 
+REQ_MAX_AGE_S = 12 * 3600
 REQ_POLL_S = 3          # kiểm yêu cầu "@bot env" mỗi 3 s (chu kỳ đọc môi trường vẫn là FCHAT_ENV_WATCH_INTERVAL)
 SLIM = ("env", "version", "commit", "digest", "level", "rs_created_at", "build", "observed_at", "branch")
 
@@ -218,10 +219,12 @@ def serve_requests(board, now: float = None) -> list:
     """"@bot env" đã xếp hàng (group_watch) ⇒ đọc mới, gửi thay đổi nếu có, rồi cả bảng cho từng nơi hỏi.
     Hàng yêu cầu BỀN: không lấy ra trước; mỗi yêu cầu {id, left:[nơi nhận]} chỉ bớt nơi đã nhận, xoá khi đủ
     (crash / lỗi giữa chừng ⇒ yêu cầu còn nguyên phần chưa gửi; gửi lại cả bảng thì vô hại — cùng số hiện tại)."""
-    reqs = board.meta_get(REQ_KEY, []) or []
-    if not reqs:
-        return []
     now = now or time.time()
+    reqs = [r for r in (board.meta_get(REQ_KEY, []) or []) if now - (r.get("at") or now) <= REQ_MAX_AGE_S]
+    if not reqs:                                      # hàng chỉ còn yêu cầu quá cũ: dọn, không gửi gì (Codex resume R1)
+        board.meta_txn(lambda get, put: put(REQ_KEY, [q for q in (get(REQ_KEY, []) or [])
+                                                      if now - (q.get("at") or now) <= REQ_MAX_AGE_S]))
+        return []
     owner_group = _cfg("FCHAT_ENV_OWNER_GROUP", "").strip()
     scopes = table_scopes(_csv("FCHAT_BOARD_GROUPS"), owner_group)
     asks = []
@@ -238,6 +241,8 @@ def serve_requests(board, now: float = None) -> list:
     def settle(get, put):                             # theo id: yêu cầu mới xếp thêm trong lúc gửi vẫn giữ nguyên
         keep = []
         for q in get(REQ_KEY, []) or []:
+            if now - (q.get("at") or now) > REQ_MAX_AGE_S:
+                continue                              # quá cũ (env_watch dừng rất lâu): bỏ, người hỏi đã được báo
             mine = [a for a in asks if a["req"] == q.get("id")]
             if not mine:
                 keep.append(q)

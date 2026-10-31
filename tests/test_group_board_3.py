@@ -540,9 +540,9 @@ class GroupWatch3Test(unittest.TestCase):
         self.assertIn("Trạng thái: đã tạo", out["confirm"][0][0])
         self.assertEqual(out["calls"][:2], [["create", "Sửa lọc", "L1"], ["assign", "T1", ["102"]]])
         self.assertIn("🤖 [T-2] Việc của chủ nhóm", out["owner_draft"][0][0])
-        self.assertIn("env_watch chưa chạy", out["env_stale"][0][0])                    # no silent wait
+        self.assertIn("env_watch đang dừng", out["env_stale"][0][0])                    # told, and still queued
         self.assertEqual(out["env_ok"], [])                                               # env_watch answers, not us
-        self.assertEqual(out["envreq"], [["G", True]])                                    # owner ⇒ + private copy
+        self.assertEqual(out["envreq"], [["G", False], ["G", True]])                      # both kept; owner ⇒ + private copy
         self.assertIn("chưa hiểu lệnh này", out["unknown_member"][0][0])           # Fable UX P1.4: never silent
         self.assertIn("chưa hiểu lệnh này", out["unknown_owner"][0][0])
         self.assertEqual(out["chat"], [])                                             # plain chat: still silent

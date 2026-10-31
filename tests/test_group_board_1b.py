@@ -169,7 +169,7 @@ now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 for i, (snd, txt) in enumerate((("U1", "@bot tôi là ai"), ("U1", "tôi là ai"), ("U2", "@bot ping"))):
     g._handle({"type": "message", "data": {"type": "TEXT", "groupId": "G", "messageIdInc": 100 + i, "senderId": snd,
                "content": txt, "createdAt": now, "user": {"displayName": snd}}}, "G", "ME", kws)
-out["handled"] = hq
+out["handled"] = list(hq)
 # catch-up after a restart: a board command sent while the bot was down is reported (Codex 1b R1 #3)
 cfg["FCHAT_CATCHUP_REPLY"] = "1"
 g._board.raise_watermark("G", 200)
@@ -177,11 +177,17 @@ iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 60))
 hist = {"regulars": [{"type": "TEXT", "id": "h1", "messageIdInc": 201, "senderId": "U1", "content": "@bot tôi là ai",
                       "createdAt": iso, "user": {"displayName": "Lan"}},
                      {"type": "TEXT", "id": "h2", "messageIdInc": 202, "senderId": "U2", "content": "review lại R-1",
-                      "createdAt": iso, "user": {"displayName": "Huy"}}]}
+                      "createdAt": iso, "user": {"displayName": "Huy"}},
+                     {"type": "TEXT", "id": "h3", "messageIdInc": 203, "senderId": "ME", "content": "@bot ping",
+                      "createdAt": iso, "user": {"displayName": "Chung"}},
+                     {"type": "TEXT", "id": "h4", "messageIdInc": 204, "senderId": "U2", "content": "@bot help",
+                      "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 40 * 60)),
+                      "user": {"displayName": "Huy2"}}]}
 g.client.api_get = lambda path, params=None: hist
 sent.clear()
 g._catch_up("G", "ME", kws)
 out["catchup"] = list(sent)
+out["resumed"] = hq[len(out["handled"]):]                 # read-only command sent while the bot was down: run now
 # broken registry -> fail closed
 open(os.path.join(os.environ["WORK_DIR"], "team.json"), "w").write("{broken")
 step("broken", "U1", "review giúp https://gitlab.fis.vn/idaas/etask/-/merge_requests/1388")
@@ -212,9 +218,12 @@ class GroupWatch1bTest(unittest.TestCase):
         self.assertIn("không thấy thẻ R-99", out["again_missing"]["sent"][0])
         self.assertEqual(out["again_denied"]["tools"], [])
         self.assertEqual(out["handled"], ["@bot tôi là ai", "@bot ping"])
+        # after a restart: Lan's read-only "@bot tôi là ai" (1′ old) is RUN; Huy's "review lại R-1" (a write) is reported
+        self.assertEqual(out["resumed"], ["@bot tôi là ai", "ping"])                    # owner: prefix stripped
         self.assertEqual(len(out["catchup"]), 1)
-        self.assertIn("Lan", out["catchup"][0])
+        self.assertNotIn("Lan", out["catchup"][0])
         self.assertIn("Huy", out["catchup"][0])
+        self.assertIn("Huy2", out["catchup"][0])                                          # read-only but 40′ old
         self.assertEqual(out["broken"]["tools"], [])
         self.assertIn("danh bạ của bot đang lỗi", out["broken"]["sent"][0])
 
