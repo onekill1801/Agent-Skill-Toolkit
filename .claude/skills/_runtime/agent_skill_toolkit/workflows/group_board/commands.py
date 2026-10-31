@@ -26,6 +26,12 @@ _CMDS = (
     ("env", re.compile(r"^env\s+([\w.\-/]+)\s*\??\s*$", re.I), True),
     ("mr_where", re.compile(r"^mr\s*!?(\d+)\s+([\w.\-/]+)(?:\s+ở\s+đâu)?\s*\??\s*$", re.I), True),
     ("task_create", re.compile(r"^tạo\s+task\s*:\s*(.+)$", re.I | re.S), True),
+    ("deploy_redo", re.compile(r"^deploy\s+lại\s+(D-\d+)\s*$", re.I), False),
+    ("deploy_request", re.compile(r"^deploy\s+([\w.\-/]+)\s+(?:lên|len|to)\s+([\w\-]+)\s*((?:\|.*)?)$", re.I | re.S), True),
+    ("deploy_approve", re.compile(r"^duyệt\s+(D-\d+)\s*$", re.I), False),
+    ("deploy_reject", re.compile(r"^từ\s+chối\s+(D-\d+)\s*(?::\s*(.*))?$", re.I | re.S), False),
+    ("deploy_cancel", re.compile(r"^(?:huỷ|hủy)\s+(D-\d+)\s*$", re.I), False),
+    ("deploy_unlock", re.compile(r"^(?:mở\s+khoá|mở\s+khóa|unlock)\s+(D-\d+)\s*$", re.I), True),
     ("task_lists", re.compile(r"^(?:list\s+task|task\s+list|lists?)\s*\??\s*$", re.I), True),
     ("task_confirm_done", re.compile(r"^xác\s+nhận\s+xong\s+(T-\d+)\s*$", re.I), False),
     ("task_confirm", re.compile(r"^xác\s+nhận\s+(T-\d+)\s*$", re.I), False),
@@ -45,7 +51,8 @@ HELP_LINES = (
     "xác nhận T-<số> — tạo task trên aTask (người tạo nháp) · huỷ T-<số> — bỏ nháp",
     "xong T-<số> rồi xác nhận xong T-<số> — đóng task (người yêu cầu / người được giao)",
     "@bot list task — các list aTask được phép",
-    "Sắp có: deploy dev + duyệt",
+    "@bot deploy <repo> lên dev | lý do: … — yêu cầu deploy D-n (cần quyền deploy:dev; một người KHÁC duyệt)",
+    "duyệt D-<số> · từ chối D-<số>: <lý do> — người có quyền approve:dev · huỷ D-<số> · deploy lại D-<số>",
 )
 
 

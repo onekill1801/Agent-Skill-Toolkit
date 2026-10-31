@@ -431,6 +431,7 @@ def workload_snapshot(target: str, obj: dict, pods: list, owners: dict) -> dict:
         owner = next(iter(md.get("ownerReferences") or []), {})
         out_pods.append({
             "name": md.get("name"), "phase": st.get("phase"),
+            "ready": any(c.get("type") == "Ready" and c.get("status") == "True" for c in st.get("conditions") or []),
             "owner": f"{owner.get('kind', '')}/{owner.get('name', '')}".strip("/"),
             "owner_created": owners.get(f"{owner.get('kind', '')}/{owner.get('name', '')}"),
             "containers": [{"name": c.get("name"), "image": c.get("image"), "image_id": c.get("imageID"),

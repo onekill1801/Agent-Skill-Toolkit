@@ -78,7 +78,8 @@ class CommandsTest(unittest.TestCase):
         self.assertEqual(P("@bot ping"), ("ping", ()))
         self.assertEqual(P("@bot: help"), ("help", ()))
         self.assertIsNone(P("nhờ ai review lại R-7 với"))       # anchored at the start
-        self.assertIsNone(P("@bot deploy etask lên dev"))       # not a phase 1b command
+        self.assertEqual(P("@bot deploy etask lên dev"), ("deploy_request", ("etask", "dev", "")))   # phase 4
+        self.assertIsNone(P("deploy etask lên dev"))                                     # needs the prefix
 
     def test_whoami_text(self):
         text, people = commands.whoami_text(identity.resolve("U1", "Lan", "ME", TEAM), "Chung")

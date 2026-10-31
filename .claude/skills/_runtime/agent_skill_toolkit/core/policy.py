@@ -10,9 +10,12 @@ ACTIONS = {"review": "review", "env": None, "task": "task", "task_done": None}
 
 def check(action: str, ident: dict) -> tuple:
     """(allowed, reason). Unknown action = refused."""
-    if action not in ACTIONS:
+    if action.startswith(("deploy:", "approve:")):      # theo môi trường: deploy:dev, approve:dev …
+        need = action
+    elif action not in ACTIONS:
         return False, f"lệnh '{action}' chưa được hỗ trợ"
-    need = ACTIONS[action]
+    else:
+        need = ACTIONS[action]
     perms = set(ident.get("perms") or ())
     if need is None:
         return (True, "") if perms else (False, "danh bạ chặn tài khoản này")

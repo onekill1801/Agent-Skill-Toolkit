@@ -58,6 +58,7 @@ from agent_skill_toolkit.integrations import atask as atask_api  # noqa: E402
 from agent_skill_toolkit.workflows.group_board import render as board_render  # noqa: E402
 from agent_skill_toolkit.workflows.group_board import review as board_review  # noqa: E402
 from agent_skill_toolkit.workflows.group_board import task as board_task  # noqa: E402
+from agent_skill_toolkit.workflows.group_board import deploy as board_deploy  # noqa: E402
 from agent_skill_toolkit.workflows.intake import gate  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -687,8 +688,277 @@ class _BoardProxy:
         return call
 
 
+# ── Deploy, thẻ D (Pha 4) ──────────────────────────────────────────────────
+def _jenkins_json(*args, timeout=120):
+    """`jenkins.py <args>` → JSON; không đọc được ⇒ {"error", "uncertain"} (lệnh ghi có thể đã tới Jenkins)."""
+    try:
+        p = subprocess.run([sys.executable, os.path.join(_DEV_DIR, "jenkins.py"), *args], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=timeout)
+        return json.loads(p.stdout or "{}") or {"error": True, "uncertain": True, "message": "no output"}
+    except (subprocess.TimeoutExpired, ValueError) as e:
+        return {"error": True, "uncertain": True, "message": type(e).__name__}
+
+
+class _DeployOps:
+    """Cổng ra ngoài của board_deploy: GitLab (HEAD nhánh), Jenkins (kích, hàng đợi, build, cấu hình), k8s (pod)."""
+
+    @staticmethod
+    def branch_head(project_id, branch):
+        c = gitlab_api.Client(project_id).latest_commit(branch)
+        return c.get("id") if isinstance(c, dict) and not c.get("error") else ""
+
+    @staticmethod
+    def job_hash(job):
+        return _jenkins_json("confighash", "--path", job).get("hash") or ""
+
+    @staticmethod
+    def trigger(job):
+        r = _jenkins_json("trigger", "--path", job)
+        return r if r.get("error") else {"queue_url": r.get("queue_url") or ""}
+
+    @staticmethod
+    def queue(url):
+        return _jenkins_json("queue", "--url", url)
+
+    @staticmethod
+    def buildinfo(job, number):
+        return _jenkins_json("buildinfo", "--path", job, "--number", str(number), timeout=180)
+
+    @staticmethod
+    def builds(job, limit):
+        r = _jenkins_json("builds", "--path", job, "--limit", str(limit))
+        return None if r.get("error") else r.get("builds") or []
+
+    @staticmethod
+    def jenkins_user():
+        return (rccfg.get("JENKINS_USER") or "").strip()
+
+    @staticmethod
+    def workload(repo, env, target):
+        return _k8s_workload(repo, {"env": env, "target": target}) if target else {"error": True, "kind": "no_target"}
+
+
+def _deploy_target(repo, env):
+    try:
+        return board_deploy.deploy_target(_registry(), repo, env)
+    except (OSError, ValueError) as e:
+        return None, f"bot không đọc được registry ({type(e).__name__})"
+
+
+def _deploy_recheck(p):
+    """Ngay trước khi kích Jenkins: registry vẫn bật (cùng job/nhánh) và người yêu cầu vẫn còn quyền. '' = được chạy."""
+    target, why = _deploy_target(p["repo"], p["env"])
+    if why:
+        return why
+    if target["job"] != p["job"] or target["branch"] != p["branch"]:
+        return "registry đổi job/nhánh sau khi duyệt — gõ \"deploy lại\""
+    req = p.get("requester") or {}
+    ident = _identity(req.get("id"), req.get("name"), _OWNER["id"])
+    if ident is None:
+        return "danh bạ của bot đang lỗi — không chạy"
+    ok, _ = policy.check(f"deploy:{p['env']}", ident)
+    return "" if ok else f"người yêu cầu không còn quyền deploy:{p['env']}"
+
+
+def _approvers(env, exclude=()):
+    """Thành viên danh bạ có approve:<env>, đã xác minh (để tag trên thẻ D)."""
+    try:
+        team = identity.load_team()
+    except (OSError, ValueError):
+        return []
+    out = []
+    for key, rec in team.items():
+        fid = str(((rec or {}).get("handles") or {}).get("fchat_id") or "")
+        if fid and fid not in exclude and isinstance(rec.get("perms"), list) and f"approve:{env}" in rec["perms"] \
+                and rec.get("verified_by"):
+            out.append({"fchat_id": fid, "name": rec.get("name") or key})
+    return out
+
+
+def _tg_ask_owner(card):
+    """Chủ nhóm duyệt qua Telegram (tài khoản FChat dùng chung với bot): thẻ D ⇒ một yêu cầu có nút Duyệt/Từ chối.
+    Trả {"req", "chat"} hoặc {} (Telegram chưa cấu hình ⇒ chỉ người khác duyệt trong chat)."""
+    try:
+        import approvals
+        bot = tg_api.approval_bot()
+        chat = (rccfg.get("TELEGRAM_APPROVAL_CHAT") or (tg_api.allowed_chats(bot)[:1] or [""])[0]
+                or os.environ.get("CLAUDE_TG_CHAT_ID") or "")
+        if not chat:
+            return {}
+        p = card["payload"]
+        summary = f"deploy {p['repo']} → {p['env']} ({card['id']})"
+        detail = (f"Nhánh {p['branch']} — HEAD lúc chạy (job không ghim commit); HEAD lúc yêu cầu {p['commit'][:8]}\n"
+                  f"Yêu cầu: {p['requester'].get('name')} · Lý do: {p.get('reason') or '—'}")
+        req = approvals.create("deploy", summary, detail, "write")
+        import html
+        r = tg_api.send_message(chat, f"🚀 <b>Duyệt deploy?</b>\n<code>{html.escape(summary)}</code>\n"
+                                      f"<pre>{html.escape(detail)}</pre>",
+                                reply_markup=tg_api.approve_keyboard(req), bot=bot)
+        return {"req": req, "chat": str(chat)} if r.get("ok") else {}
+    except Exception as e:  # noqa: BLE001 — Telegram là đường phụ: lỗi ⇒ vẫn có người khác duyệt trong chat
+        print(f"[{_now()}] [WARN] gửi duyệt Telegram lỗi: {e}", file=sys.stderr)
+        return {}
+
+
+def _deploy_out(gid, group_type, out):
+    if out.get("card"):
+        _post_card(gid, group_type, out["card"], *out["send"])
+    elif out.get("reply"):
+        _post_inline(gid, group_type, *out["reply"])
+
+
+def _deploy_command(gid, group_type, ident, name, args, me):
+    ops = _DeployOps()
+    if name == "deploy_request":
+        target, why = _deploy_target(args[0], args[1])
+        if why:
+            _deploy_out(gid, group_type, board_deploy._reply(ident, why))
+            return
+        ok, reason = policy.check(f"deploy:{target['env']}", ident)
+        if not ok:
+            _post_inline(gid, group_type, *board_commands.denied_text(ident, reason, _OWNER["name"]))
+            return
+        out = board_deploy.request(_BoardProxy(), gid, ident, target, board_deploy.parse_reason(args[2]), ops,
+                                   _approvers(target["env"], exclude=(ident.get("fchat_id"), me)), _OWNER["name"])
+        if out.get("card") and ident.get("fchat_id") != me:     # chủ nhóm không tự duyệt yêu cầu của mình
+            tg = _tg_ask_owner(out["card"])
+            if tg:
+                with _board_lock:
+                    out["card"] = _board.card_update(gid, out["card"]["id"], tg=tg) or out["card"]
+        _deploy_out(gid, group_type, out)
+    elif name == "deploy_approve":
+        with _board_lock:
+            card = _board.card_get(gid, args[0].upper())
+        req = (card.get("payload") or {}).get("requester") or {}
+        rid = _identity(req.get("id"), req.get("name"), me) if req.get("id") else None
+        out = board_deploy.approve(_BoardProxy(), gid, args[0], ident, ops, requester_ident=rid, owner_id=me)
+        _deploy_out(gid, group_type, out)
+        if (out.get("card") or {}).get("state") == "running":
+            threading.Thread(target=_deploy_drive, args=(gid, out["card"]["id"]), daemon=True).start()
+    elif name == "deploy_reject":
+        _deploy_out(gid, group_type, board_deploy.reject(_BoardProxy(), gid, args[0], ident, args[1] or "", owner_id=me))
+    elif name == "deploy_unlock":
+        _deploy_out(gid, group_type, board_deploy.unlock(_BoardProxy(), gid, args[0], ident))
+    elif name == "deploy_cancel":
+        _deploy_out(gid, group_type, board_deploy.cancel(_BoardProxy(), gid, args[0], ident))
+    elif name == "deploy_redo":
+        out = board_deploy.redo(_BoardProxy(), gid, args[0], ident, _deploy_target, ops,
+                                _approvers((_board.card_get(gid, args[0].upper()).get("payload") or {}).get("env") or "",
+                                           exclude=(ident.get("fchat_id"), me)), _OWNER["name"])
+        if out.get("card") and ident.get("fchat_id") != me:
+            tg = _tg_ask_owner(out["card"])
+            if tg:
+                with _board_lock:
+                    out["card"] = _board.card_update(gid, out["card"]["id"], tg=tg) or out["card"]
+        _deploy_out(gid, group_type, out)
+
+
+_driving = set()
+_driving_lock = threading.Lock()
+DEPLOY_TICK_S = 10
+
+
+def _deploy_drive(gid, card_id):
+    """Chạy một thẻ D tới khi xong (mỗi bước ghi lên thẻ trước khi làm ⇒ tiến trình chết thì _deploy_timer tiếp)."""
+    with _driving_lock:
+        if (gid, card_id) in _driving:
+            return
+        _driving.add((gid, card_id))
+    try:
+        while True:
+            out = board_deploy.step(_BoardProxy(), gid, card_id, _DeployOps(), recheck=_deploy_recheck)
+            _deploy_out(gid, None, out)
+            with _board_lock:
+                state = _board.card_get(gid, card_id).get("state")
+            if state != "running":
+                return
+            time.sleep(DEPLOY_TICK_S)
+    except Exception as e:  # noqa: BLE001
+        print(f"[{_now()}] [WARN] deploy {card_id} lỗi: {e}", file=sys.stderr)
+    finally:
+        with _driving_lock:
+            _driving.discard((gid, card_id))
+
+
+def _deploy_timer(gid, interval=DEPLOY_TICK_S):
+    """Nền: _deploy_tick mỗi `interval` giây."""
+    while True:
+        try:
+            _deploy_tick(gid)
+        except Exception as e:  # noqa: BLE001
+            print(f"[{_now()}] [WARN] hẹn giờ deploy lỗi: {e}", file=sys.stderr)
+        time.sleep(interval)
+
+
+def _deploy_tick(gid, drive=None):
+    """Một lượt: tiếp tục thẻ D đang chạy (kể cả sau khi bot khởi động lại); duyệt / từ chối qua Telegram; hết hạn.
+    drive(gid, card_id) mặc định = luồng _deploy_drive (test truyền hàm đồng bộ)."""
+    import approvals
+    drive = drive or (lambda g, cid: threading.Thread(target=_deploy_drive, args=(g, cid), daemon=True).start())
+    with _board_lock:
+        running = _board.cards_in(gid, "D", ("running",))
+        waiting = _board.cards_in(gid, "D", ("waiting",))
+    for c in running:
+        drive(gid, c["id"])
+    for c in waiting:
+        p = c["payload"]
+        if time.time() > (p.get("expires_at") or 0):
+            with _board_lock:
+                e = _board.card_update(gid, c["id"], state="expired", if_revision=c["revision"])
+            if e:
+                _deploy_out(gid, None, {"card": e, "send": board_deploy.render_deploy(
+                    e, "hết 2 giờ chờ duyệt — gõ \"deploy lại\" để tạo yêu cầu mới")})
+            continue
+        tg = p.get("tg")
+        if tg is None and str((p.get("requester") or {}).get("id")) != str(_OWNER["id"]):
+            ntg = _tg_ask_owner(c) or {"none": True}     # quay lại chờ duyệt (HEAD đổi, quá 30′): hỏi lại một lần
+            with _board_lock:
+                _board.card_update(gid, c["id"], tg=ntg)
+            continue
+        tg = tg or {}
+        rec = approvals.get(tg["req"]) if tg.get("req") else {}
+        if rec.get("status") not in ("approved", "denied"):
+            continue
+        if str(rec.get("by")) != str(tg.get("chat")):     # chỉ đúng người được hỏi (chat riêng = user id)
+            continue
+        owner = {"fchat_id": _OWNER["id"], "name": _OWNER["name"]}
+        if rec["status"] == "approved":
+            req = p.get("requester") or {}
+            rid = _identity(req.get("id"), req.get("name"), _OWNER["id"]) if req.get("id") else None
+            out = board_deploy.approve(_BoardProxy(), gid, c["id"], owner, _DeployOps(), via="telegram",
+                                       proof={"req": tg["req"], "by": rec.get("by"), "at": rec.get("decided")},
+                                       requester_ident=rid, owner_id=_OWNER["id"])
+            _deploy_out(gid, None, out)
+            if (out.get("card") or {}).get("state") == "running":
+                drive(gid, c["id"])
+            else:                                   # HEAD đổi ⇒ phải hỏi lại: một yêu cầu Telegram mới
+                with _board_lock:
+                    fresh = _board.card_get(gid, c["id"])
+                if fresh.get("state") == "waiting":
+                    ntg = _tg_ask_owner(fresh)
+                    with _board_lock:
+                        _board.card_update(gid, c["id"], tg=ntg or {})
+        else:
+            with _board_lock:
+                r = _board.card_update(gid, c["id"], state="rejected", if_revision=c["revision"],
+                                       approver={"id": _OWNER["id"], "name": _OWNER["name"]},
+                                       result="chủ nhóm từ chối qua Telegram")
+            if r:
+                _deploy_out(gid, None, {"card": r, "send": board_deploy.render_deploy(r)})
+
+
 def _board_command(gid, group_type, sender_name, sender_id, me, name, args, mentions=()):
     ident = _identity(sender_id, sender_name, me)
+    if name.startswith("deploy_"):
+        if ident is None:
+            _allowed(gid, group_type, None, "", sender_name, sender_id)
+            return
+        try:
+            _deploy_command(gid, group_type, ident, name, args, me)
+        except ValueError as e:
+            _post_inline(gid, group_type, board_render.defuse(f"⚠️ @{sender_name}: cấu hình lỗi — {e}"),
+                         [(sender_name, sender_id)])
+        return
     if name.startswith("task_"):
         action = "task" if name in ("task_create", "task_confirm", "task_cancel") else "task_done"
         if name == "task_lists" or _allowed(gid, group_type, ident, action, sender_name, sender_id):
@@ -1230,6 +1500,7 @@ def run(gid_target, idle_ping=20):
     threading.Thread(target=_sweeper, name="review-sweeper", daemon=True).start()
     if _board_on(gid_target):
         threading.Thread(target=_card_timer, args=(gid_target,), name="card-timer", daemon=True).start()
+        threading.Thread(target=_deploy_timer, args=(gid_target,), name="deploy-timer", daemon=True).start()
     retry = _MissedRetry()
     backoff = 2
     while True:
