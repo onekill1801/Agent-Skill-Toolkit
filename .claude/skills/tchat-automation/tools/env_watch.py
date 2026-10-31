@@ -267,10 +267,13 @@ def serve_requests(board, now: float = None) -> list:
     asks = []
     for r in reqs:
         left = r.get("left")
-        if left is None:                              # yêu cầu mới: nơi nhận = nhóm hỏi (+ nhóm riêng nếu chủ nhóm hỏi)
-            left = [{"scope": "nhóm", "group": r.get("group")}]
-            if r.get("owner") and owner_group:
-                left.append({"scope": "chủ nhóm", "group": owner_group})
+        if left is None:                              # yêu cầu mới: hỏi TRONG kênh prod ⇒ chỉ bản có prod ở đó;
+            if owner_group and r.get("group") == owner_group:     # hỏi ở nhóm thường ⇒ bản không prod (+ kênh prod
+                left = [{"scope": "chủ nhóm", "group": owner_group}]  # nếu chủ nhóm hỏi)
+            else:
+                left = [{"scope": "nhóm", "group": r.get("group")}]
+                if r.get("owner") and owner_group:
+                    left.append({"scope": "chủ nhóm", "group": owner_group})
         asks += [{**a, "req": r.get("id")} for a in left]
     rows, ok, webs = read_all_rows(scopes, owner_group)
     table_pass(board, scopes, rows, ok, webs, now, asks)

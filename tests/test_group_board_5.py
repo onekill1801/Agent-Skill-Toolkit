@@ -156,6 +156,59 @@ class AnswerPartsTest(unittest.TestCase):
         self.assertEqual(out["stale"], [True, [], [], None])
 
 
+PRODCHAN = r'''
+import json, sys
+sys.argv = ["x"]
+import env_watch as ew
+from agent_skill_toolkit.core import board_store
+cfg = {"FCHAT_BOARD_GROUPS": "N", "FCHAT_ENV_OWNER_GROUP": "P", "FCHAT_ENV_REPOS": "etask"}
+ew.gw.rccfg.get = lambda k, d="": cfg.get(k, d)
+ROW = lambda env: {"env": env, "version": "1", "commit": "c" * 40, "level": "built"}
+ew.read_all_rows = lambda scopes, og: ({"nhóm": {"etask|dev": "etask | dev | 🔨 | 1"},
+                                        "chủ nhóm": {"etask|dev": "etask | dev | 🔨 | 1", "etask|prod": "etask | prod | 🔨 | 1"}},
+                                       {"nhóm": set(), "chủ nhóm": set()}, {})
+sent = []
+ew.gw.send.send_text = lambda gid, text, gt=None, **k: (sent.append((gid, text.splitlines()[0].split(" · ")[2])), {"sent": True})[1]
+b = board_store.Board()
+b.meta_set("envtable:drows:nhóm", {}); b.meta_set("envtable:drows:chủ nhóm", {})
+b.meta_set(ew.REQ_KEY, [{"id": "a", "group": "P", "owner": False, "at": 1761000000.0},
+                        {"id": "b", "group": "N", "owner": False, "at": 1761000000.0},
+                        {"id": "c", "group": "N", "owner": True, "at": 1761000000.0}])
+ew.serve_requests(b, now=1761000001.0)
+print(json.dumps({"sent": sent, "left": b.meta_get(ew.REQ_KEY)}))
+'''
+
+
+ENVCMD = r'''
+import json, sys
+sys.argv = ["x"]
+import group_watch as gw
+cfg = {"FCHAT_ENV_REPOS": "etask", "FCHAT_ENV_OWNER_GROUP": "P"}
+gw.rccfg.get = lambda k, d="": cfg.get(k, d)
+gw._registry = lambda: {"etask": {"gitlab_project_id": 1, "repo_path": "idaas/etask"}}
+seen = []
+gw._env_snapshots = lambda key, proj, show_prod=None: (seen.append(show_prod), [])[1]
+gw._post_inline = lambda *a, **k: None
+for g in ("N", "P"):
+    gw._env_command(g, "GROUP", "Lan", "u-lan", "env", ["etask"])
+print(json.dumps(seen))
+'''
+
+
+class ProdChannelTest(unittest.TestCase):
+    """Kênh prod (FCHAT_ENV_OWNER_GROUP) cho mọi thành viên: hỏi TRONG kênh prod ⇒ chỉ bản có prod ở đó."""
+
+    def test_where_answers_go(self):
+        from test_group_board import _run_tchat, _tmpdb
+        out = _run_tchat(PRODCHAN, _tmpdb())
+        self.assertEqual(out["sent"], [["N", "nhóm"], ["N", "nhóm"], ["P", "chủ nhóm"], ["P", "chủ nhóm"]])
+        self.assertEqual(out["left"], [])
+
+    def test_env_repo_in_prod_channel_shows_prod(self):
+        from test_group_board import _run_tchat, _tmpdb
+        self.assertEqual(_run_tchat(ENVCMD, _tmpdb()), [None, True])           # nhóm thường: theo cấu hình; kênh prod: có
+
+
 class FlushPartsTest(unittest.TestCase):
     def test_resume_at_next_part(self):
         from test_group_board import _run_tchat, _tmpdb

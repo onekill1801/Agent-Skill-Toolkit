@@ -642,7 +642,8 @@ def _env_command(gid, group_type, sender_name, sender_id, name, args):
                                       f"— {_OWNER['name']} khai repo trong FCHAT_ENV_REPOS.", [(sender_name, sender_id)])
         return
     proj = reg[key]
-    snaps = _env_snapshots(key, proj)
+    prod_chan = (rccfg.get("FCHAT_ENV_OWNER_GROUP") or "").strip()
+    snaps = _env_snapshots(key, proj, show_prod=True if prod_chan and str(gid) == prod_chan else None)  # kênh prod: có prod
     web = _gitlab_web(proj)
     if name == "env":
         text = envmap.env_text(key, web, snaps)
