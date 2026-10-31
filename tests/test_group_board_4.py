@@ -408,6 +408,49 @@ class BuildLogTest(unittest.TestCase):
         self.assertEqual(jenkins.find_build_pushes("nothing")["pushes"], [])
 
 
+EXT = Path(os.environ.get("FQR_EXT_DIR") or ROOT.parent / "fpt-chat-quick-reply")
+
+
+@unittest.skipUnless((EXT / "board.js").exists() and __import__("shutil").which("node"), "extension / node not found")
+class GoldenDeployTest(unittest.TestCase):
+    """What the bot renders for D cards is what the extension reads (state, people, link)."""
+
+    def test_render_parse(self):
+        import subprocess
+        b = _board()
+        self.addCleanup(lambda: b.close())
+        ops = FakeOps()
+        out = deploy.request(b, "G", LAN, _target(), "thử", ops, [HUY], "Chung", now=1000.0)
+        cid = out["card"]["id"]
+        texts = [out["send"]]
+        texts.append(deploy.approve(b, "G", cid, HUY, ops, now=1100.0, owner_id="ME")["send"])
+        ops.wl = {"error": True}
+        for i in range(4):
+            o = deploy.step(b, "G", cid, ops, now=1200.0 + i)
+            if o:
+                texts.append(o["send"])
+        o = deploy.step(b, "G", cid, ops, now=99999.0)
+        texts.append(o["send"])
+        sys.path.insert(0, str(ROOT / ".claude" / "skills" / "tchat-automation" / "tools"))
+        import send
+        msgs = []
+        for i, (t, people) in enumerate(texts):
+            content, meta = send.with_mentions(t, people)
+            msgs.append({"id": f"m{i}", "messageIdInc": i, "senderId": "BOT", "type": "TEXT", "content": content,
+                         "createdAt": f"2026-10-31T0{i}:00:00Z", "user": {"displayName": "Chung"}, "metadata": meta})
+        tmp = Path(tempfile.mkdtemp(prefix="golden4-")) / "msgs.json"
+        tmp.write_text(json.dumps(msgs, ensure_ascii=False), encoding="utf-8")
+        p = subprocess.run(["node", str(EXT / "tests" / "parse_cli.js"), str(tmp), "BOT"], capture_output=True,
+                           text=True, encoding="utf-8", timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        [c] = [c for c in json.loads(p.stdout)["cards"] if c.get("cardId") == cid]
+        self.assertEqual((c["type"], c["state"]), ("deploy", "built"))
+        self.assertEqual(c["people"]["requester"], {"id": "U1", "name": "Lan"})
+        self.assertEqual(c["people"]["approver"], {"id": "U2", "name": "Huy"})
+        self.assertIn("http://j/1421/", c["links"])
+        self.assertGreaterEqual(len(c["events"]), 4)
+
+
 WATCH_4 = r'''
 import json, os, sys, time
 sys.argv = ["x"]
