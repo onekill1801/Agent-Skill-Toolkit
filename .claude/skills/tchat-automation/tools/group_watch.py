@@ -496,7 +496,7 @@ def _registry() -> dict:
 
 def _env_repo(name, reg):
     """Registry key of `name` (key or last path segment), only if listed in FCHAT_ENV_REPOS."""
-    allowed = {x.strip().lower() for x in (rccfg.get("FCHAT_ENV_REPOS") or "").split(",") if x.strip()}
+    allowed = {x.lower() for x in env_repos(reg)}
     n = (name or "").strip().lower()
     for key, proj in reg.items():
         if not isinstance(proj, dict):
@@ -603,8 +603,19 @@ def _gitlab_web(proj) -> str:
     return f"{base}/{proj['repo_path']}" if base and proj.get("repo_path") else ""
 
 
-def env_repos() -> list:
-    return [r.strip() for r in (rccfg.get("FCHAT_ENV_REPOS") or "").split(",") if r.strip()]
+def env_repos(reg=None) -> list:
+    """FCHAT_ENV_REPOS: khoá registry cách nhau dấu phẩy; "*" = MỌI project có môi trường đọc được (GitLab id + ít nhất
+    một env có job Jenkins / workload k8s) — repo mới khai trong registry tự vào bảng."""
+    raw = [r.strip() for r in (rccfg.get("FCHAT_ENV_REPOS") or "").split(",") if r.strip()]
+    if "*" not in raw:
+        return raw
+    try:
+        reg = reg if reg is not None else _registry()
+    except (OSError, ValueError):
+        return [r for r in raw if r != "*"]
+    every = [k for k, p in reg.items() if isinstance(p, dict) and p.get("gitlab_project_id")
+             and envmap.env_targets(p, show_prod=True)]
+    return list(dict.fromkeys(every + [r for r in raw if r != "*"]))
 
 
 def _env_all(gid, group_type, sender_name, sender_id, me):

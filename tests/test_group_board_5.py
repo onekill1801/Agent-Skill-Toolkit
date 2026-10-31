@@ -285,6 +285,31 @@ class GroupProdSwitchTest(unittest.TestCase):
         self.assertEqual(out["asked"], [False, False, True, True, False])      # prod read only when needed
 
 
+STAR = r'''
+import json, sys
+sys.argv = ["x"]
+import group_watch as gw
+cfg = {"FCHAT_ENV_REPOS": "*"}
+gw.rccfg.get = lambda k, d="": cfg.get(k, d)
+gw._registry = lambda: {"a": {"gitlab_project_id": 1, "environments": {"dev": {"jenkins": {"job": "j"}}}},
+                        "b": {"gitlab_project_id": 2, "environments": {}},
+                        "c": {"environments": {"dev": {"jenkins": {"job": "j"}}}},
+                        "d": {"gitlab_project_id": 4, "environments": {"prod": {"jenkins": {"job": "p"}}}}}
+out = [gw.env_repos(), gw._env_repo("a", gw._registry()), gw._env_repo("b", gw._registry())]
+cfg["FCHAT_ENV_REPOS"] = "b,*"
+out.append(gw.env_repos())
+cfg["FCHAT_ENV_REPOS"] = "a"
+out.append(gw.env_repos())
+print(json.dumps(out))
+'''
+
+
+class EnvReposStarTest(unittest.TestCase):
+    def test_star_means_every_project_with_envs(self):
+        from test_group_board import _run_tchat, _tmpdb
+        self.assertEqual(_run_tchat(STAR, _tmpdb()), [["a", "d"], "a", None, ["a", "d", "b"], ["a"]])
+
+
 class ProdChannelTest(unittest.TestCase):
     """Kênh prod (FCHAT_ENV_OWNER_GROUP) cho mọi thành viên: hỏi TRONG kênh prod ⇒ chỉ bản có prod ở đó."""
 

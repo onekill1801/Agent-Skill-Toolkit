@@ -143,7 +143,7 @@ def read_all_rows(scopes: dict, owner_group: str):
     """Đọc mới mọi repo (bỏ cache) ⇒ (rows, ok, webs) cho các scope."""
     rows, ok, webs = {sc: {} for sc in scopes}, {sc: set() for sc in scopes}, {}
     reg = gw._registry()
-    for key in _csv("FCHAT_ENV_REPOS"):
+    for key in gw.env_repos(reg):
         proj = reg.get(key)
         if not isinstance(proj, dict) or not proj.get("gitlab_project_id"):
             continue
@@ -334,7 +334,7 @@ def tick(board, now: float = None, mode: str = None) -> dict:
     digest:last / digest:since."""
     now = now or time.time()
     mode = mode or _cfg("FCHAT_ENV_WATCH_MODE", "shadow")
-    groups, repos = _csv("FCHAT_BOARD_GROUPS"), _csv("FCHAT_ENV_REPOS")
+    groups, repos = _csv("FCHAT_BOARD_GROUPS"), gw.env_repos()
     batch_envs = {e.lower() for e in _csv("FCHAT_ENV_DIGEST_ENVS", "dev")}
     out = {"mode": mode, "baseline": [], "changes": [], "delivered": [], "batched": [], "deferred": [],
            "digest": False, "table": {}}
@@ -435,7 +435,7 @@ def main(argv=None) -> int:
     ap.add_argument("--interval", type=int, default=int(_cfg("FCHAT_ENV_WATCH_INTERVAL", "600") or 600))
     a = ap.parse_args(argv)
     board = board_store.Board()
-    print(f"[{gw._now()}] env_watch: repos={_csv('FCHAT_ENV_REPOS')} groups={_csv('FCHAT_BOARD_GROUPS')} "
+    print(f"[{gw._now()}] env_watch: repos={len(gw.env_repos())} ({_cfg('FCHAT_ENV_REPOS')[:60]}) groups={_csv('FCHAT_BOARD_GROUPS')} "
           f"mode={_cfg('FCHAT_ENV_WATCH_MODE', 'shadow')} interval={a.interval}s")
     last = 0.0
     while True:
