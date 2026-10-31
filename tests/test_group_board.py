@@ -194,7 +194,7 @@ import group_watch as g
 from agent_skill_toolkit.core import board_store
 g._board = board_store.Board()
 queued, said = [], []
-g._work_q.put = lambda item: queued.append(item[0][4])
+g._enqueue = lambda *item: queued.append(item[0][4])
 FAIL = {"send": False}
 def fake_send(gid, text, gt=None, **k):
     if FAIL["send"]:

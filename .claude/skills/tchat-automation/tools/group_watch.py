@@ -35,6 +35,7 @@ Chạy:
 """
 
 import argparse
+import collections
 import json
 import os
 import queue
@@ -817,17 +818,47 @@ def _worker():
     Nhiều worker chạy song song → nhiều tác vụ cùng lúc. Lỗi ở một tin KHÔNG giết
     worker (các tin sau vẫn chạy). Kết quả ghi vào inbox (done / error)."""
     while True:
-        item, key = _work_q.get()
-        status, outcome = "done", ""
-        try:
-            _process_one(*item)
-        except Exception as e:  # noqa: BLE001
-            status, outcome = "error", str(e)
-            print(f"[{_now()}] [WARN] xử lý tin lỗi, bỏ qua tin này: {e}", file=sys.stderr)
-        finally:
-            if key:
-                _inbox_set(key[0], key[1], status, outcome)
-            _work_q.task_done()
+        lane = _work_q.get()                         # a lane with work; only this worker drains it now
+        while True:
+            with _lanes_lock:
+                q = _lanes[lane]
+                if not q:
+                    del _lanes[lane]                 # empty: the next message opens the lane again
+                    break
+                item, key = q.popleft()
+            _run_item(item, key)
+        _work_q.task_done()
+
+
+# (group, sender) -> that person's messages in arrival order. Lanes are assigned when a message is ENQUEUED (by
+# the single WS thread, in order), never by racing workers: a reply to "xác nhận T-1" must not go out before the
+# card of the "tạo task" sent just before it (seen live 30/10 with 3 workers; Codex R7).
+_lanes = {}
+_lanes_lock = threading.Lock()
+
+
+def _enqueue(item, key):
+    """Queue one message on its (group, sender) lane; a lane not being drained is handed to the worker pool."""
+    lane = (item[0], item[3])
+    with _lanes_lock:
+        q = _lanes.get(lane)
+        if q is None:
+            _lanes[lane] = collections.deque([(item, key)])
+            _work_q.put(lane)
+        else:
+            q.append((item, key))
+
+
+def _run_item(item, key):
+    status, outcome = "done", ""
+    try:
+        _process_one(*item)
+    except Exception as e:  # noqa: BLE001
+        status, outcome = "error", str(e)
+        print(f"[{_now()}] [WARN] xử lý tin lỗi, bỏ qua tin này: {e}", file=sys.stderr)
+    finally:
+        if key:
+            _inbox_set(key[0], key[1], status, outcome)
 
 
 # ── Inbox / outbox bền (group-workboard §3.2–§3.3) ─────────────────────────
@@ -1100,7 +1131,7 @@ def _handle(obj, gid_target, me, kws):
     # XẾP HÀNG thay vì spawn-rồi-bỏ: tin tới khi đang bận vẫn được xử lý sau.
     _inbox_set(gid, msg_id, "queued")
     mentions = _mentions(data)
-    _work_q.put(((gid, group_type, sender_name, sender, content, me, mentions), (gid, msg_id)))
+    _enqueue((gid, group_type, sender_name, sender, content, me, mentions), (gid, msg_id))
     tag = "[CMD]" if is_command else "[queued]"
     print(f"[{_now()}] {tag} {sender_name}: {content!r}  (chờ xử lý: {_work_q.qsize()})")
 

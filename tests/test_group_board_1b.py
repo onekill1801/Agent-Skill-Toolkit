@@ -164,7 +164,7 @@ step("again_denied", "U2", "review lại R-1")
 # _handle prefilter: '@bot tôi là ai' has no review keyword but is a board command
 kws = g._keywords()
 hq = []
-g._work_q.put = lambda item: hq.append(item[0][4])
+g._enqueue = lambda *item: hq.append(item[0][4])
 now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 for i, (snd, txt) in enumerate((("U1", "@bot tôi là ai"), ("U1", "tôi là ai"), ("U2", "@bot ping"))):
     g._handle({"type": "message", "data": {"type": "TEXT", "groupId": "G", "messageIdInc": 100 + i, "senderId": snd,

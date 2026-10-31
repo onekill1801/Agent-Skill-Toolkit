@@ -468,7 +468,7 @@ step("confirm", "U1", "xác nhận T-1")
 step("owner_draft", "ME", "tạo task: Việc của chủ nhóm")
 # _handle passes metadata.mentions to the worker
 hq = []
-g._work_q.put = lambda item: hq.append(item[0])
+g._enqueue = lambda *item: hq.append(item[0])
 now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 g._handle({"type": "message", "data": {"type": "TEXT", "groupId": "G", "messageIdInc": 300, "senderId": "U1",
            "content": "@bot tạo task: A | giao: @Huy", "createdAt": now, "user": {"displayName": "Lan"},
@@ -510,6 +510,63 @@ class GroupWatch3Test(unittest.TestCase):
                                            [{"target": "Huy", "userId": "U2", "offset": 22, "length": 4}]],
                                           ["@bot ping", "ME", [{"target": "Huy", "userId": "U2"}]],
                                           ["@bot ping", "ME", []], ["@bot ping", "ME", []], ["@bot ping", "ME", []]])
+
+
+ORDER = r'''
+import json, sys, threading, time
+sys.argv = ["x"]
+import group_watch as g
+done = []
+def proc(gid, gt, name, sender, text, me, mentions=()):
+    time.sleep({"a1": 0.4, "a2": 0.0, "a3": 0.1, "b1": 0.0}[text])
+    done.append(text)
+g._process_one = proc
+g._inbox_set = lambda *a, **k: None
+for _ in range(3):
+    threading.Thread(target=g._worker, daemon=True).start()
+for sender, text in (("A", "a1"), ("A", "a2"), ("B", "b1"), ("A", "a3")):
+    g._enqueue(("G", "T", sender, sender, text, "ME", []), None)
+g._work_q.join()
+time.sleep(0.6)
+first = list(done)
+# stress: 30 interleaved messages of 3 people, random work time — each person's order must hold
+import random
+random.seed(7)
+done.clear()
+delays = {}
+def proc2(gid, gt, name, sender, text, me, mentions=()):
+    time.sleep(delays[text])
+    done.append(text)
+g._process_one = proc2
+sent = []
+for i in range(30):
+    who = "PQR"[random.randrange(3)]
+    text = f"{who}{i:02d}"
+    delays[text] = random.random() * 0.03
+    sent.append(text)
+    g._enqueue(("G", "T", who, who, text, "ME", []), None)
+g._work_q.join()
+time.sleep(0.2)
+print(json.dumps({"done": first, "lanes": len(g._lanes), "stress": done, "sent": sent}))
+'''
+
+
+class WorkerOrderTest(unittest.TestCase):
+    def test_one_sender_in_order(self):                                                  # seen live 30/10
+        from test_group_board import _tmpdb
+        db = _tmpdb()
+        env = dict(os.environ, TOOLKIT_STORE=db, TOOLKIT_STATE_DIR=os.path.dirname(db), PYTHONIOENCODING="utf-8")
+        p = subprocess.run([sys.executable, "-c", ORDER], cwd=str(ROOT / ".claude" / "skills" / "tchat-automation" / "tools"),
+                           env=env, capture_output=True, text=True, encoding="utf-8", timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr[-2000:])
+        out = json.loads(p.stdout.strip().splitlines()[-1])
+        a = [t for t in out["done"] if t.startswith("a")]
+        self.assertEqual(a, ["a1", "a2", "a3"])                                         # A: in order
+        self.assertLess(out["done"].index("b1"), out["done"].index("a1"))                 # B did not wait for A
+        self.assertEqual(out["lanes"], 0)
+        for who in "PQR":
+            self.assertEqual([t for t in out["stress"] if t[0] == who], [t for t in out["sent"] if t[0] == who])
+        self.assertEqual(sorted(out["stress"]), sorted(out["sent"]))                       # none lost / doubled
 
 
 @unittest.skipUnless((EXT / "board.js").exists() and shutil.which("node"), "extension folder / node not found")
