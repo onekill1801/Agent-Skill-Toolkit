@@ -151,7 +151,7 @@ def resolve_assignee(raw: str, mentions, team: dict, requester: dict):
     h = (rec or {}).get("handles") or {}
     atask = str(h.get("atask_user_id") or "")
     if not rec or not atask.isdigit() or not str(h.get("fchat_id") or "").strip():
-        return None, f"'{label}' chưa liên kết đủ FChat + aTask trong danh bạ (team.py set … --fchat-id … --atask-id …)"
+        return None, f"'{label}' chưa liên kết đủ FChat + aTask trong danh bạ (skill team-registry: set … --fchat-id … --atask-id …)"
     if sum(1 for r in team.values() if isinstance(r, dict)
            and str((r.get("handles") or {}).get("atask_user_id") or "") == atask) > 1:
         return None, f"tài khoản aTask của '{label}' gắn với nhiều hồ sơ trong danh bạ — báo chủ nhóm sửa"

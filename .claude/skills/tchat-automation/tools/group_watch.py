@@ -545,6 +545,29 @@ def _provenance(job):
     return lookup
 
 
+_lastgood_cache = {}                                   # job → newest successful build with its pushes (immutable)
+
+
+def _lastgood(job):
+    """`jenkins.py lastgood` — console read only when the job has a NEW successful build (finished builds never change)."""
+    def read():
+        known = (_lastgood_cache.get(job) or {}).get("number") or 0
+        try:
+            p = subprocess.run([sys.executable, os.path.join(_DEV_DIR, "jenkins.py"), "lastgood", "--path", job,
+                                "--known", str(known)], capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=120)
+            out = json.loads(p.stdout or "{}")
+        except (subprocess.TimeoutExpired, ValueError):
+            return {"error": True, "message": "hết giờ / trả về lạ"}
+        good = out.get("good") or {}
+        if good.get("number") and good["number"] == known:
+            out["good"] = {**_lastgood_cache[job], **good}
+        elif good.get("number") and "pushes" in good:
+            _lastgood_cache[job] = good
+        return out
+    return read
+
+
 def _env_snapshots(key, proj, show_prod=None):
     """Snapshot của từng env (cache 5′) — k8s đọc song song, GitLab tag → commit. show_prod=None ⇒ FCHAT_ENV_SHOW_PROD."""
     from concurrent.futures import ThreadPoolExecutor
@@ -561,7 +584,8 @@ def _env_snapshots(key, proj, show_prod=None):
             return hit[1]
         try:
             snap = envmap.snapshot(t, _k8s_workload(key, t) if t.get("target") else {}, gl.tag,
-                                   _provenance(t["job"]) if t.get("job") else None, gl.tag_names)
+                                   _provenance(t["job"]) if t.get("job") else None, gl.tag_names,
+                                   _lastgood(t["job"]) if t.get("job") else None)
         except Exception as e:  # noqa: BLE001 — one env failing must not sink the whole answer (not cached)
             print(f"[{_now()}] [WARN] env {key}/{t['env']}: {type(e).__name__}: {e}", file=sys.stderr)
             return {"env": t["env"], "level": "unknown", "branch": t.get("branch") or "", "commit": "",

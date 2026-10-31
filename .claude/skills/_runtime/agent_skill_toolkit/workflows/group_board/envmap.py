@@ -21,7 +21,8 @@ import time
 
 from agent_skill_toolkit.core.board_store import parse_ts
 
-LEVEL = {"verified": "✅ đã xác minh", "inferred": "🟡 suy ra", "unknown": "❔ chưa xác minh", "drift": "⚠ lệch"}
+LEVEL = {"verified": "✅ đã xác minh", "inferred": "🟡 suy ra", "unknown": "❔ chưa xác minh", "drift": "⚠ lệch",
+         "built": "🔨 theo build Jenkins"}
 SKIP_ENVS = ("local",)
 
 
@@ -74,13 +75,46 @@ def newer_tags(prefix: str, version: str, names: list) -> list:
     return sorted(out, key=lambda n: _vkey(n[len(prefix):]), reverse=True)
 
 
-def snapshot(t: dict, workload: dict, tag_lookup, provenance=None, tag_names=None) -> dict:
+def from_build(s: dict, t: dict, lg: dict, tag_lookup=None) -> dict:
+    """No k8s workload declared: the newest SUCCESSFUL build of the env's job (`jenkins.py lastgood`) — what was
+    most likely deployed, never proof of what runs (level "built"). Pure, tested."""
+    s["notes"].append("chưa khai workload k8s — theo build Jenkins thành công gần nhất, chưa xác minh pod")
+    if not isinstance(lg, dict) or lg.get("error"):
+        s["notes"].append(f"không đọc được Jenkins ({(lg or {}).get('message') or 'lỗi'})")
+        return s
+    good, last = lg.get("good") or {}, lg.get("last") or {}
+    if not good.get("number"):
+        s["notes"].append("job chưa có build thành công nào")
+        return s
+    versions = sorted({p.get("version") for p in good.get("pushes") or [] if p.get("version")})
+    s.update(level="built", version=",".join(versions), commit=good.get("commit_sha") or "",
+             built_at=(good.get("timestamp") or 0) / 1000.0,
+             build={"number": good["number"], "result": "SUCCESS", "url": good.get("url"),
+                    "timestamp": good.get("timestamp")})
+    if not s["commit"] and len(versions) == 1 and t.get("tag_prefix") and tag_lookup:
+        tag = tag_lookup(t["tag_prefix"] + versions[0]) or {}
+        if tag.get("commit_id"):
+            s["commit"], s["tag"] = tag["commit_id"], t["tag_prefix"] + versions[0]
+    if good.get("log_error"):
+        s["notes"].append(f"không đọc được log build #{good['number']} ({good['log_error']})")
+    elif not versions:
+        s["notes"].append(f"build #{good['number']} không push image nào (theo log)")
+    if last.get("number") and last["number"] != good["number"]:
+        what = "đang chạy" if last.get("building") else (last.get("result") or "?")
+        s["notes"].append(f"build mới hơn #{last['number']} {what}")
+    return s
+
+
+def snapshot(t: dict, workload: dict, tag_lookup, provenance=None, tag_names=None, lastgood=None) -> dict:
     """t = one env_targets() item; workload = `k8s.py workload` JSON or an error dict;
     tag_lookup(name) -> {commit_id, created_at} | error dict;
-    provenance(version) -> `jenkins.py provenance` JSON (found, number, result, url, digest, git_tag) | None."""
+    provenance(version) -> `jenkins.py provenance` JSON (found, number, result, url, digest, git_tag) | None;
+    lastgood() -> `jenkins.py lastgood` JSON, used only when no k8s workload is declared."""
     s = {"env": t["env"], "branch": t.get("branch") or "", "scanned_at": t.get("scanned_at") or "",
          "level": "unknown", "version": "", "commit": "", "tag": "", "notes": [], "observed_at": time.time()}
     if not t.get("target"):
+        if lastgood and t.get("job"):
+            return from_build(s, t, lastgood(), tag_lookup)
         s["notes"].append("chưa khai workload k8s cho env này")
         return s
     if not isinstance(workload, dict) or workload.get("error"):
@@ -275,7 +309,7 @@ def mr_text(repo: str, web: str, mr: dict, rows: list, snaps: list) -> str:
 # ---------------------------------------------------------------- snapshot table (extension "Môi trường" tab)
 SNAPSHOT_HEAD = "🌐 [ENV-SNAPSHOT]"
 DELTA_HEAD = "🌐 [ENV-DELTA]"
-_ICON = {"verified": "✅", "inferred": "🟡", "unknown": "❔", "drift": "⚠"}
+_ICON = {"verified": "✅", "inferred": "🟡", "unknown": "❔", "drift": "⚠", "built": "🔨"}
 
 
 def _cell(v) -> str:
@@ -286,25 +320,55 @@ def snapshot_row(repo: str, s: dict) -> str:
     """One table row: repo | env | mức | phiên bản | commit | lên lúc | nhánh | build ('—' = unknown)."""
     return " | ".join(_cell(x) for x in (
         repo, s.get("env"), _ICON.get(s.get("level") or "unknown", "❔"), s.get("version"), s.get("commit"),
-        _when(s.get("rs_created_at") or ""), s.get("branch"), (s.get("build") or {}).get("url")))
+        _when(s.get("rs_created_at") or s.get("built_at") or ""), s.get("branch"), (s.get("build") or {}).get("url")))
 
 
 def _head(kind: str, title: str, now: float, scope: str, seq) -> str:
     return f"{kind} {title} · {time.strftime('%d/%m %H:%M', time.localtime(now))} · {scope}" + (f" · #{seq}" if seq else "")
 
 
-def table_text(kind: str, rows: dict, webs: dict, scope: str, seq: int, now: float = None) -> str:
-    """kind "SNAPSHOT" (whole table) or "DELTA" (changed rows only); rows = {"repo|env": row} in display order."""
+PART_CHARS = 6000                                      # one chat message; a bigger table travels in parts
+
+
+def table_parts(kind: str, rows: dict, webs: dict, scope: str, seq: int, now: float = None,
+                limit: int = None) -> list:
+    """kind "SNAPSHOT" (whole table) or "DELTA" (changed rows only); rows = {"repo|env": row} in display order.
+    Split by whole repo blocks into messages of ≤ limit chars; n > 1 ⇒ title "… (i/n)", same time + #seq in every
+    part (the board uses a table only once it holds every part of it). The limit counts the header too; a repo
+    whose rows alone exceed it is split by rows, its `repo | …` line repeated in each part."""
     now = now or time.time()
     head = (SNAPSHOT_HEAD, "Bảng môi trường") if kind == "SNAPSHOT" else (DELTA_HEAD, "Môi trường đổi")
-    lines = [_head(head[0], head[1], now, scope, seq)]
     by_repo = {}
     for k, row in rows.items():
         by_repo.setdefault(k.split("|", 1)[0], []).append(row)
+    limit = limit or PART_CHARS
+    budget = limit - len(_head(head[0], head[1] + " (999/999)", now, scope, seq)) - 1
+    blocks = []
     for repo in sorted(by_repo):
-        lines.append(f"repo | {_cell(repo)} | {_cell((webs or {}).get(repo))}")
-        lines += by_repo[repo]
-    return "\n".join(lines)
+        top = f"repo | {_cell(repo)} | {_cell((webs or {}).get(repo))}"
+        b = [top]
+        for row in by_repo[repo]:
+            if len(b) > 1 and sum(len(x) + 1 for x in b) + len(row) + 1 > budget:
+                blocks.append(b)
+                b = [top]
+            b.append(row)
+        blocks.append(b)
+    chunks, cur, size = [], [], 0
+    for b in blocks:
+        n = sum(len(x) + 1 for x in b)
+        if cur and size + n > budget:
+            chunks.append(cur)
+            cur, size = [], 0
+        cur, size = cur + b, size + n
+    chunks.append(cur)
+    total = len(chunks)
+    return ["\n".join([_head(head[0], head[1] + (f" ({i}/{total})" if total > 1 else ""), now, scope, seq)] + c)
+            for i, c in enumerate(chunks, 1)]
+
+
+def table_text(kind: str, rows: dict, webs: dict, scope: str, seq: int, now: float = None) -> str:
+    """The whole table as ONE message (tests / small tables); senders use table_parts."""
+    return table_parts(kind, rows, webs, scope, seq, now, limit=10 ** 9)[0]
 
 
 def snapshot_text(repos: list, now: float = None, scope: str = "nhóm", seq: int = 0) -> str:

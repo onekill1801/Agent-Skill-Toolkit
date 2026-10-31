@@ -153,12 +153,21 @@ def _send_table(gid: str, text: str) -> bool:
 
 
 def _flush_pending(board, sc: str) -> bool:
-    """Gửi tin chờ của scope cho nơi còn thiếu (tiến độ ghi sau MỖI nơi); đủ ⇒ dòng đã gửi + xoá tin chờ, một transaction."""
+    """Gửi tin chờ của scope cho nơi còn thiếu (tiến độ ghi sau MỖI phần, MỖI nơi); đủ ⇒ dòng đã gửi + xoá tin chờ,
+    một transaction. Tin nhiều phần: nơi nhận tiếp tục từ phần chưa gửi. Bảo đảm ÍT NHẤT MỘT LẦN: crash ngay sau khi
+    gửi mà chưa ghi tiến độ ⇒ đúng phần đó gửi lại (cùng nội dung; extension ghép trùng phần vô hại)."""
     pend = board.meta_get(_tk("pend", sc))
     if not pend:
         return True
+    texts = pend.get("texts") or [pend["text"]]
+    done_parts = pend.setdefault("parts", {})
     for g in list(pend["left"]):
-        if _send_table(g, pend["text"]):
+        while done_parts.get(g, 0) < len(texts):
+            if not _send_table(g, texts[done_parts.get(g, 0)]):
+                break
+            done_parts[g] = done_parts.get(g, 0) + 1
+            board.meta_set(_tk("pend", sc), pend)
+        if done_parts.get(g, 0) >= len(texts):
             pend["left"].remove(g)
             board.meta_set(_tk("pend", sc), pend)
     if pend["left"]:
@@ -177,9 +186,9 @@ def _queue(board, sc: str, targets: list, kind: str, rows: dict, webs: dict, now
     """Cấp số + dựng tin + ghi tin chờ TRONG MỘT transaction, rồi mới gửi (_flush_pending)."""
     def q(get, put):
         seq = int(get(_tk("seq", sc), 0) or 0) + 1
-        text = gw.board_render.defuse_body(envmap.table_text(kind, rows, webs, sc, seq, now))
+        texts = [gw.board_render.defuse_body(t) for t in envmap.table_parts(kind, rows, webs, sc, seq, now)]
         put(_tk("seq", sc), seq)
-        put(_tk("pend", sc), {"seq": seq, "text": text, "left": list(targets), "rows": rows})
+        put(_tk("pend", sc), {"seq": seq, "texts": texts, "left": list(targets), "rows": rows})
         return seq
     return board.meta_txn(q)
 
@@ -207,12 +216,41 @@ def table_pass(board, scopes: dict, rows: dict, ok: dict, webs: dict, now: float
             out[sc] = "pending"
             continue
         for r in [r for r in requests if r.get("scope") == sc]:
-            d = board.meta_get(_tk("drows", sc)) or {}
-            cur = {k: d.get(k) or rows[sc][k] for k in rows[sc]}
-            text = gw.board_render.defuse_body(envmap.table_text("SNAPSHOT", cur, webs, sc,
-                                                                  int(board.meta_get(_tk("seq", sc), 0) or 0), now))
-            r["done"] = _send_table(r["group"], text)
+            r["done"] = _answer(board, sc, r, rows, webs, now)
     return out
+
+
+def _answer(board, sc: str, r: dict, rows: dict, webs: dict, now: float) -> bool:
+    """Cả bảng cho một nơi hỏi. Các phần dựng MỘT lần và lưu bền (envtable:ans:<req>:<scope>:<group>) cùng tiến độ
+    sau MỖI phần ⇒ lỗi / crash gửi tiếp đúng các phần cũ (cùng giờ + số: extension ghép được), không dựng lại.
+    Crash ngay sau khi gửi mà chưa kịp ghi tiến độ ⇒ phần đó gửi lại (ít nhất một lần; extension ghép trùng vô hại)."""
+    key = _tk("ans", r.get("req") or "-", sc, r["group"])
+    a = board.meta_get(key)
+    if not a:
+        d = board.meta_get(_tk("drows", sc)) or {}
+        cur = {k: d.get(k) or rows[sc][k] for k in rows[sc]}
+        a = {"texts": [gw.board_render.defuse_body(t) for t in envmap.table_parts(
+            "SNAPSHOT", cur, webs, sc, int(board.meta_get(_tk("seq", sc), 0) or 0), now)], "sent": 0}
+        board.meta_set(key, a)
+    while a["sent"] < len(a["texts"]):
+        if not _send_table(r["group"], a["texts"][a["sent"]]):
+            return False
+        a["sent"] += 1
+        board.meta_set(key, a)
+    board.meta_set(key, None)
+    return True
+
+
+def _drop_stale(reqs: list, put, now: float) -> list:
+    """Yêu cầu quá cũ (env_watch dừng rất lâu, người hỏi đã được báo): bỏ, cùng các phần trả lời đã dựng sẵn của nó."""
+    keep = []
+    for q in reqs:
+        if now - (q.get("at") or now) <= REQ_MAX_AGE_S:
+            keep.append(q)
+            continue
+        for a in q.get("left") or []:
+            put(_tk("ans", q.get("id") or "-", a["scope"], a["group"]), None)
+    return keep
 
 
 def serve_requests(board, now: float = None) -> list:
@@ -222,8 +260,7 @@ def serve_requests(board, now: float = None) -> list:
     now = now or time.time()
     reqs = [r for r in (board.meta_get(REQ_KEY, []) or []) if now - (r.get("at") or now) <= REQ_MAX_AGE_S]
     if not reqs:                                      # hàng chỉ còn yêu cầu quá cũ: dọn, không gửi gì (Codex resume R1)
-        board.meta_txn(lambda get, put: put(REQ_KEY, [q for q in (get(REQ_KEY, []) or [])
-                                                      if now - (q.get("at") or now) <= REQ_MAX_AGE_S]))
+        board.meta_txn(lambda get, put: put(REQ_KEY, _drop_stale(get(REQ_KEY, []) or [], put, now)))
         return []
     owner_group = _cfg("FCHAT_ENV_OWNER_GROUP", "").strip()
     scopes = table_scopes(_csv("FCHAT_BOARD_GROUPS"), owner_group)
@@ -240,9 +277,7 @@ def serve_requests(board, now: float = None) -> list:
 
     def settle(get, put):                             # theo id: yêu cầu mới xếp thêm trong lúc gửi vẫn giữ nguyên
         keep = []
-        for q in get(REQ_KEY, []) or []:
-            if now - (q.get("at") or now) > REQ_MAX_AGE_S:
-                continue                              # quá cũ (env_watch dừng rất lâu): bỏ, người hỏi đã được báo
+        for q in _drop_stale(get(REQ_KEY, []) or [], put, now):
             mine = [a for a in asks if a["req"] == q.get("id")]
             if not mine:
                 keep.append(q)
@@ -298,6 +333,8 @@ def tick(board, now: float = None, mode: str = None) -> dict:
             env = s["env"]
             if env.lower() in prot:
                 continue                              # prod: không thẻ E / tổng hợp cho nhóm chung
+            if s.get("level") == "built":
+                continue                              # theo Jenkins, không phải pod đang chạy: chỉ vào bảng, không thẻ E
             prev = board.meta_get(_k(mode, "snap", key, env))
             if prev is None:
                 if s.get("version"):

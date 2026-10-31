@@ -344,6 +344,23 @@ def cmd_builds(args) -> dict:
     return {"builds": out, "me": config.get("JENKINS_USER") or ""}
 
 
+def cmd_lastgood(args) -> dict:
+    """Read-only: newest build + newest SUCCESSFUL build of the job; for the successful one also what it pushed
+    (find_build_pushes). --known N = the caller already holds build N's pushes ⇒ skip the console read."""
+    base, jp = _base(), _job_path(args)
+    tree = "lastBuild[number,result,timestamp,url,building],lastSuccessfulBuild[number,timestamp,url]"
+    st, _, body = _req("GET", f"{base}/{jp}/api/json?tree={tree}")
+    if st != 200 or not body:
+        return {"error": True, "status": st, "message": f"job read failed: HTTP {st}"}
+    d = json.loads(body)
+    last, good = d.get("lastBuild") or {}, d.get("lastSuccessfulBuild") or {}
+    out = {"last": last, "good": good}
+    if good.get("number") and good["number"] != args.known:
+        st, _, log = _req("GET", f"{base}/{jp}/{int(good['number'])}/consoleText")
+        good.update(find_build_pushes(log) if st == 200 else {"log_error": f"HTTP {st}"})
+    return out
+
+
 def cmd_confighash(args) -> dict:
     """Read-only: sha256 of the job's config.xml (a deploy approval binds to it); {"hash": ""} when not readable."""
     import hashlib
@@ -409,6 +426,8 @@ def main() -> int:
     bl = sub.add_parser("builds", parents=[common])        # read-only: newest builds
     bl.add_argument("--limit", type=int, default=10)
     sub.add_parser("confighash", parents=[common])         # read-only: sha256 of config.xml
+    lg = sub.add_parser("lastgood", parents=[common])      # read-only: newest + newest successful build
+    lg.add_argument("--known", type=int, default=0)
     pv = sub.add_parser("provenance", parents=[common])   # read-only: build that pushed a version
     pv.add_argument("--version", required=True)
     pv.add_argument("--builds", type=int, default=40)
@@ -444,6 +463,8 @@ def main() -> int:
             out = cmd_builds(args)
         elif args.action == "confighash":
             out = cmd_confighash(args)
+        elif args.action == "lastgood":
+            out = cmd_lastgood(args)
         else:
             out = {"number": args.number, "console_tail": _console(args, args.number, args.tail)}
     except ValueError as e:

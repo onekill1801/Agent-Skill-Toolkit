@@ -1,0 +1,172 @@
+"""Env table for every repo (31/10): envs without a declared k8s workload are filled from the job's newest
+SUCCESSFUL Jenkins build (level "built" 🔨 — never proof of what runs), and a big table travels in parts that the
+extension joins back (a crash mid-way resumes at the next part)."""
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / ".claude" / "skills" / "_runtime"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from agent_skill_toolkit.workflows.group_board import envmap  # noqa: E402
+
+EXT = Path(os.environ.get("FQR_EXT_DIR") or ROOT.parent / "fpt-chat-quick-reply")
+T = {"env": "dev", "target": "", "job": "job/DEV/job/x", "branch": "develop", "tag_prefix": ""}
+GOOD = {"number": 77, "timestamp": 1761000000000, "url": "http://j/77/", "commit_sha": "c" * 40,
+        "pushes": [{"image": "reg/x", "version": "0.0.69", "digest": "sha256:" + "1" * 64}]}
+
+
+class FromBuildTest(unittest.TestCase):
+    def snap(self, lg, t=T, tag=None):
+        return envmap.snapshot(t, {}, tag or (lambda n: {}), None, None, lambda: lg)
+
+    def test_newest_successful_build(self):
+        s = self.snap({"good": GOOD, "last": {"number": 79, "result": "FAILURE"}})
+        self.assertEqual((s["level"], s["version"], s["commit"], s["build"]["number"]), ("built", "0.0.69", "c" * 40, 77))
+        self.assertIn("chưa xác minh pod", s["notes"][0])
+        self.assertIn("build mới hơn #79 FAILURE", s["notes"][-1])
+        row = envmap.snapshot_row("x", s)
+        self.assertTrue(row.startswith("x | dev | 🔨 | 0.0.69 | " + "c" * 40))
+        self.assertTrue(row.endswith("| develop | http://j/77/"))
+
+    def test_no_sha_uses_git_tag_and_errors_stay_unknown(self):
+        s = self.snap({"good": {**GOOD, "commit_sha": ""}, "last": {"number": 77}}, {**T, "tag_prefix": "v"},
+                      lambda n: {"commit_id": "d" * 40} if n == "v0.0.69" else {})
+        self.assertEqual((s["commit"], s["tag"]), ("d" * 40, "v0.0.69"))
+        self.assertEqual(self.snap({"error": True, "message": "HTTP 403"})["level"], "unknown")
+        self.assertEqual(self.snap({"good": {}, "last": {"number": 3, "result": "FAILURE"}})["level"], "unknown")
+        self.assertEqual(envmap.snapshot(T, {}, lambda n: {})["level"], "unknown")   # no lastgood reader: as before
+
+    def test_parts_split_by_repo_and_join(self):
+        rows = {f"r{i:02d}|dev": f"r{i:02d} | dev | 🔨 | 1 | {'c' * 40} | 01/10 10:00 | develop | http://j/{i}/"
+                for i in range(30)}
+        parts = envmap.table_parts("SNAPSHOT", rows, {}, "nhóm", 4, now=1761000000.0, limit=1000)
+        self.assertGreater(len(parts), 1)
+        n = len(parts)
+        for i, p in enumerate(parts, 1):
+            self.assertLessEqual(len(p), 1000)                                   # header counted
+            self.assertIn(f"Bảng môi trường ({i}/{n}) · ", p.splitlines()[0])
+            self.assertTrue(p.splitlines()[0].endswith(" · nhóm · #4"))
+            self.assertEqual(p.splitlines()[1][:7], "repo | ")                   # a part starts with a whole repo block
+        joined = [ln for p in parts for ln in p.splitlines()[1:]]
+        self.assertEqual(joined, envmap.table_text("SNAPSHOT", rows, {}, "nhóm", 4, now=1761000000.0).splitlines()[1:])
+        self.assertEqual(len(envmap.table_parts("DELTA", dict(list(rows.items())[:2]), {}, "nhóm", 5)), 1)
+        big = {f"big|e{i:02d}": f"big | e{i:02d} | 🔨 | 1 | {'c' * 40} | 01/10 10:00 | develop | http://j/{i}/"
+               for i in range(30)}                                                # one repo bigger than a message
+        parts = envmap.table_parts("SNAPSHOT", big, {}, "chủ nhóm", 7, now=1761000000.0, limit=1000)
+        self.assertGreater(len(parts), 1)
+        for p in parts:
+            self.assertLessEqual(len(p), 1000)
+            self.assertTrue(p.splitlines()[1].startswith("repo | big | "))
+        self.assertEqual(sum(len(p.splitlines()) - 2 for p in parts), 30)
+
+    @unittest.skipUnless((EXT / "tests" / "parse_cli.js").exists(), "extension missing")
+    def test_extension_joins_parts(self):
+        rows = {f"r{i:02d}|dev": f"r{i:02d} | dev | 🔨 | 1 | {'c' * 40} | 01/10 10:00 | develop | http://j/{i}/"
+                for i in range(30)}
+        parts = envmap.table_parts("SNAPSHOT", rows, {}, "nhóm", 4, now=1761000000.0, limit=1000)
+        msgs = [{"id": f"m{i}", "messageIdInc": i + 1, "senderId": "BOT", "type": "TEXT", "content": p,
+                 "createdAt": f"2026-10-31T10:00:0{i}Z", "user": {"displayName": "Chung"}, "metadata": {}}
+                for i, p in enumerate(parts)]
+        f = Path(tempfile.mkdtemp(prefix="gb5-")) / "m.json"
+        for label, ms, want in (("all", msgs, 30), ("missing", msgs[:-1], None)):
+            f.write_text(json.dumps(ms, ensure_ascii=False), encoding="utf-8")
+            p = subprocess.run(["node", str(EXT / "tests" / "parse_cli.js"), str(f), "BOT", "--env"],
+                               capture_output=True, text=True, encoding="utf-8", timeout=60)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            env = json.loads(p.stdout).get("env")
+            self.assertEqual(env and len(env["rows"]), want, label)              # incomplete table never shown
+
+
+FLUSH = r'''
+import json, sys
+sys.argv = ["x"]
+import env_watch as ew
+from agent_skill_toolkit.core import board_store
+b = board_store.Board()
+sent, FAIL = [], {"at": None}
+def send(gid, text, gt=None, **k):
+    if FAIL["at"] == (gid, text.splitlines()[0]):
+        return {"error": True}
+    sent.append((gid, text.splitlines()[0].split(" (")[1][:3]))
+    return {"sent": True}
+ew.gw.send.send_text = send
+ew.envmap.PART_CHARS = 200
+rows = {f"r{i}|dev": f"r{i} | dev | 🔨 | 1 | {'c' * 40} | 01/10 10:00 | develop | http://j/{i}/" for i in range(4)}
+ew._queue(b, "nhóm", ["G", "H"], "SNAPSHOT", rows, {}, 1761000000.0)
+texts = b.meta_get("envtable:pend:nhóm")["texts"]
+FAIL["at"] = ("H", texts[2].splitlines()[0])
+r1 = ew._flush_pending(b, "nhóm")
+s1 = list(sent); sent.clear()
+FAIL["at"] = None
+r2 = ew._flush_pending(b, "nhóm")
+print(json.dumps({"n": len(texts), "r": [r1, r2], "s1": s1, "s2": sent,
+                  "drows": sorted(b.meta_get("envtable:drows:nhóm") or {}), "pend": b.meta_get("envtable:pend:nhóm")}))
+'''
+
+
+ANSWER = r'''
+import json, sys
+sys.argv = ["x"]
+import env_watch as ew
+from agent_skill_toolkit.core import board_store
+b = board_store.Board()
+sent, FAIL = [], {"n": None}
+def send(gid, text, gt=None, **k):
+    if FAIL["n"] is not None and len(sent) == FAIL["n"]:
+        return {"error": True}
+    sent.append(text.splitlines()[0])
+    return {"sent": True}
+ew.gw.send.send_text = send
+ew.envmap.PART_CHARS = 250
+rows = {"nhóm": {f"r{i}|dev": f"r{i} | dev | 🔨 | 1 | {'c' * 40} | 01/10 10:00 | develop | http://j/{i}/" for i in range(4)}}
+r = {"scope": "nhóm", "group": "G", "req": "q1"}
+FAIL["n"] = 2
+d1 = ew._answer(b, "nhóm", r, rows, {}, 1761000000.0)
+s1 = list(sent)
+FAIL["n"] = None
+rows["nhóm"]["r0|dev"] = rows["nhóm"]["r0|dev"].replace("| 1 |", "| 2 |")   # data changed meanwhile: parts kept
+d2 = ew._answer(b, "nhóm", r, rows, {}, 1761000600.0)
+left = b.meta_get("envtable:ans:q1:nhóm:G")
+# a failed answer, then env_watch down for long: the stale request AND its prepared parts are dropped
+FAIL["n"] = len(sent) + 1
+ew._answer(b, "nhóm", {"scope": "nhóm", "group": "G", "req": "q2"}, rows, {}, 1761000000.0)
+b.meta_set(ew.REQ_KEY, [{"id": "q2", "at": 1761000000.0, "left": [{"scope": "nhóm", "group": "G"}]}])
+held = bool(b.meta_get("envtable:ans:q2:nhóm:G"))
+asks = ew.serve_requests(b, now=1761000000.0 + ew.REQ_MAX_AGE_S + 1)
+print(json.dumps({"d": [d1, d2], "s1": s1, "s2": sent[len(s1):len(s1) + 2], "left": left,
+                  "stale": [held, asks, b.meta_get(ew.REQ_KEY), b.meta_get("envtable:ans:q2:nhóm:G")]}))
+'''
+
+
+class AnswerPartsTest(unittest.TestCase):
+    def test_answer_resumes_same_parts(self):
+        from test_group_board import _run_tchat, _tmpdb
+        out = _run_tchat(ANSWER, _tmpdb())
+        self.assertEqual(out["d"], [False, True])
+        self.assertEqual(len(out["s1"]), 2)
+        self.assertEqual(len({h.split(" · ")[1] for h in out["s1"] + out["s2"]}), 1)  # same time stamp in every part
+        self.assertEqual([h.split("(")[1][:3] for h in out["s2"]], [f"{i}/4" for i in range(3, 5)])
+        self.assertIsNone(out["left"])
+        self.assertEqual(out["stale"], [True, [], [], None])
+
+
+class FlushPartsTest(unittest.TestCase):
+    def test_resume_at_next_part(self):
+        from test_group_board import _run_tchat, _tmpdb
+        out = _run_tchat(FLUSH, _tmpdb())
+        n = out["n"]
+        self.assertEqual(n, 4)
+        self.assertEqual(out["r"], [False, True])
+        self.assertEqual(out["s1"], [["G", f"{i}/{n}"] for i in range(1, n + 1)] + [["H", "1/4"], ["H", "2/4"]])
+        self.assertEqual(out["s2"], [["H", "3/4"], ["H", "4/4"]])                  # parts already sent: not again
+        self.assertEqual((out["drows"], out["pend"]), ([f"r{i}|dev" for i in range(4)], None))
+
+
+if __name__ == "__main__":
+    unittest.main()
