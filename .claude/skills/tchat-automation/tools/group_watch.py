@@ -46,6 +46,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 runpy.run_path(str(Path(__file__).resolve().parents[2] / "_runtime" / "bootstrap.py"))["activate"]()
@@ -581,30 +582,26 @@ def env_repos() -> list:
     return [r.strip() for r in (rccfg.get("FCHAT_ENV_REPOS") or "").split(",") if r.strip()]
 
 
-def env_snapshot_text(show_prod: bool, scope: str) -> str:
-    """Ảnh chụp mọi repo FCHAT_ENV_REPOS (bảng môi trường của extension). '' khi chưa bật repo nào."""
-    reg = _registry()
-    rows = [(k, _gitlab_web(reg[k]), _env_snapshots(k, reg[k], show_prod=show_prod))
-            for k in env_repos() if isinstance(reg.get(k), dict)]
-    return board_render.defuse_body(envmap.snapshot_text(rows, scope=scope)) if rows else ""
-
-
 def _env_all(gid, group_type, sender_name, sender_id, me):
-    """@bot env ⇒ ảnh chụp cho nhóm (prod theo FCHAT_ENV_SHOW_PROD); chủ nhóm hỏi ⇒ thêm bản CÓ prod vào nhóm riêng."""
-    try:
-        text = env_snapshot_text(False, "nhóm")       # bảng chung: KHÔNG BAO GIỜ có prod (kể cả FCHAT_ENV_SHOW_PROD=1)
-    except (OSError, ValueError) as e:
-        _post_inline(gid, group_type, f"⚠️ @{sender_name}: bot không đọc được danh sách project ({type(e).__name__}).",
-                     [(sender_name, sender_id)])
-        return
-    if not text:
+    """@bot env ⇒ xếp yêu cầu cho env_watch (nơi DUY NHẤT gửi bảng môi trường: số thứ tự không bao giờ trùng);
+    env_watch trả lời trong vài giây: thay đổi cho mọi nhóm nếu có, rồi cả bảng cho nhóm này (+ bản có prod vào
+    nhóm riêng nếu người hỏi là chủ nhóm)."""
+    if not env_repos():
         _post_inline(gid, group_type, f"🤖 @{sender_name}: chưa bật bản đồ môi trường — {_OWNER['name']} khai repo trong "
                                       "FCHAT_ENV_REPOS.", [(sender_name, sender_id)])
         return
-    _post_inline(gid, group_type, text, [])
-    owner_group = (rccfg.get("FCHAT_ENV_OWNER_GROUP") or "").strip()
-    if me and sender_id == me and owner_group:
-        _post_inline(owner_group, None, env_snapshot_text(True, "chủ nhóm"), [])
+    hb = daemon_common.last_heartbeat("env_watch") if daemon_common is not None else {}
+    if (hb or {}).get("age") is None or hb["age"] > ENV_WATCH_STALE_S:
+        _post_inline(gid, group_type, f"🤖 @{sender_name}: bảng môi trường do env_watch gửi mà env_watch chưa chạy — "
+                                      f"báo {_OWNER['name']}. Hỏi từng repo vẫn được: @bot env <repo>",
+                     [(sender_name, sender_id)])
+        return
+    req = {"id": uuid.uuid4().hex, "group": str(gid), "owner": bool(me) and sender_id == me, "at": time.time()}
+    with _board_lock:
+        _board.meta_txn(lambda get, put: put("envtable:req", (get("envtable:req", []) or []) + [req]))
+
+
+ENV_WATCH_STALE_S = 120
 
 
 def _env_command(gid, group_type, sender_name, sender_id, name, args):

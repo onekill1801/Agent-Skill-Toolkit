@@ -490,6 +490,13 @@ step("bad", "U1", "@bot tạo task: x | list: 99")
 step("confirm_other", "U2", "xác nhận T-1")
 step("confirm", "U1", "xác nhận T-1")
 step("owner_draft", "ME", "tạo task: Việc của chủ nhóm")
+cfg["FCHAT_ENV_REPOS"] = "etask"
+HB = {"age": None}
+g.daemon_common = type("DC", (), {"last_heartbeat": staticmethod(lambda label: {"age": HB["age"]} if HB["age"] is not None else {})})
+step("env_stale", "U1", "@bot env")
+HB["age"] = 5
+step("env_ok", "ME", "env")
+out["envreq"] = [[r["group"], r["owner"]] for r in g._board.meta_get("envtable:req", [])]
 step("unknown_member", "U1", "@bot làm hộ cái này đi")
 step("unknown_owner", "ME", "làm hộ cái này đi")
 step("chat", "U1", "trưa nay ăn gì")
@@ -533,6 +540,9 @@ class GroupWatch3Test(unittest.TestCase):
         self.assertIn("Trạng thái: đã tạo", out["confirm"][0][0])
         self.assertEqual(out["calls"][:2], [["create", "Sửa lọc", "L1"], ["assign", "T1", ["102"]]])
         self.assertIn("🤖 [T-2] Việc của chủ nhóm", out["owner_draft"][0][0])
+        self.assertIn("env_watch chưa chạy", out["env_stale"][0][0])                    # no silent wait
+        self.assertEqual(out["env_ok"], [])                                               # env_watch answers, not us
+        self.assertEqual(out["envreq"], [["G", True]])                                    # owner ⇒ + private copy
         self.assertIn("chưa hiểu lệnh này", out["unknown_member"][0][0])           # Fable UX P1.4: never silent
         self.assertIn("chưa hiểu lệnh này", out["unknown_owner"][0][0])
         self.assertEqual(out["chat"], [])                                             # plain chat: still silent

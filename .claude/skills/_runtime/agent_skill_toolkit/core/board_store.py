@@ -152,6 +152,19 @@ class Board:
         with self.s._tx():
             self._set_meta(key, json.dumps(value, ensure_ascii=False))
 
+    def meta_txn(self, fn):
+        """fn(get, put) inside ONE write transaction (begin immediate): a read-modify-write over several keys is atomic
+        between processes (sequence numbers, durable outboxes, request queues). Returns fn's result."""
+        def get(key, default=None):
+            v = self._meta(key)
+            return default if v is None else json.loads(v)
+
+        def put(key, value):
+            self._set_meta(key, json.dumps(value, ensure_ascii=False))
+
+        with self.s._tx():
+            return fn(get, put)
+
     def watermark(self, group_id: str):
         """Highest messageIdInc recorded for the group; None = never watched (first run)."""
         v = self._meta(f"watermark:{group_id}")

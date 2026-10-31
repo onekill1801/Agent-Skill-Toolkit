@@ -26,8 +26,9 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import group_watch as gw  # noqa: E402  (registry / snapshots / send helpers, Pha 2a)
 from agent_skill_toolkit.core import board_store, paths  # noqa: E402
-from agent_skill_toolkit.workflows.group_board import envwatch  # noqa: E402
+from agent_skill_toolkit.workflows.group_board import envmap, envwatch  # noqa: E402
 
+REQ_POLL_S = 3          # kiểm yêu cầu "@bot env" mỗi 3 s (chu kỳ đọc môi trường vẫn là FCHAT_ENV_WATCH_INTERVAL)
 SLIM = ("env", "version", "commit", "digest", "level", "rs_created_at", "build", "observed_at", "branch")
 
 
@@ -90,24 +91,163 @@ def _digest_due(board, mode: str, now: float) -> bool:
     return (lt.tm_hour, lt.tm_min) >= (hh, mm) and board.meta_get(_k(mode, "digest", "last")) != today
 
 
-def _at_or_after(lt) -> bool:
-    try:
-        hh, mm = (int(x) for x in _cfg("FCHAT_ENV_DIGEST_AT", "08:30").split(":"))
-    except ValueError:
-        hh, mm = 8, 30
-    return (lt.tm_hour, lt.tm_min) >= (hh, mm)
+def _protected(proj: dict) -> set:
+    return {p.lower() for p in (proj.get("protected_envs") or ("prod", "production"))}
 
 
-def post_snapshots(board, groups, mode: str) -> bool:
-    """Ảnh chụp cho mọi nhóm bảng việc + bản CÓ prod cho nhóm riêng của chủ nhóm. True khi gửi đủ."""
-    text = gw.env_snapshot_text(False, "nhóm")       # nhóm chung: không bao giờ có prod
-    if not text:
-        return False
-    ok = all([deliver(board, gid, text, None, mode) for gid in groups])
-    owner_group = _cfg("FCHAT_ENV_OWNER_GROUP", "").strip()
+# ---------------------------------------------------------------- bảng môi trường của extension (chỉ gửi thay đổi)
+# MỘT nơi gửi duy nhất (tiến trình này): số thứ tự #seq, tin chờ và "dòng đã gửi" nằm trong board_meta, ghi trong
+# transaction TRƯỚC khi gửi ⇒ crash giữa chừng chỉ gửi lại đúng tin đó (cùng số) cho nơi còn thiếu. Độc lập với
+# FCHAT_ENV_WATCH_MODE (shadow chỉ áp cho thẻ E / tổng hợp). "@bot env" (group_watch) chỉ xếp yêu cầu vào envtable:req.
+REQ_KEY = "envtable:req"
+
+
+def _tk(*parts) -> str:
+    return ":".join(("envtable",) + tuple(str(p) for p in parts))
+
+
+def table_scopes(groups: list, owner_group: str) -> dict:
+    """"nhóm" (không bao giờ prod) → mọi nhóm bảng việc · "chủ nhóm" (có prod) → nhóm riêng của chủ nhóm."""
+    scopes = {"nhóm": list(groups)} if groups else {}
     if owner_group:
-        ok = deliver(board, owner_group, gw.env_snapshot_text(True, "chủ nhóm"), None, mode) and ok
+        scopes["chủ nhóm"] = [owner_group]
+    return scopes
+
+
+def collect_rows(key: str, proj: dict, snaps: list, scopes: dict, rows: dict, ok: dict) -> None:
+    prot = _protected(proj)
+    for s in snaps:
+        env = s["env"]
+        for sc in scopes:
+            if sc == "nhóm" and env.lower() in prot:
+                continue                                  # prod không bao giờ vào bảng chung
+            k = f"{key}|{env}"
+            rows[sc][k] = envmap.snapshot_row(key, s)
+            if s.get("version") or s.get("commit"):
+                ok[sc].add(k)                             # đọc được lần này (đọc lỗi ⇒ không phải thay đổi)
+
+
+def read_all_rows(scopes: dict, owner_group: str):
+    """Đọc mới mọi repo (bỏ cache) ⇒ (rows, ok, webs) cho các scope."""
+    rows, ok, webs = {sc: {} for sc in scopes}, {sc: set() for sc in scopes}, {}
+    reg = gw._registry()
+    for key in _csv("FCHAT_ENV_REPOS"):
+        proj = reg.get(key)
+        if not isinstance(proj, dict) or not proj.get("gitlab_project_id"):
+            continue
+        with gw._env_cache_lock:
+            for k in [k for k in gw._env_cache if k[0] == key]:
+                gw._env_cache.pop(k, None)
+        webs[key] = gw._gitlab_web(proj)
+        collect_rows(key, proj, gw._env_snapshots(key, proj, show_prod=bool(owner_group)), scopes, rows, ok)
+    return rows, ok, webs
+
+
+def _send_table(gid: str, text: str) -> bool:
+    res = gw.send.send_text(gid, text, None)
+    ok = isinstance(res, dict) and not res.get("error")
+    if not ok:
+        print(f"[{gw._now()}] [WARN] gửi bảng môi trường tới {gid} lỗi: {(res or {}).get('message')}", file=sys.stderr)
     return ok
+
+
+def _flush_pending(board, sc: str) -> bool:
+    """Gửi tin chờ của scope cho nơi còn thiếu (tiến độ ghi sau MỖI nơi); đủ ⇒ dòng đã gửi + xoá tin chờ, một transaction."""
+    pend = board.meta_get(_tk("pend", sc))
+    if not pend:
+        return True
+    for g in list(pend["left"]):
+        if _send_table(g, pend["text"]):
+            pend["left"].remove(g)
+            board.meta_set(_tk("pend", sc), pend)
+    if pend["left"]:
+        return False
+
+    def done(get, put):
+        d = get(_tk("drows", sc)) or {}
+        d.update(pend["rows"])
+        put(_tk("drows", sc), d)
+        put(_tk("pend", sc), None)
+    board.meta_txn(done)
+    return True
+
+
+def _queue(board, sc: str, targets: list, kind: str, rows: dict, webs: dict, now: float) -> int:
+    """Cấp số + dựng tin + ghi tin chờ TRONG MỘT transaction, rồi mới gửi (_flush_pending)."""
+    def q(get, put):
+        seq = int(get(_tk("seq", sc), 0) or 0) + 1
+        text = gw.board_render.defuse_body(envmap.table_text(kind, rows, webs, sc, seq, now))
+        put(_tk("seq", sc), seq)
+        put(_tk("pend", sc), {"seq": seq, "text": text, "left": list(targets), "rows": rows})
+        return seq
+    return board.meta_txn(q)
+
+
+def table_pass(board, scopes: dict, rows: dict, ok: dict, webs: dict, now: float, requests=()) -> dict:
+    """Một lượt: tin chờ trước; chưa có mốc ⇒ cả bảng (đánh số); có dòng đổi ⇒ tin thay đổi (đánh số) cho MỌI nơi nhận;
+    rồi trả lời yêu cầu "@bot env": cả bảng hiện tại CHỈ cho nơi hỏi, mang số hiện tại (không cấp số mới ⇒ nơi khác
+    không bị báo lỡ tin). Dòng đọc lỗi trong cả bảng: dùng dòng tốt gần nhất đã gửi."""
+    out = {}
+    for sc, targets in scopes.items():
+        if not _flush_pending(board, sc):
+            out[sc] = "pending"
+            continue
+        drows = board.meta_get(_tk("drows", sc))
+        if drows is None:
+            if rows[sc]:
+                _queue(board, sc, targets, "SNAPSHOT", dict(rows[sc]), webs, now)
+                out[sc] = "full"
+        else:
+            diff = {k: r for k, r in rows[sc].items() if k in ok[sc] and drows.get(k) != r}
+            if diff:
+                _queue(board, sc, targets, "DELTA", diff, webs, now)
+                out[sc] = "delta"
+        if out.get(sc) and not _flush_pending(board, sc):
+            out[sc] = "pending"
+            continue
+        for r in [r for r in requests if r.get("scope") == sc]:
+            d = board.meta_get(_tk("drows", sc)) or {}
+            cur = {k: d.get(k) or rows[sc][k] for k in rows[sc]}
+            text = gw.board_render.defuse_body(envmap.table_text("SNAPSHOT", cur, webs, sc,
+                                                                  int(board.meta_get(_tk("seq", sc), 0) or 0), now))
+            r["done"] = _send_table(r["group"], text)
+    return out
+
+
+def serve_requests(board, now: float = None) -> list:
+    """"@bot env" đã xếp hàng (group_watch) ⇒ đọc mới, gửi thay đổi nếu có, rồi cả bảng cho từng nơi hỏi.
+    Hàng yêu cầu BỀN: không lấy ra trước; mỗi yêu cầu {id, left:[nơi nhận]} chỉ bớt nơi đã nhận, xoá khi đủ
+    (crash / lỗi giữa chừng ⇒ yêu cầu còn nguyên phần chưa gửi; gửi lại cả bảng thì vô hại — cùng số hiện tại)."""
+    reqs = board.meta_get(REQ_KEY, []) or []
+    if not reqs:
+        return []
+    now = now or time.time()
+    owner_group = _cfg("FCHAT_ENV_OWNER_GROUP", "").strip()
+    scopes = table_scopes(_csv("FCHAT_BOARD_GROUPS"), owner_group)
+    asks = []
+    for r in reqs:
+        left = r.get("left")
+        if left is None:                              # yêu cầu mới: nơi nhận = nhóm hỏi (+ nhóm riêng nếu chủ nhóm hỏi)
+            left = [{"scope": "nhóm", "group": r.get("group")}]
+            if r.get("owner") and owner_group:
+                left.append({"scope": "chủ nhóm", "group": owner_group})
+        asks += [{**a, "req": r.get("id")} for a in left]
+    rows, ok, webs = read_all_rows(scopes, owner_group)
+    table_pass(board, scopes, rows, ok, webs, now, asks)
+
+    def settle(get, put):                             # theo id: yêu cầu mới xếp thêm trong lúc gửi vẫn giữ nguyên
+        keep = []
+        for q in get(REQ_KEY, []) or []:
+            mine = [a for a in asks if a["req"] == q.get("id")]
+            if not mine:
+                keep.append(q)
+                continue
+            left = [{"scope": a["scope"], "group": a["group"]} for a in mine if not a.get("done")]
+            if left:
+                keep.append({**q, "left": left})
+        put(REQ_KEY, keep)
+    board.meta_txn(settle)
+    return asks
 
 
 def _target(s: dict) -> str:
@@ -131,7 +271,10 @@ def tick(board, now: float = None, mode: str = None) -> dict:
     groups, repos = _csv("FCHAT_BOARD_GROUPS"), _csv("FCHAT_ENV_REPOS")
     batch_envs = {e.lower() for e in _csv("FCHAT_ENV_DIGEST_ENVS", "dev")}
     out = {"mode": mode, "baseline": [], "changes": [], "delivered": [], "batched": [], "deferred": [],
-           "digest": False}
+           "digest": False, "table": {}}
+    owner_group = _cfg("FCHAT_ENV_OWNER_GROUP", "").strip()
+    scopes = table_scopes(groups, owner_group)
+    t_rows, t_ok, webs = {sc: {} for sc in scopes}, {sc: set() for sc in scopes}, {}
     reg = gw._registry()
     for key in repos:
         proj = reg.get(key)
@@ -140,11 +283,16 @@ def tick(board, now: float = None, mode: str = None) -> dict:
         with gw._env_cache_lock:                      # fresh reads every pass
             for k in [k for k in gw._env_cache if k[0] == key]:
                 gw._env_cache.pop(k, None)
-        snaps = gw._env_snapshots(key, proj)
+        snaps = gw._env_snapshots(key, proj, show_prod=bool(owner_group))   # prod chỉ đọc khi có nhóm riêng
         gl = gw.gitlab_api.Client(proj["gitlab_project_id"])
         web, pid = gw._gitlab_web(proj), proj["gitlab_project_id"]
+        webs[key] = web
+        prot = _protected(proj)
+        collect_rows(key, proj, snaps, scopes, t_rows, t_ok)
         for s in snaps:
             env = s["env"]
+            if env.lower() in prot:
+                continue                              # prod: không thẻ E / tổng hợp cho nhóm chung
             prev = board.meta_get(_k(mode, "snap", key, env))
             if prev is None:
                 if s.get("version"):
@@ -190,16 +338,8 @@ def tick(board, now: float = None, mode: str = None) -> dict:
                 board.meta_set(_k(mode, "snap", key, env), _slim(s))
                 board.meta_set(_k(mode, "sent", key, env), {})
                 board.meta_set(_k(mode, "defer", key, env), {})
-    # bảng môi trường (extension): mỗi sáng lúc FCHAT_ENV_DIGEST_AT + mỗi lượt có env đổi đã báo/gom
-    lt = time.localtime(now)
-    today = time.strftime("%Y-%m-%d", lt)
-    daily = groups and _at_or_after(lt) and board.meta_get(_k(mode, "snapshot", "last")) != today
-    pending = board.meta_get(_k(mode, "snapshot", "pending"), False)       # lần gửi khi env đổi bị lỗi ⇒ thử lại
-    if groups and (daily or pending or out["delivered"] or out["batched"]):
-        out["snapshot"] = post_snapshots(board, groups, mode)
-        board.meta_set(_k(mode, "snapshot", "pending"), not out["snapshot"])
-        if out["snapshot"] and daily:
-            board.meta_set(_k(mode, "snapshot", "last"), today)
+    # bảng môi trường: chỉ gửi THAY ĐỔI (bot trên máy chạy quyết định lúc nào); chưa có mốc ⇒ cả bảng một lần
+    out["table"] = table_pass(board, scopes, t_rows, t_ok, webs, now)
     if groups and _digest_due(board, mode, now):
         since = board.meta_get(_k(mode, "digest", "since"), now - 86400)
         all_ok = True
@@ -229,18 +369,24 @@ def main(argv=None) -> int:
     board = board_store.Board()
     print(f"[{gw._now()}] env_watch: repos={_csv('FCHAT_ENV_REPOS')} groups={_csv('FCHAT_BOARD_GROUPS')} "
           f"mode={_cfg('FCHAT_ENV_WATCH_MODE', 'shadow')} interval={a.interval}s")
+    last = 0.0
     while True:
         if gw.daemon_common is not None:
             gw.daemon_common.heartbeat("env_watch")
         try:
-            res = tick(board)
-            if res["changes"] or res["baseline"] or res["digest"]:
-                print(f"[{gw._now()}] {json.dumps(res, ensure_ascii=False)}")
+            if time.time() - last >= max(60, a.interval):
+                last = time.time()
+                res = tick(board)
+                if res["changes"] or res["baseline"] or res["digest"] or any(res["table"].values()):
+                    print(f"[{gw._now()}] {json.dumps(res, ensure_ascii=False)}")
+            served = serve_requests(board)          # "@bot env": trả lời trong vài giây, không chờ chu kỳ
+            if served:
+                print(f"[{gw._now()}] bảng môi trường theo yêu cầu: {served}")
         except Exception as e:  # noqa: BLE001 — one bad pass must not stop the watcher
             print(f"[{gw._now()}] [WARN] env_watch: {type(e).__name__}: {e}", file=sys.stderr)
         if a.once:
             return 0
-        time.sleep(max(60, a.interval))
+        time.sleep(REQ_POLL_S)
 
 
 if __name__ == "__main__":

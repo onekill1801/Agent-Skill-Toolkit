@@ -274,6 +274,7 @@ def mr_text(repo: str, web: str, mr: dict, rows: list, snaps: list) -> str:
 
 # ---------------------------------------------------------------- snapshot table (extension "Môi trường" tab)
 SNAPSHOT_HEAD = "🌐 [ENV-SNAPSHOT]"
+DELTA_HEAD = "🌐 [ENV-DELTA]"
 _ICON = {"verified": "✅", "inferred": "🟡", "unknown": "❔", "drift": "⚠"}
 
 
@@ -281,21 +282,56 @@ def _cell(v) -> str:
     return " ".join(str(v or "").replace("|", "/").split()) or "—"
 
 
-def snapshot_text(repos: list, now: float = None, scope: str = "nhóm") -> str:
-    """One message the board turns into its environment table (PROTOCOL.md "Ảnh chụp môi trường"):
+def snapshot_row(repo: str, s: dict) -> str:
+    """One table row: repo | env | mức | phiên bản | commit | lên lúc | nhánh | build ('—' = unknown)."""
+    return " | ".join(_cell(x) for x in (
+        repo, s.get("env"), _ICON.get(s.get("level") or "unknown", "❔"), s.get("version"), s.get("commit"),
+        _when(s.get("rs_created_at") or ""), s.get("branch"), (s.get("build") or {}).get("url")))
 
-        🌐 [ENV-SNAPSHOT] Bảng môi trường · 31/10 08:30 · nhóm
+
+def _head(kind: str, title: str, now: float, scope: str, seq) -> str:
+    return f"{kind} {title} · {time.strftime('%d/%m %H:%M', time.localtime(now))} · {scope}" + (f" · #{seq}" if seq else "")
+
+
+def table_text(kind: str, rows: dict, webs: dict, scope: str, seq: int, now: float = None) -> str:
+    """kind "SNAPSHOT" (whole table) or "DELTA" (changed rows only); rows = {"repo|env": row} in display order."""
+    now = now or time.time()
+    head = (SNAPSHOT_HEAD, "Bảng môi trường") if kind == "SNAPSHOT" else (DELTA_HEAD, "Môi trường đổi")
+    lines = [_head(head[0], head[1], now, scope, seq)]
+    by_repo = {}
+    for k, row in rows.items():
+        by_repo.setdefault(k.split("|", 1)[0], []).append(row)
+    for repo in sorted(by_repo):
+        lines.append(f"repo | {_cell(repo)} | {_cell((webs or {}).get(repo))}")
+        lines += by_repo[repo]
+    return "\n".join(lines)
+
+
+def snapshot_text(repos: list, now: float = None, scope: str = "nhóm", seq: int = 0) -> str:
+    """The FULL table (PROTOCOL.md "Ảnh chụp môi trường") — sent on request ('@bot env') or when the bot has no
+    baseline yet; afterwards only changed rows travel (delta_text):
+
+        🌐 [ENV-SNAPSHOT] Bảng môi trường · 31/10 08:30 · nhóm · #12
         repo | etask | https://gitlab…/idaas/etask
         etask | sandbox | ✅ | 0.198.45 | <commit 40> | 30/10 01:16 | merge/rfc-into-vitess | <build url>
 
-    repos = [(repo, web, snaps)]. One row per repo × env; a column is '—' when unknown. Readable as plain text
-    for members without the extension. scope: "nhóm" or "chủ nhóm" (the owner's copy, prod included)."""
+    repos = [(repo, web, snaps)]. seq = per-scope message number (the board detects a missed delta by a gap).
+    scope: "nhóm" (never prod) or "chủ nhóm" (the owner's private copy, prod included)."""
     now = now or time.time()
-    lines = [f"{SNAPSHOT_HEAD} Bảng môi trường · {time.strftime('%d/%m %H:%M', time.localtime(now))} · {scope}"]
+    lines = [_head(SNAPSHOT_HEAD, "Bảng môi trường", now, scope, seq)]
     for repo, web, snaps in repos:
         lines.append(f"repo | {_cell(repo)} | {_cell(web)}")
-        for s in snaps:
-            lines.append(" | ".join(_cell(x) for x in (
-                repo, s.get("env"), _ICON.get(s.get("level") or "unknown", "❔"), s.get("version"), s.get("commit"),
-                _when(s.get("rs_created_at") or ""), s.get("branch"), (s.get("build") or {}).get("url"))))
+        lines += [snapshot_row(repo, s) for s in snaps]
     return "\n".join(lines)
+
+
+def delta_text(rows: list, now: float = None, scope: str = "nhóm", seq: int = 0, webs: dict = None) -> str:
+    """Only the rows that changed since the last message of this scope (same columns as the table):
+
+        🌐 [ENV-DELTA] Môi trường đổi · 31/10 19:20 · nhóm · #13
+        etask | sandbox | ✅ | 0.199.45 | … """
+    now = now or time.time()
+    lines = [_head(DELTA_HEAD, "Môi trường đổi", now, scope, seq)]
+    for repo, web in sorted((webs or {}).items()):
+        lines.append(f"repo | {_cell(repo)} | {_cell(web)}")
+    return "\n".join(lines + list(rows))
