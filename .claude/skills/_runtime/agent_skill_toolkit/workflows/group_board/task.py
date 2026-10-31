@@ -76,8 +76,10 @@ def pick_list(cfg: dict, wanted: str):
     hits = [(k, v) for k, v in lists.items() if low in (str(v.get("name") or "") + " " + str(v.get("project") or "")).lower()]
     if len(hits) == 1:
         return hits[0]
-    return None, ("list '%s' không có trong danh sách được phép" % w if not hits else
-                  "list '%s' khớp nhiều list: %s" % (w, ", ".join(k for k, _ in hits[:6])))
+    d = cfg.get("default") or ""
+    hint = " — gõ \"@bot list task\" để xem mã" + (f" (bỏ trống = {d} · {list_label(lists[d])})" if d in lists else "")
+    return None, ("list '%s' không có trong danh sách được phép" % w + hint if not hits else
+                  "list '%s' khớp nhiều list: %s — ghi mã số" % (w, ", ".join(k for k, _ in hits[:6])))
 
 
 def list_label(entry: dict) -> str:
@@ -116,7 +118,7 @@ def parse_create(body: str, today: dt.date = None):
         except ValueError:
             return "error", "hạn không phải ngày có thật"
         if due < today:
-            return "error", "hạn đã qua"
+            return "error", f"hạn {due.strftime('%d/%m/%Y')} đã qua — chọn từ hôm nay ({today.strftime('%d/%m/%Y')}) trở đi"
         out["due"] = due
     else:
         out["due"] = None
@@ -246,7 +248,8 @@ def confirm(board, group: str, card_id: str, ident: dict, at, now: float = None,
     if not card:
         return _reply(ident, f"không thấy thẻ {card_id.upper()} trong nhóm này")
     if not _is_requester(card, ident):
-        return _reply(ident, f"chỉ người tạo nháp {card['id']} mới xác nhận được")
+        who = render.one_line((card["payload"].get("requester") or {}).get("name") or "người tạo nháp", 60)
+        return _reply(ident, f"chỉ {who} (người tạo nháp) mới xác nhận {card['id']} được")
     p, st = card["payload"], card["state"]
     if st in ("created", "done_asked", "completing", "done"):
         return _reply(ident, f"{card['id']} đã tạo trên aTask rồi" + (f": {p['link']}" if p.get("link") else ""))
@@ -319,7 +322,8 @@ def cancel(board, group: str, card_id: str, ident: dict):
     if not card:
         return _reply(ident, f"không thấy thẻ {card_id.upper()} trong nhóm này")
     if not _is_requester(card, ident):
-        return _reply(ident, f"chỉ người tạo nháp {card['id']} mới huỷ được")
+        who = render.one_line((card["payload"].get("requester") or {}).get("name") or "người tạo nháp", 60)
+        return _reply(ident, f"chỉ {who} (người tạo nháp) mới huỷ {card['id']} được")
     st = card["state"]
     if st in ("cancelled", "expired"):
         return _reply(ident, f"{card['id']} đã huỷ rồi")

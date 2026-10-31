@@ -753,6 +753,13 @@ def _process_one(gid, group_type, sender_name, sender_id, text, me, mentions=())
             if _allowed(gid, group_type, _identity(sender_id, sender_name, me), "review", sender_name, sender_id):
                 _enqueue_review(gid, group_type, sender_name, sender_id, text)
             return
+        # "@bot <điều bot không hiểu>" ⇒ trả lời gợi ý, không im lặng (Fable UX P1.4). Chủ nhóm: '@bot' đã bị bỏ.
+        addressed = (bool(me) and sender_id == me) or bool(re.match(r"^@bot\b", (text or "").strip(), re.I))
+        if addressed and intent != "build" and rccfg.get("FCHAT_WATCH_FREEFORM", "0") != "1":
+            _post_inline(gid, group_type, board_render.defuse(
+                f"🤖 @{sender_name}: chưa hiểu lệnh này — gõ \"@bot help\" để xem lệnh, hoặc dùng nút trên bảng việc"),
+                [(sender_name, sender_id)])
+            return
     if not _is_allowed(sender_id, sender_name, me):
         print(f"[{_now()}] [DENY] {sender_name} ({sender_id}) không có trong FCHAT_REVIEW_ALLOWED")
         explicit = re.search(r"\b(review|build|deploy)\b", text or "", re.I)

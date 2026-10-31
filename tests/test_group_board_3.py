@@ -198,7 +198,7 @@ class FlowTest(unittest.TestCase):
     def test_confirm_creates_once(self):
         _draft(self.b)
         r = task.confirm(self.b, "G", "t-1", HUY, self.at, now=1100.0)
-        self.assertIn("chỉ người tạo nháp", r["reply"][0])
+        self.assertIn("(người tạo nháp)", r["reply"][0])
         out = task.confirm(self.b, "G", "T-1", LAN, self.at, now=1100.0)
         c = out["card"]
         self.assertEqual((c["state"], c["payload"]["code"], c["payload"]["task_id"]), ("created", "BPT-41", "T1"))
@@ -240,7 +240,7 @@ class FlowTest(unittest.TestCase):
         out = task.confirm(self.b, "G", "T-1", LAN, self.at, now=1100.0)
         self.assertEqual(out["card"]["state"], "error")
         self.assertIn("aTask từ chối: no permission", out["send"][0])
-        self.assertIn("chỉ người tạo nháp", task.cancel(self.b, "G", "T-1", HUY)["reply"][0])
+        self.assertIn("(người tạo nháp)", task.cancel(self.b, "G", "T-1", HUY)["reply"][0])
         out = task.cancel(self.b, "G", "T-1", LAN)
         self.assertEqual(out["card"]["state"], "cancelled")
         self.assertIn("Trạng thái: huỷ", out["send"][0])
@@ -466,6 +466,9 @@ step("bad", "U1", "@bot tạo task: x | list: 99")
 step("confirm_other", "U2", "xác nhận T-1")
 step("confirm", "U1", "xác nhận T-1")
 step("owner_draft", "ME", "tạo task: Việc của chủ nhóm")
+step("unknown_member", "U1", "@bot làm hộ cái này đi")
+step("unknown_owner", "ME", "làm hộ cái này đi")
+step("chat", "U1", "trưa nay ăn gì")
 # _handle passes metadata.mentions to the worker
 hq = []
 g._enqueue = lambda *item: hq.append(item[0])
@@ -502,10 +505,13 @@ class GroupWatch3Test(unittest.TestCase):
         self.assertIn("Giao: @Huy Tran", text)
         self.assertEqual(ids, ["U1", "U2"])
         self.assertIn("không có trong danh sách được phép", out["bad"][0][0])
-        self.assertIn("chỉ người tạo nháp", out["confirm_other"][0][0])
+        self.assertIn("(người tạo nháp)", out["confirm_other"][0][0])
         self.assertIn("Trạng thái: đã tạo", out["confirm"][0][0])
         self.assertEqual(out["calls"][:2], [["create", "Sửa lọc", "L1"], ["assign", "T1", ["102"]]])
         self.assertIn("🤖 [T-2] Việc của chủ nhóm", out["owner_draft"][0][0])
+        self.assertIn("chưa hiểu lệnh này", out["unknown_member"][0][0])           # Fable UX P1.4: never silent
+        self.assertIn("chưa hiểu lệnh này", out["unknown_owner"][0][0])
+        self.assertEqual(out["chat"], [])                                             # plain chat: still silent
         self.assertEqual(out["handled"], [["@bot tạo task: A | giao: @Huy", "ME",
                                            [{"target": "Huy", "userId": "U2", "offset": 22, "length": 4}]],
                                           ["@bot ping", "ME", [{"target": "Huy", "userId": "U2"}]],
