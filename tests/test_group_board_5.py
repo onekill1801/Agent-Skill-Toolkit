@@ -195,6 +195,96 @@ print(json.dumps(seen))
 '''
 
 
+GROUPPROD = r'''
+import json, sys
+sys.argv = ["x"]
+import env_watch as ew
+from agent_skill_toolkit.core import board_store
+cfg = {"FCHAT_BOARD_GROUPS": "N", "FCHAT_ENV_OWNER_GROUP": "", "FCHAT_ENV_SHOW_PROD": "0"}
+ew.gw.rccfg.get = lambda k, d="": cfg.get(k, d)
+ew.gw._registry = lambda: {"etask": {"gitlab_project_id": 1, "repo_path": "idaas/etask"}}
+SN = [{"env": "dev", "version": "1", "commit": "c" * 40, "level": "built"},
+      {"env": "prod", "version": "9", "commit": "d" * 40, "level": "built"}]
+asked = []
+ew.gw._env_snapshots = lambda key, proj, show_prod=None: (asked.append(show_prod), SN if show_prod else SN[:1])[1]
+cfg["FCHAT_ENV_REPOS"] = "etask"
+sent = []
+ew.gw.send.send_text = lambda gid, text, gt=None, **k: (sent.append(text), {"sent": True})[1]
+b = board_store.Board()
+out = []
+for flag in ("0", "0", "1", "1", "0"):
+    cfg["FCHAT_ENV_SHOW_PROD"] = flag
+    sent.clear()
+    sc = ew.table_scopes(["N"], "")
+    rows, ok, webs = ew.read_all_rows(sc, "")
+    r = ew.table_pass(b, sc, rows, ok, webs, 1761000000.0)
+    out.append([r.get("nhóm"), any("| prod |" in t for t in sent), sorted(b.meta_get("envtable:drows:nhóm") or {})])
+print(json.dumps({"out": out, "asked": asked}))
+'''
+
+
+GROUPPROD_FAIL = r'''
+import json, sys
+sys.argv = ["x"]
+import env_watch as ew
+from agent_skill_toolkit.core import board_store
+cfg = {"FCHAT_BOARD_GROUPS": "N", "FCHAT_ENV_OWNER_GROUP": "", "FCHAT_ENV_SHOW_PROD": "0", "FCHAT_ENV_REPOS": "etask"}
+ew.gw.rccfg.get = lambda k, d="": cfg.get(k, d)
+ew.gw._registry = lambda: {"etask": {"gitlab_project_id": 1, "repo_path": "idaas/etask"}}
+SN = [{"env": "dev", "version": "1", "commit": "c" * 40, "level": "built"},
+      {"env": "prod", "version": "9", "commit": "d" * 40, "level": "built"}]
+ew.gw._env_snapshots = lambda key, proj, show_prod=None: SN if show_prod else SN[:1]
+sent, DOWN = [], {"v": False}
+ew.gw.send.send_text = lambda gid, text, gt=None, **k: ({"error": True} if DOWN["v"] else (sent.append(text), {"sent": True})[1])
+b = board_store.Board()
+def run():
+    sc = ew.table_scopes(["N"], "")
+    rows, ok, webs = ew.read_all_rows(sc, "")
+    return ew.table_pass(b, sc, rows, ok, webs, 1761000000.0)
+run()                                                     # baseline, prod off
+cfg["FCHAT_ENV_SHOW_PROD"] = "1"; DOWN["v"] = True
+r_on = run()                                              # full WITH prod queued, sending fails
+flag_saved = b.meta_get("envtable:prodflag:nhóm")         # stored with the queued table (same transaction)
+# a "@bot env" answer built while prod was on, sending fails half way
+ans = ew._answer(b, "nhóm", {"scope": "nhóm", "group": "N", "req": "q"}, {"nhóm": {"etask|dev": "etask | dev | 🔨 | 1", "etask|prod": "etask | prod | 🔨 | 9"}}, {}, 1761000000.0)
+cfg["FCHAT_ENV_SHOW_PROD"] = "0"; DOWN["v"] = False; sent.clear()
+r_off = run()
+leak = any("| prod |" in t for t in sent)
+sent.clear()
+ans2 = ew._answer(b, "nhóm", {"scope": "nhóm", "group": "N", "req": "q"}, {"nhóm": {"etask|dev": "etask | dev | 🔨 | 1"}}, {}, 1761000001.0)
+print(json.dumps({"on": r_on, "flag": flag_saved, "ans": ans, "off": r_off, "leak": leak,
+                  "ans2": [ans2, any("| prod |" in t for t in sent)], "drows": sorted(b.meta_get("envtable:drows:nhóm"))}))
+'''
+
+
+class GroupProdOffNeverLeaksTest(unittest.TestCase):
+    """Codex R1: tin dựng lúc còn bật prod (chờ gửi / trả lời dở) không bao giờ đi ra sau khi tắt."""
+
+    def test_off_drops_pending_and_rebuilds_answers(self):
+        from test_group_board import _run_tchat, _tmpdb
+        out = _run_tchat(GROUPPROD_FAIL, _tmpdb())
+        self.assertEqual((out["on"].get("nhóm"), out["flag"], out["ans"]), ("pending", "1", False))
+        self.assertEqual(out["off"].get("nhóm"), "full")                    # stored "1" ≠ "0" ⇒ whole table without prod
+        self.assertFalse(out["leak"])
+        self.assertEqual(out["ans2"], [True, False])                           # answer rebuilt, no prod
+        self.assertEqual(out["drows"], ["etask|dev"])
+
+
+class GroupProdSwitchTest(unittest.TestCase):
+    """FCHAT_ENV_SHOW_PROD=1: prod vào thẳng bảng nhóm chung; bật/tắt ⇒ cả bảng mới (tắt: dòng prod biến mất)."""
+
+    def test_switch(self):
+        from test_group_board import _run_tchat, _tmpdb
+        out = _run_tchat(GROUPPROD, _tmpdb())
+        self.assertEqual(out["out"], [
+            ["full", False, ["etask|dev"]],
+            [None, False, ["etask|dev"]],                                       # nothing changed
+            ["full", True, ["etask|dev", "etask|prod"]],                        # turned on: whole table, with prod
+            [None, False, ["etask|dev", "etask|prod"]],
+            ["full", False, ["etask|dev"]]])                                    # turned off: prod row gone
+        self.assertEqual(out["asked"], [False, False, True, True, False])      # prod read only when needed
+
+
 class ProdChannelTest(unittest.TestCase):
     """Kênh prod (FCHAT_ENV_OWNER_GROUP) cho mọi thành viên: hỏi TRONG kênh prod ⇒ chỉ bản có prod ở đó."""
 

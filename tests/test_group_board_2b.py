@@ -102,7 +102,7 @@ sys.argv = ["x"]
 import env_watch as ew
 from agent_skill_toolkit.core import board_store
 cfg = {"FCHAT_ENV_REPOS": "etask", "FCHAT_BOARD_GROUPS": "G,H", "FCHAT_ENV_DIGEST_AT": "00:00", "FCHAT_ENV_OWNER_GROUP": "O",
-       "FCHAT_ENV_SHOW_PROD": "1"}                     # even when prod is shown in answers, group snapshots never carry it
+       "FCHAT_ENV_SHOW_PROD": "0"}                     # prod off for the group: only the owner's copy carries it
 ew.gw.rccfg.get = lambda k, d="": cfg.get(k, d)
 ew.gw._registry = lambda: {"etask": {"gitlab_project_id": 5401, "repo_path": "idaas/etask"}}
 SB = {"env": "sandbox", "version": "0.197.45", "commit": "a" * 40, "digest": "x", "level": "verified"}

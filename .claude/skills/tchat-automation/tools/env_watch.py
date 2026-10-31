@@ -115,13 +115,24 @@ def table_scopes(groups: list, owner_group: str) -> dict:
     return scopes
 
 
+def group_prod() -> bool:
+    """FCHAT_ENV_SHOW_PROD=1 (chủ nhóm bật): prod vào thẳng bảng của nhóm chung. Tắt ⇒ prod chỉ ở kênh prod."""
+    return _cfg("FCHAT_ENV_SHOW_PROD", "0") == "1"
+
+
+def _flag(sc: str) -> str:
+    """Chính sách prod của scope lúc này: "1" = bảng nhóm chung mang prod. Bản "chủ nhóm" luôn "0" (prod là bình thường)."""
+    return "1" if sc == "nhóm" and group_prod() else "0"
+
+
 def collect_rows(key: str, proj: dict, snaps: list, scopes: dict, rows: dict, ok: dict) -> None:
     prot = _protected(proj)
+    show = group_prod()
     for s in snaps:
         env = s["env"]
         for sc in scopes:
-            if sc == "nhóm" and env.lower() in prot:
-                continue                                  # prod không bao giờ vào bảng chung
+            if sc == "nhóm" and env.lower() in prot and not show:
+                continue                                  # prod chỉ vào bảng chung khi chủ nhóm bật
             k = f"{key}|{env}"
             rows[sc][k] = envmap.snapshot_row(key, s)
             if s.get("version") or s.get("commit"):
@@ -140,7 +151,8 @@ def read_all_rows(scopes: dict, owner_group: str):
             for k in [k for k in gw._env_cache if k[0] == key]:
                 gw._env_cache.pop(k, None)
         webs[key] = gw._gitlab_web(proj)
-        collect_rows(key, proj, gw._env_snapshots(key, proj, show_prod=bool(owner_group)), scopes, rows, ok)
+        collect_rows(key, proj, gw._env_snapshots(key, proj, show_prod=bool(owner_group) or group_prod()),
+                     scopes, rows, ok)
     return rows, ok, webs
 
 
@@ -159,6 +171,9 @@ def _flush_pending(board, sc: str) -> bool:
     pend = board.meta_get(_tk("pend", sc))
     if not pend:
         return True
+    if pend.get("prod", "0") == "1" and _flag(sc) == "0":
+        board.meta_set(_tk("pend", sc), None)          # dựng lúc còn bật prod, giờ đã tắt: KHÔNG gửi (cờ đã lưu = "1"
+        return True                                     # ≠ "0" ⇒ table_pass gửi cả bảng mới không prod)
     texts = pend.get("texts") or [pend["text"]]
     done_parts = pend.setdefault("parts", {})
     for g in list(pend["left"]):
@@ -174,7 +189,7 @@ def _flush_pending(board, sc: str) -> bool:
         return False
 
     def done(get, put):
-        d = get(_tk("drows", sc)) or {}
+        d = {} if pend.get("replace") else (get(_tk("drows", sc)) or {})   # cả bảng: thay hẳn (dòng prod cũ không còn)
         d.update(pend["rows"])
         put(_tk("drows", sc), d)
         put(_tk("pend", sc), None)
@@ -182,13 +197,16 @@ def _flush_pending(board, sc: str) -> bool:
     return True
 
 
-def _queue(board, sc: str, targets: list, kind: str, rows: dict, webs: dict, now: float) -> int:
+def _queue(board, sc: str, targets: list, kind: str, rows: dict, webs: dict, now: float, replace=False) -> int:
     """Cấp số + dựng tin + ghi tin chờ TRONG MỘT transaction, rồi mới gửi (_flush_pending)."""
     def q(get, put):
         seq = int(get(_tk("seq", sc), 0) or 0) + 1
         texts = [gw.board_render.defuse_body(t) for t in envmap.table_parts(kind, rows, webs, sc, seq, now)]
         put(_tk("seq", sc), seq)
-        put(_tk("pend", sc), {"seq": seq, "texts": texts, "left": list(targets), "rows": rows})
+        put(_tk("pend", sc), {"seq": seq, "texts": texts, "left": list(targets), "rows": rows, "replace": replace,
+                              "prod": _flag(sc)})
+        if replace:
+            put(_tk("prodflag", sc), _flag(sc))           # cùng transaction: crash không tách bảng với cờ của nó
         return seq
     return board.meta_txn(q)
 
@@ -203,9 +221,12 @@ def table_pass(board, scopes: dict, rows: dict, ok: dict, webs: dict, now: float
             out[sc] = "pending"
             continue
         drows = board.meta_get(_tk("drows", sc))
+        flag = _flag(sc)
+        if (board.meta_get(_tk("prodflag", sc)) or "0") != flag:
+            drows = None                                  # bật/tắt prod cho nhóm ⇒ cả bảng mới (tắt: dòng prod biến mất)
         if drows is None:
             if rows[sc]:
-                _queue(board, sc, targets, "SNAPSHOT", dict(rows[sc]), webs, now)
+                _queue(board, sc, targets, "SNAPSHOT", dict(rows[sc]), webs, now, replace=True)
                 out[sc] = "full"
         else:
             diff = {k: r for k, r in rows[sc].items() if k in ok[sc] and drows.get(k) != r}
@@ -226,11 +247,13 @@ def _answer(board, sc: str, r: dict, rows: dict, webs: dict, now: float) -> bool
     Crash ngay sau khi gửi mà chưa kịp ghi tiến độ ⇒ phần đó gửi lại (ít nhất một lần; extension ghép trùng vô hại)."""
     key = _tk("ans", r.get("req") or "-", sc, r["group"])
     a = board.meta_get(key)
+    if a and a.get("prod", "0") != _flag(sc):
+        a = None                                        # dựng dưới chính sách prod khác (vd lúc còn bật): dựng lại
     if not a:
         d = board.meta_get(_tk("drows", sc)) or {}
         cur = {k: d.get(k) or rows[sc][k] for k in rows[sc]}
         a = {"texts": [gw.board_render.defuse_body(t) for t in envmap.table_parts(
-            "SNAPSHOT", cur, webs, sc, int(board.meta_get(_tk("seq", sc), 0) or 0), now)], "sent": 0}
+            "SNAPSHOT", cur, webs, sc, int(board.meta_get(_tk("seq", sc), 0) or 0), now)], "sent": 0, "prod": _flag(sc)}
         board.meta_set(key, a)
     while a["sent"] < len(a["texts"]):
         if not _send_table(r["group"], a["texts"][a["sent"]]):
@@ -326,7 +349,7 @@ def tick(board, now: float = None, mode: str = None) -> dict:
         with gw._env_cache_lock:                      # fresh reads every pass
             for k in [k for k in gw._env_cache if k[0] == key]:
                 gw._env_cache.pop(k, None)
-        snaps = gw._env_snapshots(key, proj, show_prod=bool(owner_group))   # prod chỉ đọc khi có nhóm riêng
+        snaps = gw._env_snapshots(key, proj, show_prod=bool(owner_group) or group_prod())   # prod: kênh prod / bật cho nhóm
         gl = gw.gitlab_api.Client(proj["gitlab_project_id"])
         web, pid = gw._gitlab_web(proj), proj["gitlab_project_id"]
         webs[key] = web
