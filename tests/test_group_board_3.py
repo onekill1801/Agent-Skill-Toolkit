@@ -126,6 +126,30 @@ class DueTest(unittest.TestCase):
         self.assertEqual(task.due_instant(""), "")
 
 
+class EnvSnapshotTest(unittest.TestCase):
+    """Bảng môi trường của extension: '@bot env' (không repo) ⇒ một tin ảnh chụp mọi repo."""
+
+    def test_command(self):
+        self.assertEqual(commands.parse("@bot env")[0], "env_all")
+        self.assertEqual(commands.parse("@bot env all")[0], "env_all")
+        self.assertEqual(commands.parse("@bot env tất cả")[0], "env_all")
+        self.assertEqual(commands.parse("@bot env etask"), ("env", ("etask",)))
+        self.assertIsNone(commands.parse("env"))                                      # needs the prefix
+
+    def test_text(self):
+        from agent_skill_toolkit.workflows.group_board import envmap
+        t = envmap.snapshot_text([("etask", "https://g/idaas/etask", [
+            {"env": "sandbox", "level": "verified", "version": "0.198.45", "commit": "a" * 40,
+             "rs_created_at": "", "branch": "merge|rfc", "build": {"url": "http://j/282/"}},
+            {"env": "prod", "level": "unknown"}])], now=0, scope="chủ nhóm")
+        lines = t.splitlines()
+        self.assertTrue(lines[0].startswith("🌐 [ENV-SNAPSHOT] Bảng môi trường · "))
+        self.assertTrue(lines[0].endswith(" · chủ nhóm"))
+        self.assertEqual(lines[1], "repo | etask | https://g/idaas/etask")
+        self.assertEqual(lines[2], "etask | sandbox | ✅ | 0.198.45 | " + "a" * 40 + " | — | merge/rfc | http://j/282/")
+        self.assertEqual(lines[3], "etask | prod | ❔ | — | — | — | — | —")             # '|' inside a value never splits
+
+
 class ListTest(unittest.TestCase):
     def test_pick(self):
         self.assertEqual(task.pick_list(LISTS, "")[0], "6")

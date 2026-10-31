@@ -90,6 +90,26 @@ def _digest_due(board, mode: str, now: float) -> bool:
     return (lt.tm_hour, lt.tm_min) >= (hh, mm) and board.meta_get(_k(mode, "digest", "last")) != today
 
 
+def _at_or_after(lt) -> bool:
+    try:
+        hh, mm = (int(x) for x in _cfg("FCHAT_ENV_DIGEST_AT", "08:30").split(":"))
+    except ValueError:
+        hh, mm = 8, 30
+    return (lt.tm_hour, lt.tm_min) >= (hh, mm)
+
+
+def post_snapshots(board, groups, mode: str) -> bool:
+    """Ảnh chụp cho mọi nhóm bảng việc + bản CÓ prod cho nhóm riêng của chủ nhóm. True khi gửi đủ."""
+    text = gw.env_snapshot_text(False, "nhóm")       # nhóm chung: không bao giờ có prod
+    if not text:
+        return False
+    ok = all([deliver(board, gid, text, None, mode) for gid in groups])
+    owner_group = _cfg("FCHAT_ENV_OWNER_GROUP", "").strip()
+    if owner_group:
+        ok = deliver(board, owner_group, gw.env_snapshot_text(True, "chủ nhóm"), None, mode) and ok
+    return ok
+
+
 def _target(s: dict) -> str:
     """What a notice is about: the env now running this commit + digest (idempotency key)."""
     return f"{s.get('version')}|{s.get('commit')}|{s.get('digest')}"
@@ -170,6 +190,16 @@ def tick(board, now: float = None, mode: str = None) -> dict:
                 board.meta_set(_k(mode, "snap", key, env), _slim(s))
                 board.meta_set(_k(mode, "sent", key, env), {})
                 board.meta_set(_k(mode, "defer", key, env), {})
+    # bảng môi trường (extension): mỗi sáng lúc FCHAT_ENV_DIGEST_AT + mỗi lượt có env đổi đã báo/gom
+    lt = time.localtime(now)
+    today = time.strftime("%Y-%m-%d", lt)
+    daily = groups and _at_or_after(lt) and board.meta_get(_k(mode, "snapshot", "last")) != today
+    pending = board.meta_get(_k(mode, "snapshot", "pending"), False)       # lần gửi khi env đổi bị lỗi ⇒ thử lại
+    if groups and (daily or pending or out["delivered"] or out["batched"]):
+        out["snapshot"] = post_snapshots(board, groups, mode)
+        board.meta_set(_k(mode, "snapshot", "pending"), not out["snapshot"])
+        if out["snapshot"] and daily:
+            board.meta_set(_k(mode, "snapshot", "last"), today)
     if groups and _digest_due(board, mode, now):
         since = board.meta_get(_k(mode, "digest", "since"), now - 86400)
         all_ok = True

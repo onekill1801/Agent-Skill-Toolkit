@@ -101,13 +101,15 @@ import json, os, sys
 sys.argv = ["x"]
 import env_watch as ew
 from agent_skill_toolkit.core import board_store
-cfg = {"FCHAT_ENV_REPOS": "etask", "FCHAT_BOARD_GROUPS": "G,H", "FCHAT_ENV_DIGEST_AT": "00:00"}
+cfg = {"FCHAT_ENV_REPOS": "etask", "FCHAT_BOARD_GROUPS": "G,H", "FCHAT_ENV_DIGEST_AT": "00:00", "FCHAT_ENV_OWNER_GROUP": "O",
+       "FCHAT_ENV_SHOW_PROD": "1"}                     # even when prod is shown in answers, group snapshots never carry it
 ew.gw.rccfg.get = lambda k, d="": cfg.get(k, d)
 ew.gw._registry = lambda: {"etask": {"gitlab_project_id": 5401, "repo_path": "idaas/etask"}}
 SB = {"env": "sandbox", "version": "0.197.45", "commit": "a" * 40, "digest": "x", "level": "verified"}
 DV = {"env": "dev", "version": "1", "commit": "d" * 40, "digest": "y", "level": "inferred"}
 SNAPS = {"v": [SB, DV]}
-ew.gw._env_snapshots = lambda key, proj: SNAPS["v"]
+PROD = {"env": "prod", "version": "0.197.45", "commit": "", "level": "unknown"}
+ew.gw._env_snapshots = lambda key, proj, show_prod=None: SNAPS["v"] + ([PROD] if show_prod else [])
 GLERR = {"v": False}
 class GL:
     def __init__(self, pid): pass
@@ -115,13 +117,17 @@ class GL:
     def commit_mrs(self, s): return None if GLERR["v"] else [{"iid": 1388, "state": "merged", "target_branch": None}]
 ew.gw.gitlab_api.Client = GL
 sent, FAIL = [], set()
-ew.gw.send.send_text = lambda gid, text, gt=None, card_id="", **k: (sent.append((gid, card_id or "digest", text)),
+ew.gw.send.send_text = lambda gid, text, gt=None, card_id="", **k: (sent.append((gid, card_id or ("snapshot" if text.startswith("🌐 [ENV-SNAPSHOT]") else "digest"), text)),
                                                                      {"error": True} if gid in FAIL else {"sent": True})[1]
 b = board_store.Board()
 K = ew._k
 out = {}
 D = 86400 * 3  # far from any digest time edge in tests that do not want it
 out["t1"] = ew.tick(b, now=1000.0, mode="send")                                 # baseline only
+# first pass after FCHAT_ENV_DIGEST_AT: the daily snapshot (groups + the owner's copy with prod), once a day
+out["snap1"] = [(g, len(t.splitlines()) - 1, "| prod |" in t) for g, c, t in sent if c == "snapshot"]
+out["snap_again"] = [ew.tick(b, now=1000.5, mode="send").get("snapshot"), sum(1 for x in sent if x[1] == "snapshot")]
+sent.clear()
 SNAPS["v"] = [{**SB, "version": "0.198.45", "commit": "b" * 40, "digest": "z"}, {**DV, "version": "2", "commit": "e" * 40}]
 # shadow has its own state: its first pass is a baseline, it sends nothing and touches no send state
 out["shadow1"] = ew.tick(b, now=1001.0, mode="shadow")
@@ -135,12 +141,16 @@ GLERR["v"] = False
 FAIL.add("H")
 t = ew.tick(b, now=1010.0, mode="send")
 out["partial"] = t["delivered"]
+out["snap_pending"] = b.meta_get(K("send", "snapshot", "pending"))                # H failed ⇒ retried next pass
 out["baseline_kept"] = b.meta_get(K("send", "snap", "etask", "sandbox"))["version"]
 FAIL.clear()
 t = ew.tick(b, now=1011.0, mode="send")
 out["retry"] = t["delivered"]
+out["snap_pending_after"] = b.meta_get(K("send", "snapshot", "pending"))
+out["group_snaps_prod"] = any("| prod |" in x for g, c, x in sent if c == "snapshot" and g != "O")
 out["baseline_moved"] = b.meta_get(K("send", "snap", "etask", "sandbox"))["version"]
-out["e_sends"] = [(g, c) for g, c, _ in sent if c != "digest"]
+out["e_sends"] = [(g, c) for g, c, _ in sent if c not in ("digest", "snapshot")]
+out["snap_on_change"] = sorted({g for g, c, _ in sent if c == "snapshot"})
 out["queue_G"] = [it["id"] for it in b.meta_get(K("send", "queue", "G"), [])]
 # digest: fails for H -> date not marked, G's queue cleared; next pass H only
 b.meta_set(K("send", "digest", "last"), "2000-01-01")
@@ -161,7 +171,7 @@ d1 = ew.tick(b, now=1040.0, mode="send")["deferred"]
 SNAPS["v"] = [{**SB, "version": "0.200.45", "commit": "f" * 40, "digest": "r"}]          # new target: count resets
 d2 = [ew.tick(b, now=1041.0 + i, mode="send")["deferred"] for i in range(ew.MAX_DEFER - 1)]
 t = ew.tick(b, now=1050.0, mode="send")
-out["long_error"] = [d1, d2, t["delivered"], [x for _, _, x in sent]]
+out["long_error"] = [d1, d2, t["delivered"], [x for _, c, x in sent if c != "snapshot"]]
 GLERR["v"] = False
 print(json.dumps(out, ensure_ascii=False))
 '''
@@ -173,12 +183,17 @@ class TickTest(unittest.TestCase):
         out = _run_tchat(TICK, _tmpdb())
         self.assertEqual(sorted(out["t1"]["baseline"]), ["etask/dev", "etask/sandbox"])
         self.assertEqual(sorted(out["shadow1"]["baseline"]), ["etask/dev", "etask/sandbox"])   # separate state
+        self.assertEqual(out["snap1"], [["G", 3, False], ["H", 3, False], ["O", 4, True]])        # prod only for O
+        self.assertEqual(out["snap_again"], [None, 3])                                    # daily: once
+        self.assertEqual(out["snap_on_change"], ["G", "H", "O"])
         self.assertEqual(out["shadow_sent"], 0)
         self.assertEqual(out["defer"], [["etask/sandbox", "etask/dev"], ["etask/sandbox", "etask/dev"]])
         self.assertEqual(out["sent_while_deferred"], 0)
         self.assertEqual(out["partial"], ["G:E-etask-sandbox"])
         self.assertEqual(out["baseline_kept"], "0.197.45")
         self.assertEqual(out["retry"], ["H:E-etask-sandbox"])                            # H only, G not twice
+        self.assertEqual((out["snap_pending"], out["snap_pending_after"]), (True, False))   # Codex envtable R1
+        self.assertFalse(out["group_snaps_prod"])                                        # prod only to the owner group
         self.assertEqual(out["baseline_moved"], "0.198.45")
         self.assertEqual([tuple(x) for x in out["e_sends"]],
                          [("G", "E-etask-sandbox"), ("H", "E-etask-sandbox"), ("H", "E-etask-sandbox")])

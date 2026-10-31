@@ -270,3 +270,32 @@ def mr_text(repo: str, web: str, mr: dict, rows: list, snaps: list) -> str:
     if mr.get("web_url"):
         lines.append(f"MR: {mr['web_url']}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- snapshot table (extension "Môi trường" tab)
+SNAPSHOT_HEAD = "🌐 [ENV-SNAPSHOT]"
+_ICON = {"verified": "✅", "inferred": "🟡", "unknown": "❔", "drift": "⚠"}
+
+
+def _cell(v) -> str:
+    return " ".join(str(v or "").replace("|", "/").split()) or "—"
+
+
+def snapshot_text(repos: list, now: float = None, scope: str = "nhóm") -> str:
+    """One message the board turns into its environment table (PROTOCOL.md "Ảnh chụp môi trường"):
+
+        🌐 [ENV-SNAPSHOT] Bảng môi trường · 31/10 08:30 · nhóm
+        repo | etask | https://gitlab…/idaas/etask
+        etask | sandbox | ✅ | 0.198.45 | <commit 40> | 30/10 01:16 | merge/rfc-into-vitess | <build url>
+
+    repos = [(repo, web, snaps)]. One row per repo × env; a column is '—' when unknown. Readable as plain text
+    for members without the extension. scope: "nhóm" or "chủ nhóm" (the owner's copy, prod included)."""
+    now = now or time.time()
+    lines = [f"{SNAPSHOT_HEAD} Bảng môi trường · {time.strftime('%d/%m %H:%M', time.localtime(now))} · {scope}"]
+    for repo, web, snaps in repos:
+        lines.append(f"repo | {_cell(repo)} | {_cell(web)}")
+        for s in snaps:
+            lines.append(" | ".join(_cell(x) for x in (
+                repo, s.get("env"), _ICON.get(s.get("level") or "unknown", "❔"), s.get("version"), s.get("commit"),
+                _when(s.get("rs_created_at") or ""), s.get("branch"), (s.get("build") or {}).get("url"))))
+    return "\n".join(lines)

@@ -543,10 +543,12 @@ def _provenance(job):
     return lookup
 
 
-def _env_snapshots(key, proj):
-    """Snapshot của từng env (cache 5′) — k8s đọc song song, GitLab tag → commit."""
+def _env_snapshots(key, proj, show_prod=None):
+    """Snapshot của từng env (cache 5′) — k8s đọc song song, GitLab tag → commit. show_prod=None ⇒ FCHAT_ENV_SHOW_PROD."""
     from concurrent.futures import ThreadPoolExecutor
-    targets = envmap.env_targets(proj, show_prod=(rccfg.get("FCHAT_ENV_SHOW_PROD") or "0") == "1")
+    if show_prod is None:
+        show_prod = (rccfg.get("FCHAT_ENV_SHOW_PROD") or "0") == "1"
+    targets = envmap.env_targets(proj, show_prod=show_prod)
     gl = gitlab_api.Client(proj.get("gitlab_project_id"))
     now = time.time()
 
@@ -573,6 +575,36 @@ def _env_snapshots(key, proj):
 def _gitlab_web(proj) -> str:
     base = (rccfg.get("GITLAB_URL") or "").rstrip("/")
     return f"{base}/{proj['repo_path']}" if base and proj.get("repo_path") else ""
+
+
+def env_repos() -> list:
+    return [r.strip() for r in (rccfg.get("FCHAT_ENV_REPOS") or "").split(",") if r.strip()]
+
+
+def env_snapshot_text(show_prod: bool, scope: str) -> str:
+    """Ảnh chụp mọi repo FCHAT_ENV_REPOS (bảng môi trường của extension). '' khi chưa bật repo nào."""
+    reg = _registry()
+    rows = [(k, _gitlab_web(reg[k]), _env_snapshots(k, reg[k], show_prod=show_prod))
+            for k in env_repos() if isinstance(reg.get(k), dict)]
+    return board_render.defuse_body(envmap.snapshot_text(rows, scope=scope)) if rows else ""
+
+
+def _env_all(gid, group_type, sender_name, sender_id, me):
+    """@bot env ⇒ ảnh chụp cho nhóm (prod theo FCHAT_ENV_SHOW_PROD); chủ nhóm hỏi ⇒ thêm bản CÓ prod vào nhóm riêng."""
+    try:
+        text = env_snapshot_text(False, "nhóm")       # bảng chung: KHÔNG BAO GIỜ có prod (kể cả FCHAT_ENV_SHOW_PROD=1)
+    except (OSError, ValueError) as e:
+        _post_inline(gid, group_type, f"⚠️ @{sender_name}: bot không đọc được danh sách project ({type(e).__name__}).",
+                     [(sender_name, sender_id)])
+        return
+    if not text:
+        _post_inline(gid, group_type, f"🤖 @{sender_name}: chưa bật bản đồ môi trường — {_OWNER['name']} khai repo trong "
+                                      "FCHAT_ENV_REPOS.", [(sender_name, sender_id)])
+        return
+    _post_inline(gid, group_type, text, [])
+    owner_group = (rccfg.get("FCHAT_ENV_OWNER_GROUP") or "").strip()
+    if me and sender_id == me and owner_group:
+        _post_inline(owner_group, None, env_snapshot_text(True, "chủ nhóm"), [])
 
 
 def _env_command(gid, group_type, sender_name, sender_id, name, args):
@@ -687,6 +719,9 @@ def _board_command(gid, group_type, sender_name, sender_id, me, name, args, ment
         _post_inline(gid, group_type, board_commands.ping_text(hb, {"commands": n}, pending), [])
     elif name == "help":
         _post_inline(gid, group_type, board_commands.help_text(), [])
+    elif name == "env_all":
+        if _allowed(gid, group_type, ident, "env", sender_name, sender_id):
+            _env_all(gid, group_type, sender_name, sender_id, me)
     elif name in ("env", "mr_where"):
         if _allowed(gid, group_type, ident, "env", sender_name, sender_id):
             _env_command(gid, group_type, sender_name, sender_id, name, args)
