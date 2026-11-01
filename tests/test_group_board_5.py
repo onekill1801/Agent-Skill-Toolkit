@@ -185,7 +185,8 @@ sys.argv = ["x"]
 import group_watch as gw
 cfg = {"FCHAT_ENV_REPOS": "etask", "FCHAT_ENV_OWNER_GROUP": "P"}
 gw.rccfg.get = lambda k, d="": cfg.get(k, d)
-gw._registry = lambda: {"etask": {"gitlab_project_id": 1, "repo_path": "idaas/etask"}}
+gw._registry = lambda: {"etask": {"gitlab_project_id": 1, "repo_path": "idaas/etask",
+                                  "environments": {"dev": {"jenkins": {"job": "J"}}}}}
 seen = []
 gw._env_snapshots = lambda key, proj, show_prod=None: (seen.append(show_prod), [])[1]
 gw._post_inline = lambda *a, **k: None
@@ -334,6 +335,143 @@ class FlushPartsTest(unittest.TestCase):
         self.assertEqual(out["s1"], [["G", f"{i}/{n}"] for i in range(1, n + 1)] + [["H", "1/4"], ["H", "2/4"]])
         self.assertEqual(out["s2"], [["H", "3/4"], ["H", "4/4"]])                  # parts already sent: not again
         self.assertEqual((out["drows"], out["pend"]), ([f"r{i}|dev" for i in range(4)], None))
+
+
+TRACK = r"""
+import json, sys
+sys.argv = ["x"]
+import group_watch as gw
+cfg = {"FCHAT_ENV_REPOS": "etask"}
+gw.rccfg.get = lambda k, d="": cfg.get(k, d)
+E = {"environments": {"dev": {"jenkins": {"job": "J"}}}}
+gw._registry = lambda: {"etask": {"gitlab_project_id": 1, "repo_path": "idaas/etask", **E},
+                        "collabora": {"gitlab_project_id": 2, "repo_path": "x/collabora", **E},
+                        "noenv": {"gitlab_project_id": 3, "repo_path": "x/noenv"}}
+posts, applied = [], []
+send_ok = [True]
+gw._post_inline = lambda gid, gt, text, people: (posts.append(text), send_ok[0])[1]
+class S:
+    @staticmethod
+    def apply(ch, by):
+        if ch["FCHAT_ENV_REPOS"] == "etask,collabora":
+            raise RuntimeError("đã bị đổi ở nơi khác")
+        applied.append([ch, by]); return {"changed": ch}
+    @staticmethod
+    def validate(k, v):
+        return "quá dài" if len(v) > 20 else ""
+gw.settings_mod = S
+gw._OWNER.update(id="OWN", name="chủ")
+out = {}
+gw._env_track("G", "GROUP", "Lan", "u-lan", "OWN", "collabora")
+out["member"] = [applied[:], posts[-1][:1]]
+gw._env_track("G", "GROUP", "Chủ", "OWN", "OWN", "")
+out["list"] = [applied[:], posts[-1].splitlines()[:3]]
+gw._env_track("G", "GROUP", "Chủ", "OWN", "OWN", "noenv, etask")
+out["bad"] = [applied[:], "noenv" in posts[-1]]
+gw._env_track("G", "GROUP", "Chủ", "OWN", "OWN", "Collabora etask")
+out["set"] = [applied[-1], posts[-1].splitlines()[1]]
+gw._env_track("G", "GROUP", "Chủ", "OWN", "OWN", "*")
+out["star"] = applied[-1][0]
+n = len(applied)
+gw._env_track("G", "GROUP", "Chủ", "OWN", "OWN", "etask")
+out["same"] = [len(applied) - n, posts[-1].splitlines()[0]]
+cfg["FCHAT_ENV_REPOS"] = "etask"
+p0 = len(posts)
+gw._env_track("G", "GROUP", "Chủ", "OWN", "OWN", "etask,collabora")
+out["fail"] = [len(applied) - n, [p.splitlines()[1] for p in posts[p0:]], "KHÔNG lưu được" in posts[-1]]
+gw.env_capable = lambda reg: ["etask", "collabora", "x" * 30]
+gw._env_track("G", "GROUP", "Chủ", "OWN", "OWN", "x" * 30)
+out["long"] = [len(applied) - n, posts[-1][:2]]
+send_ok[0] = False
+gw._env_track("G", "GROUP", "Chủ", "OWN", "OWN", "collabora")
+out["send_fail"] = len(applied) - n
+# @bot env <repo> chưa theo dõi vẫn trả lời; repo không có môi trường thì không
+seen = []
+gw._env_snapshots = lambda key, proj, show_prod=None: (seen.append(key), [])[1]
+gw._env_command("G", "GROUP", "Lan", "u-lan", "env", ["collabora"])
+gw._env_command("G", "GROUP", "Lan", "u-lan", "env", ["noenv"])
+out["ondemand"] = seen
+print(json.dumps(out, ensure_ascii=False))
+"""
+
+
+class EnvTrackTest(unittest.TestCase):
+    """@bot env theo dõi: chỉ chủ nhóm; danh sách cho extension; ghi FCHAT_ENV_REPOS qua settings.apply."""
+
+    def test_track_command(self):
+        from test_group_board import _run_tchat, _tmpdb
+        out = _run_tchat(TRACK, _tmpdb())
+        self.assertEqual(out["member"][0], [], "thành viên không đổi được")
+        self.assertEqual(out["member"][1], "⛔")
+        self.assertEqual(out["list"][0], [])
+        self.assertTrue(out["list"][1][0].startswith("🧭 [ENV-REPOS] theo dõi 1/2 repo"))
+        self.assertEqual(out["list"][1][1:], ["theo dõi: etask", "khác: collabora"])
+        self.assertEqual(out["bad"], [[], True], "repo không có môi trường ⇒ từ chối, không ghi gì")
+        self.assertEqual(out["set"][0][0], {"FCHAT_ENV_REPOS": "collabora,etask"})
+        self.assertEqual(out["set"][1], "theo dõi: etask, collabora")
+        self.assertEqual(out["star"], {"FCHAT_ENV_REPOS": "*"})
+        self.assertEqual(out["same"][0], 0, "không đổi ⇒ không ghi .env (không làm bot chạy lại)")
+        self.assertIn("không đổi", out["same"][1])
+        self.assertEqual(out["fail"][0], 0)
+        self.assertEqual(out["fail"][1], ["theo dõi: etask, collabora", "theo dõi: etask"],
+                         "báo trước khi ghi; ghi lỗi ⇒ tin 🧭 mới với tập cũ")
+        self.assertTrue(out["fail"][2])
+        self.assertEqual(out["long"], [0, "⚠️"], "quá giới hạn ⇒ báo, không ghi")
+        self.assertEqual(out["send_fail"], 0, "gửi trả lời lỗi ⇒ không ghi .env")
+        self.assertEqual(out["ondemand"], ["collabora"], "repo chưa theo dõi vẫn hỏi được")
+
+    def test_parse(self):
+        from agent_skill_toolkit.workflows.group_board import commands as c
+        self.assertEqual(c.parse("@bot env theo dõi etask,collabora"), ("env_track", ("etask,collabora",)))
+        self.assertEqual(c.parse("@bot env track"), ("env_track", ("",)))
+        self.assertEqual(c.parse("@bot env etask"), ("env", ("etask",)))
+
+
+REPOSIG = r"""
+import json, sys
+sys.argv = ["x"]
+import env_watch as ew
+from agent_skill_toolkit.core import board_store
+cfg = {"FCHAT_ENV_SHOW_PROD": "0"}
+ew.gw.rccfg.get = lambda k, d="": cfg.get(k, d)
+sent = []
+ew._send_table = lambda g, t: (sent.append(t.splitlines()[0][:30]), True)[1]
+b = board_store.Board()
+sc = {"nhóm": ["N"]}
+row = lambda r: f"{r} | dev | 🔨 | 1 | {'c' * 8} | — | — | —"
+rows = {"nhóm": {"etask|dev": row("etask"), "collabora|dev": row("collabora")}}
+ok = {"nhóm": set(rows["nhóm"])}
+out = {}
+out["first"] = ew.table_pass(b, sc, rows, ok, {}, 1761000000.0, repos=["etask", "collabora"])
+out["same"] = ew.table_pass(b, sc, rows, ok, {}, 1761000060.0, repos=["collabora", "etask"])
+rows2 = {"nhóm": {"etask|dev": row("etask")}}
+out["dropped"] = ew.table_pass(b, sc, rows2, {"nhóm": set(rows2["nhóm"])}, {}, 1761000120.0, repos=["etask"])
+out["drows"] = sorted(b.meta_get("envtable:drows:nhóm"))
+b.meta_set("envtable:repos:nhóm", None)
+out["legacy"] = ew.table_pass(b, sc, rows2, {"nhóm": set(rows2["nhóm"])}, {}, 1761000180.0, repos=["etask"])
+out["legacy_sig"] = b.meta_get("envtable:repos:nhóm")
+sent.clear()
+out["empty"] = ew.table_pass(b, sc, {"nhóm": {}}, {"nhóm": set()}, {}, 1761000240.0, repos=["prodonly"])
+out["empty_sent"] = [len(sent), b.meta_get("envtable:drows:nhóm")]
+print(json.dumps(out, ensure_ascii=False))
+"""
+
+
+class EnvRepoSetChangeTest(unittest.TestCase):
+    """Đổi tập repo theo dõi ⇒ cả bảng mới (repo bỏ biến mất); cùng tập (khác thứ tự) ⇒ không gửi; bản cũ chưa lưu
+    tập repo ⇒ lấy mốc, không gửi lại."""
+
+    def test_repo_set_change_resends_full(self):
+        from test_group_board import _run_tchat, _tmpdb
+        out = _run_tchat(REPOSIG, _tmpdb())
+        self.assertEqual(out["first"], {"nhóm": "full"})
+        self.assertEqual(out["same"], {})
+        self.assertEqual(out["dropped"], {"nhóm": "full"})
+        self.assertEqual(out["drows"], ["etask|dev"])
+        self.assertEqual(out["legacy"], {})
+        self.assertEqual(out["legacy_sig"], "etask")
+        self.assertEqual(out["empty"], {"nhóm": "full"}, "tập mới không có dòng nào ⇒ vẫn gửi bảng rỗng xoá bảng cũ")
+        self.assertEqual(out["empty_sent"], [1, {}])
 
 
 if __name__ == "__main__":

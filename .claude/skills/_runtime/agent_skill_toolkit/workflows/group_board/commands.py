@@ -23,6 +23,7 @@ _CMDS = (
     ("ping", re.compile(r"^ping\b", re.I), True),
     ("help", re.compile(r"^(?:help|giúp|hướng dẫn)\s*\??\s*$", re.I), True),
     ("env_all", re.compile(r"^env(?:\s+(?:all|tất\s*cả))?\s*\??\s*$", re.I), True),
+    ("env_track", re.compile(r"^env\s+(?:theo\s*dõi|track)\b\s*:?\s*(.*)$", re.I | re.S), True),
     ("env", re.compile(r"^env\s+([\w.\-/]+)\s*\??\s*$", re.I), True),
     ("mr_where", re.compile(r"^mr\s*!?(\d+)\s+([\w.\-/]+)(?:\s+ở\s+đâu)?\s*\??\s*$", re.I), True),
     ("task_create", re.compile(r"^tạo\s+task\s*:\s*(.+)$", re.I | re.S), True),
@@ -45,7 +46,9 @@ HELP_LINES = (
     "@bot tôi là ai — định danh + quyền của bạn",
     "@bot ping — bot còn chạy không",
     "@bot env — bảng môi trường của mọi repo (bảng việc lưu lại thành bảng tra cứu)",
-    "@bot env <repo> — repo đang chạy phiên bản/commit nào ở từng môi trường (kèm link tự kiểm)",
+    "@bot env <repo> — repo đang chạy phiên bản/commit nào ở từng môi trường (kèm link tự kiểm; mọi repo, kể cả repo "
+    "không theo dõi)",
+    "@bot env theo dõi [repo1,repo2…|*] — chủ nhóm: xem / chọn repo vào bảng môi trường (extension: ô tích ở tab Môi trường)",
     "@bot MR <số> <repo> ở đâu? — MR đã merge chưa, đã có ở môi trường nào",
     "@bot tạo task: <tiêu đề> | giao: @<người> | hạn: dd/mm/yyyy | mô tả: … | list: <mã> — nháp thẻ T-n",
     "xác nhận T-<số> — tạo task trên aTask (người tạo nháp) · huỷ T-<số> — bỏ nháp",

@@ -197,7 +197,12 @@ def _flush_pending(board, sc: str) -> bool:
     return True
 
 
-def _queue(board, sc: str, targets: list, kind: str, rows: dict, webs: dict, now: float, replace=False) -> int:
+def _repo_sig(repos) -> str:
+    return ",".join(sorted(repos))
+
+
+def _queue(board, sc: str, targets: list, kind: str, rows: dict, webs: dict, now: float, replace=False,
+           repos=None) -> int:
     """Cấp số + dựng tin + ghi tin chờ TRONG MỘT transaction, rồi mới gửi (_flush_pending)."""
     def q(get, put):
         seq = int(get(_tk("seq", sc), 0) or 0) + 1
@@ -207,11 +212,13 @@ def _queue(board, sc: str, targets: list, kind: str, rows: dict, webs: dict, now
                               "prod": _flag(sc)})
         if replace:
             put(_tk("prodflag", sc), _flag(sc))           # cùng transaction: crash không tách bảng với cờ của nó
+            if repos is not None:
+                put(_tk("repos", sc), _repo_sig(repos))
         return seq
     return board.meta_txn(q)
 
 
-def table_pass(board, scopes: dict, rows: dict, ok: dict, webs: dict, now: float, requests=()) -> dict:
+def table_pass(board, scopes: dict, rows: dict, ok: dict, webs: dict, now: float, requests=(), repos=None) -> dict:
     """Một lượt: tin chờ trước; chưa có mốc ⇒ cả bảng (đánh số); có dòng đổi ⇒ tin thay đổi (đánh số) cho MỌI nơi nhận;
     rồi trả lời yêu cầu "@bot env": cả bảng hiện tại CHỈ cho nơi hỏi, mang số hiện tại (không cấp số mới ⇒ nơi khác
     không bị báo lỡ tin). Dòng đọc lỗi trong cả bảng: dùng dòng tốt gần nhất đã gửi."""
@@ -224,9 +231,16 @@ def table_pass(board, scopes: dict, rows: dict, ok: dict, webs: dict, now: float
         flag = _flag(sc)
         if (board.meta_get(_tk("prodflag", sc)) or "0") != flag:
             drows = None                                  # bật/tắt prod cho nhóm ⇒ cả bảng mới (tắt: dòng prod biến mất)
+        reset = False
+        if repos is not None:                             # chủ nhóm đổi repo theo dõi ⇒ cả bảng mới (repo bỏ biến mất)
+            had = board.meta_get(_tk("repos", sc))
+            if had is None:
+                board.meta_set(_tk("repos", sc), _repo_sig(repos))   # bản cũ chưa lưu tập repo: lấy mốc, không gửi lại
+            elif had != _repo_sig(repos):
+                drows, reset = None, True
         if drows is None:
-            if rows[sc]:
-                _queue(board, sc, targets, "SNAPSHOT", dict(rows[sc]), webs, now, replace=True)
+            if rows[sc] or reset:                         # đổi tập repo: gửi cả bảng kể cả RỖNG (xoá bảng cũ)
+                _queue(board, sc, targets, "SNAPSHOT", dict(rows[sc]), webs, now, replace=True, repos=repos)
                 out[sc] = "full"
         else:
             diff = {k: r for k, r in rows[sc].items() if k in ok[sc] and drows.get(k) != r}
@@ -299,7 +313,7 @@ def serve_requests(board, now: float = None) -> list:
                     left.append({"scope": "chủ nhóm", "group": owner_group})
         asks += [{**a, "req": r.get("id")} for a in left]
     rows, ok, webs = read_all_rows(scopes, owner_group)
-    table_pass(board, scopes, rows, ok, webs, now, asks)
+    table_pass(board, scopes, rows, ok, webs, now, asks, repos=gw.env_repos())
 
     def settle(get, put):                             # theo id: yêu cầu mới xếp thêm trong lúc gửi vẫn giữ nguyên
         keep = []
@@ -407,7 +421,7 @@ def tick(board, now: float = None, mode: str = None) -> dict:
                 board.meta_set(_k(mode, "sent", key, env), {})
                 board.meta_set(_k(mode, "defer", key, env), {})
     # bảng môi trường: chỉ gửi THAY ĐỔI (bot trên máy chạy quyết định lúc nào); chưa có mốc ⇒ cả bảng một lần
-    out["table"] = table_pass(board, scopes, t_rows, t_ok, webs, now)
+    out["table"] = table_pass(board, scopes, t_rows, t_ok, webs, now, repos=repos)
     if groups and _digest_due(board, mode, now):
         since = board.meta_get(_k(mode, "digest", "since"), now - 86400)
         all_ok = True

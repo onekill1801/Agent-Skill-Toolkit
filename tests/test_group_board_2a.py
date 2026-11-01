@@ -316,7 +316,7 @@ class GroupWatchEnvTest(unittest.TestCase):
         self.assertEqual(sorted(out["k8s"]), ["dc/idaas-etask", "deployment/idaas-etask", "deployment/kyta-etask"])
         self.assertIn("chưa merge", out["mr"])
         self.assertTrue(out["cached"])                                                 # 5-min cache
-        self.assertIn("chưa bật bản đồ môi trường cho 'econtract'", out["not_enabled"])
+        self.assertIn("không thấy repo 'econtract' có môi trường", out["not_enabled"])
 
 
 if __name__ == "__main__":

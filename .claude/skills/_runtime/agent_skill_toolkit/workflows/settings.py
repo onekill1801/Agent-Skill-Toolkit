@@ -91,9 +91,10 @@ CATALOG = [
     _s("FCHAT_BOARD_GROUPS", "TChat", "Nhóm bật bảng việc",
        "id group (cách nhau dấu phẩy): review báo bằng thẻ R-n (không ack ngay; 'chờ bot' sau 3′; cùng commit ⇒ "
        "trỏ thẻ cũ) — trống = kiểu cũ", "csv", "", item=_ID, restart=(GROUP_WATCH,)),
-    _s("FCHAT_ENV_REPOS", "TChat", "Repo trả lời @bot env / MR ở đâu",
+    _s("FCHAT_ENV_REPOS", "TChat", "Repo theo dõi trong bảng môi trường",
        "khoá project trong work/projects.json, cách nhau dấu phẩy (vd etask); * = mọi project có môi trường "
-       "— trống = tắt bản đồ môi trường",
+       "— trống = tắt bảng. Repo không theo dõi vẫn hỏi được: @bot env <repo>. Chủ nhóm đổi trong chat: "
+       "@bot env theo dõi a,b (extension: ô tích ở tab Môi trường)",
        "csv", "", item=r"\*|[\w.\-]{1,60}", restart=(GROUP_WATCH, "env_watch")),
     _s("FCHAT_ENV_SHOW_PROD", "TChat", "Prod trong nhóm chung",
        "1 = prod vào thẳng bảng môi trường của nhóm chung + câu trả lời '@bot env <repo>' (chỉ đọc: phiên bản, commit, "

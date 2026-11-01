@@ -60,6 +60,10 @@ from agent_skill_toolkit.workflows.group_board import review as board_review  # 
 from agent_skill_toolkit.workflows.group_board import task as board_task  # noqa: E402
 from agent_skill_toolkit.workflows.group_board import deploy as board_deploy  # noqa: E402
 from agent_skill_toolkit.workflows.intake import gate  # noqa: E402
+try:
+    from agent_skill_toolkit.workflows import settings as settings_mod  # noqa: E402  (@bot env theo dõi)
+except Exception:       # noqa: BLE001
+    settings_mod = None
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -495,8 +499,9 @@ def _registry() -> dict:
 
 
 def _env_repo(name, reg):
-    """Registry key of `name` (key or last path segment), only if listed in FCHAT_ENV_REPOS."""
-    allowed = {x.lower() for x in env_repos(reg)}
+    """Registry key of `name` (key or last path segment), only if it has readable environments (env_capable) — repo
+    KHÔNG theo dõi (ngoài FCHAT_ENV_REPOS) vẫn hỏi được khi cần."""
+    allowed = {x.lower() for x in env_capable(reg)}
     n = (name or "").strip().lower()
     for key, proj in reg.items():
         if not isinstance(proj, dict):
@@ -613,9 +618,79 @@ def env_repos(reg=None) -> list:
         reg = reg if reg is not None else _registry()
     except (OSError, ValueError):
         return [r for r in raw if r != "*"]
-    every = [k for k, p in reg.items() if isinstance(p, dict) and p.get("gitlab_project_id")
-             and envmap.env_targets(p, show_prod=True)]
-    return list(dict.fromkeys(every + [r for r in raw if r != "*"]))
+    return list(dict.fromkeys(env_capable(reg) + [r for r in raw if r != "*"]))
+
+
+def env_capable(reg) -> list:
+    """Mọi project có môi trường đọc được: GitLab id + ít nhất một env có job Jenkins / workload k8s."""
+    return [k for k, p in reg.items() if isinstance(p, dict) and p.get("gitlab_project_id")
+            and envmap.env_targets(p, show_prod=True)]
+
+
+ENV_TRACK_HEAD = "🧭 [ENV-REPOS]"
+
+
+def env_track_text(tracked, capable, note="") -> str:
+    """Danh sách theo dõi — dòng đầu cố định để extension của chủ nhóm đọc ra ô tích (theo dõi: … / khác: …)."""
+    on = [k for k in capable if k in set(tracked)]
+    off = [k for k in capable if k not in set(tracked)]
+    lines = [f"{ENV_TRACK_HEAD} theo dõi {len(on)}/{len(capable)} repo" + (f" — {note}" if note else ""),
+             "theo dõi: " + (", ".join(on) or "—"), "khác: " + (", ".join(off) or "—"),
+             "Repo khác vẫn hỏi được: @bot env <repo>. Đổi: @bot env theo dõi repo1,repo2 (hoặc *)."]
+    return "\n".join(lines)
+
+
+def _env_track(gid, group_type, sender_name, sender_id, me, arg):
+    """@bot env theo dõi [list|*] — CHỈ chủ nhóm: không đối số ⇒ danh sách hiện tại; có ⇒ ghi FCHAT_ENV_REPOS (qua
+    settings.apply: kiểm định dạng + audit). supervise thấy .env đổi ⇒ chạy lại group_watch + env_watch; env_watch
+    thấy tập repo đổi ⇒ gửi lại CẢ bảng (repo bỏ theo dõi biến mất khỏi bảng)."""
+    if not me or str(sender_id) != str(me):
+        _post_inline(gid, group_type, f"⛔ @{sender_name}: chỉ {_OWNER['name']} chọn repo theo dõi. Hỏi một repo bất kỳ: "
+                                      "@bot env <repo>", [(sender_name, sender_id)])
+        return
+    try:
+        reg = _registry()
+    except (OSError, ValueError) as e:
+        _post_inline(gid, group_type, f"⚠️ bot không đọc được danh sách project ({type(e).__name__}).", [])
+        return
+    capable = env_capable(reg)
+    items = [x for x in re.split(r"[\s,]+", (arg or "").strip()) if x]
+    if not items:
+        _post_inline(gid, group_type, board_render.defuse_body(env_track_text(env_repos(reg), capable)), [])
+        return
+    if "*" in items:
+        value, tracked = "*", capable
+    else:
+        names = {k.lower(): k for k in capable}
+        bad = [x for x in items if x.lower() not in names]
+        if bad:
+            _post_inline(gid, group_type, board_render.defuse(
+                f"⚠️ không theo dõi được (không có môi trường đọc được trong registry): {', '.join(bad)[:300]}"), [])
+            return
+        tracked = list(dict.fromkeys(names[x.lower()] for x in items))
+        value = ",".join(tracked)
+    if settings_mod is None:
+        _post_inline(gid, group_type, "⚠️ bot thiếu module cài đặt — đổi bằng toolkit_settings.py.", [])
+        return
+    why = settings_mod.validate("FCHAT_ENV_REPOS", value)
+    if why:                                           # vd quá dài: báo ngay, không ghi gì
+        _post_inline(gid, group_type, board_render.defuse(f"⚠️ không lưu được: {board_render.one_line(why, 200)} — chọn "
+                                                          "ít repo hơn hoặc dùng *"), [])
+        return
+    cur = env_repos(reg)
+    if set(cur) == set(tracked):
+        _post_inline(gid, group_type, board_render.defuse_body(env_track_text(cur, capable, "không đổi")), [])
+        return
+    # trả lời TRƯỚC khi ghi: ghi .env ⇒ supervise chạy lại bot, có thể ngay sau đó (Codex envtrack R1 #4)
+    if not _post_inline(gid, group_type, board_render.defuse_body(
+            env_track_text(tracked, capable, "đã lưu, bot gửi lại cả bảng trong ít phút")), []):
+        print(f"[{_now()}] [WARN] env theo dõi: không gửi được trả lời ⇒ KHÔNG ghi FCHAT_ENV_REPOS", file=sys.stderr)
+        return                                        # chủ nhóm không thấy kết quả ⇒ không đổi gì (gửi lại lệnh)
+    try:
+        settings_mod.apply({"FCHAT_ENV_REPOS": value}, by=f"fchat:{sender_name}")
+    except (ValueError, RuntimeError, OSError) as e:   # tin 🧭 mới (đè tin trên) mang tập CŨ + lý do
+        _post_inline(gid, group_type, board_render.defuse_body(
+            env_track_text(cur, capable, "KHÔNG lưu được: " + board_render.one_line(str(e), 160))), [])
 
 
 def _env_all(gid, group_type, sender_name, sender_id, me):
@@ -649,8 +724,8 @@ def _env_command(gid, group_type, sender_name, sender_id, name, args):
     repo = args[0] if name == "env" else args[1]
     key = _env_repo(repo, reg)
     if not key:
-        _post_inline(gid, group_type, f"🤖 @{sender_name}: chưa bật bản đồ môi trường cho '{board_render.one_line(repo, 40)}' "
-                                      f"— {_OWNER['name']} khai repo trong FCHAT_ENV_REPOS.", [(sender_name, sender_id)])
+        _post_inline(gid, group_type, f"🤖 @{sender_name}: không thấy repo '{board_render.one_line(repo, 40)}' có môi trường "
+                                      "đọc được trong danh sách project.", [(sender_name, sender_id)])
         return
     proj = reg[key]
     prod_chan = (rccfg.get("FCHAT_ENV_OWNER_GROUP") or "").strip()
@@ -1025,6 +1100,8 @@ def _board_command(gid, group_type, sender_name, sender_id, me, name, args, ment
     elif name == "env_all":
         if _allowed(gid, group_type, ident, "env", sender_name, sender_id):
             _env_all(gid, group_type, sender_name, sender_id, me)
+    elif name == "env_track":
+        _env_track(gid, group_type, sender_name, sender_id, me, args[0])
     elif name in ("env", "mr_where"):
         if _allowed(gid, group_type, ident, "env", sender_name, sender_id):
             _env_command(gid, group_type, sender_name, sender_id, name, args)
