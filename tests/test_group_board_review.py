@@ -126,6 +126,19 @@ class ReviewCardTest(unittest.TestCase):
         out = review.on_request(self.b, "G", {**JOB, "rerequested_head": "c" * 40}, LAN, now=1300)
         self.assertEqual((out["send"], out["card"]["payload"]["round_head"]), (None, "c" * 40))
 
+    def test_ack_now(self):
+        """FCHAT_REVIEW_ACK_NOW: a new round returns its 'chờ bot' card at once; acked only after it went out."""
+        out = review.on_request(self.b, "G", JOB, LAN, now=1000, ack_now=True)
+        self.assertTrue(out["ack"])
+        self.assertIn("Trạng thái: chờ bot", out["send"][0])
+        self.assertIn("đã nhận", out["send"][0])
+        self.assertEqual(len(review.due_acks(self.b, "G", now=1000 + review.ACK_AFTER_S)), 1)   # send failed ⇒ timer
+        review.mark_acked(self.b, "G", out["card"])
+        self.assertEqual(review.due_acks(self.b, "G", now=1000 + review.ACK_AFTER_S), [])      # sent ⇒ no second ack
+        again = review.on_request(self.b, "G", JOB, LAN, now=1100, ack_now=True)                # same round running
+        self.assertFalse(again.get("ack"))
+        self.assertIn("đang review lượt này", again["send"][0])
+
     def test_overdue_rechecks_and_reconciles(self):
         review.on_request(self.b, "G", JOB, LAN, now=1000)
         t = 1000 + review.OVERDUE_S
@@ -317,7 +330,7 @@ g.send.send_text = lambda gid, content, gt=None, metadata=None, card_id="", **k:
     {"sent": True, "confirmed": True})[1]
 g._post_tagged = lambda *a: tagged.append(a[-1])
 g._auto_review_state = lambda: (None, None, False)
-cfg = {"FCHAT_BOARD_GROUPS": "G"}
+cfg = {"FCHAT_BOARD_GROUPS": "G", "FCHAT_REVIEW_ACK_NOW": "0"}     # kiểu cũ: ack sau 3′ (ack ngay: cuối kịch bản)
 g.rccfg.get = lambda k, d="": cfg.get(k, d)
 JOB = {"id": "5401-1388", "project_id": 5401, "iid": 1388, "project_path": "idaas/etask", "title": "Fix",
        "web_url": "https://gitlab.fis.vn/idaas/etask/-/merge_requests/1388", "head_sha": "a", "verdict": "APPROVE"}
@@ -347,6 +360,15 @@ sent.clear()
 RES["r"] = {"added": [], "refused": [], "unchanged": ["5401-1388"], "jobs": [{**JOB, "same_head": True}]}
 g._enqueue_review("G", "SUPER_PRIVATE", "Minh", "u-minh", "review lại https://gitlab.fis.vn/idaas/etask/-/merge_requests/1388")
 out["same_head"] = [x["text"] for x in sent]
+# FCHAT_REVIEW_ACK_NOW=1 (mặc định): MR mới ⇒ thẻ 'chờ bot' ngay, hẹn giờ 3′ không gửi lần hai
+cfg.pop("FCHAT_REVIEW_ACK_NOW")
+sent.clear()
+J2 = {**JOB, "id": "5401-1389", "iid": 1389, "web_url": JOB["web_url"][:-4] + "1389", "verdict": None}
+RES["r"] = {"added": ["5401-1389"], "refused": [], "unchanged": [], "jobs": [{**J2, "same_head": False}]}
+g._enqueue_review("G", "SUPER_PRIVATE", "Lan", "u-lan", "review giúp …/merge_requests/1389")
+out["ack_now"] = [[x["card"], x["text"].splitlines()[1]] for x in sent]
+g._card_tick("G", now=time.time() + 200)
+out["ack_now_after"] = len(sent)
 # group without the board: legacy ack
 cfg["FCHAT_BOARD_GROUPS"] = ""
 tagged.clear(); tools.clear()
@@ -363,7 +385,9 @@ class GroupWatchBoardTest(unittest.TestCase):
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from test_group_board import _run_tchat, _tmpdb
         out = _run_tchat(WATCH_BOARD, _tmpdb())
-        self.assertEqual(out["new"], {"sent": [], "tagged": [], "skip_flag": True})     # no immediate ack
+        self.assertEqual(out["new"], {"sent": [], "tagged": [], "skip_flag": True})     # ACK_NOW=0: no immediate ack
+        self.assertEqual(out["ack_now"], [["R-2", "Trạng thái: chờ bot · Yêu cầu: @Lan"]])
+        self.assertEqual(out["ack_now_after"], 1, "đã báo ngay ⇒ hẹn giờ 3′ không gửi lại")
         self.assertEqual(out["ack"], ["R-1"])                                            # once, after 3 min
         self.assertTrue(out["ack_text"].startswith("🤖 [R-1] idaas/etask!1388"))
         self.assertIn("Trạng thái: chờ bot · Yêu cầu: @Lan", out["ack_text"])

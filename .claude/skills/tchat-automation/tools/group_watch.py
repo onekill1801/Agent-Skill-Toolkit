@@ -359,16 +359,18 @@ def _post_card(gid, group_type, card, text, people):
 
 
 def _review_cards(gid, group_type, sender_name, sender_id, res, started=None):
-    """Bảng việc: mỗi MR một thẻ R. Yêu cầu mới ⇒ im lặng (thẻ 'chờ bot' chỉ ra sau 3′ nếu chưa có kết quả);
-    MR chưa có commit mới từ lượt review trước ⇒ gửi lại thẻ cũ ngay."""
+    """Bảng việc: mỗi MR một thẻ R. Yêu cầu mới ⇒ thẻ 'chờ bot' ngay (FCHAT_REVIEW_ACK_NOW=1, mặc định; =0 hoặc
+    gửi lỗi ⇒ chỉ ra sau 3′ nếu chưa có kết quả); MR chưa có commit mới từ lượt review trước ⇒ gửi lại thẻ cũ ngay."""
+    ack_now = rccfg.get("FCHAT_REVIEW_ACK_NOW", "1") != "0"
     for j in res.get("jobs") or []:
         # khoá theo MR (liên tiến trình): review_post có thể đang đăng kết quả của chính MR này
         with board_review.lock(gid, board_review.ref_of(j)):
             with _board_lock:
                 out = board_review.on_request(_board, gid, j, {"id": str(sender_id or ""), "name": sender_name or ""},
-                                              unchanged=bool(j.get("same_head")), now=started)
-            if out["send"]:
-                _post_card(gid, group_type, out["card"], *out["send"])
+                                              unchanged=bool(j.get("same_head")), now=started, ack_now=ack_now)
+            if out["send"] and _post_card(gid, group_type, out["card"], *out["send"]) and out.get("ack"):
+                with _board_lock:
+                    board_review.mark_acked(_board, gid, out["card"])
 
 
 def _job_info(job_id):
@@ -1137,7 +1139,7 @@ def _enqueue_review(gid, group_type, sender_name, sender_id, text):
     mode = _kick_auto_review()
     print(f"[{_now()}] [review] {sender_name}: jobs={jobs} -> {mode}")
     if board:
-        return          # bảng việc: không ack ngay — thẻ 'chờ bot' ra sau 3′ nếu chưa có kết quả (§4.4)
+        return          # bảng việc: thẻ R ở trên là lời báo đã nhận
     _post_tagged(gid, group_type, sender_name, sender_id,
                  f"🤖 Đã nhận yêu cầu review {', '.join(jobs)} — {mode}. Kết quả sẽ báo lại ở đây.")
 

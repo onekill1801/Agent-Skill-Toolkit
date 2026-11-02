@@ -208,14 +208,15 @@ class GroupWatch1bTest(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr[-2000:])
         out = json.loads(p.stdout.strip().splitlines()[-1])
         self.assertEqual(out["member_review"]["tools"], [["review_flow.py", "enqueue-text"]])   # default perms
-        self.assertEqual(out["member_review"]["sent"], [])                                       # no ack (1a)
+        self.assertEqual(len(out["member_review"]["sent"]), 1)                                   # thẻ R 'đã nhận' ngay
+        self.assertIn("Trạng thái: chờ bot", out["member_review"]["sent"][0])
         self.assertEqual(out["denied_review"]["tools"], [])
         self.assertTrue(out["denied_review"]["sent"][0].startswith("⛔ @Huy: chưa có quyền 'review'"))
         self.assertIn("GitLab: lan.nt", out["whoami"]["sent"][0])
         self.assertTrue(out["owner_ping"]["sent"][0].startswith("🤖 Bot đang chạy"))
         self.assertIn("review giúp MR", out["help"]["sent"][0])
         self.assertEqual(out["again"]["tools"], [["review_flow.py", "enqueue"]])
-        self.assertEqual(out["again"]["sent"], [])                                               # new round: no ack
+        self.assertEqual(len(out["again"]["sent"]), 1)                                           # lượt mới: báo ngay
         self.assertIn("không thấy thẻ R-99", out["again_missing"]["sent"][0])
         self.assertEqual(out["again_denied"]["tools"], [])
         self.assertEqual(out["handled"], ["@bot tôi là ai", "@bot ping"])

@@ -1,7 +1,8 @@
 """Review cards R-n (design §4.1, §4.4, phase 1a). State over core.board_store; sending is the caller's.
 
 One card per (group, MR) for its whole life: `ref = <gitlab project id>!<iid>`. Less noise than the old flow:
-  * a request does NOT send an ack; only if no result came within ACK_AFTER_S the card goes out as `chờ bot`
+  * a request sends the card as `chờ bot` right away when ack_now (FCHAT_REVIEW_ACK_NOW, default on); otherwise —
+    or when that send failed — only if no result came within ACK_AFTER_S
   * the MR asked again while its head commit is the one already reviewed -> the existing card is shown again
   * asked again while that round is still running -> the card is shown, the round's clock is NOT reset
   * still `chờ bot` after OVERDUE_S -> the review job is checked every RECHECK_S; a job that ended without
@@ -58,11 +59,14 @@ def current_round(card: dict) -> str:
     return p.get("round_head") or p.get("head") or ""
 
 
-def on_request(board, group: str, job: dict, requester: dict, unchanged: bool = False, now: float = None) -> dict:
+def on_request(board, group: str, job: dict, requester: dict, unchanged: bool = False, now: float = None,
+               ack_now: bool = False) -> dict:
     """A member asked for a review of `job`'s MR (caller holds lock(group, ref_of(job))).
     now = when the request STARTED being queued: a response older than the card's current round (two workers,
     the slower one finishing last) only shows the card — it never moves it.
-    Returns {"card", "send": (text, people) | None}."""
+    ack_now = a new round returns its `chờ bot` card to send now; the caller marks it acked only once it went out
+    (a failed send falls back to the ACK_AFTER_S timer).
+    Returns {"card", "send": (text, people) | None, "ack": bool (send is the round's ack)}."""
     now = now or time.time()
     card = _open(board, group, job)
     p = card["payload"]
@@ -90,6 +94,9 @@ def on_request(board, group: str, job: dict, requester: dict, unchanged: bool = 
     card = board.card_update(group, card["id"], state="pending", requester=requester, requested_at=now,
                              round_head=head, ack_sent=False, overdue_next_at=now + OVERDUE_S,
                              rounds=int(p.get("rounds") or 0) + 1, summary="", **_payload(job))
+    if ack_now:
+        return {"card": card, "send": render.render_review(card, requester, note="đã nhận — kết quả sẽ báo ở đây"),
+                "ack": True}
     return {"card": card, "send": None}
 
 

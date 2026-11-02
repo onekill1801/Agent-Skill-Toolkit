@@ -89,8 +89,11 @@ CATALOG = [
     _s("FCHAT_WATCH_TIMEOUT", "TChat", "Thời gian tối đa một lượt agent (giây)", "", "int", "1800",
        lo=60, hi=7200, restart=(GROUP_WATCH,)),
     _s("FCHAT_BOARD_GROUPS", "TChat", "Nhóm bật bảng việc",
-       "id group (cách nhau dấu phẩy): review báo bằng thẻ R-n (không ack ngay; 'chờ bot' sau 3′; cùng commit ⇒ "
-       "trỏ thẻ cũ) — trống = kiểu cũ", "csv", "", item=_ID, restart=(GROUP_WATCH,)),
+       "id group (cách nhau dấu phẩy): review báo bằng thẻ R-n (cùng commit ⇒ trỏ thẻ cũ) — trống = kiểu cũ",
+       "csv", "", item=_ID, restart=(GROUP_WATCH,)),
+    _s("FCHAT_REVIEW_ACK_NOW", "TChat", "Báo 'đã nhận' ngay khi có yêu cầu review",
+       "1 = gửi thẻ R 'chờ bot' ngay khi nhận yêu cầu (mặc định) · 0 = im lặng, chỉ gửi nếu sau 3′ chưa có kết quả",
+       "bool", "1", restart=(GROUP_WATCH,)),
     _s("FCHAT_ENV_REPOS", "TChat", "Repo theo dõi trong bảng môi trường",
        "khoá project trong work/projects.json, cách nhau dấu phẩy (vd etask); * = mọi project có môi trường "
        "— trống = tắt bảng. Repo không theo dõi vẫn hỏi được: @bot env <repo>. Chủ nhóm đổi trong chat: "
