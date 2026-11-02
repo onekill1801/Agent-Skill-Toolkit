@@ -60,15 +60,27 @@ def _safe_exe(path: str) -> str:
     return exe if os.path.isfile(exe) else ""
 
 
+def _is_screen_reader(path: str) -> bool:
+    """GNOME's /usr/bin/orca (a Python script) shares the name; running it starts speech."""
+    try:
+        with open(path, "rb") as f:
+            return b"python" in f.read(64)
+    except OSError:
+        return False
+
+
 def find_bin() -> str:
-    if os.environ.get("ORCA_BIN"):
-        exe = _safe_exe(os.environ["ORCA_BIN"])
-        if not exe:
-            raise OrcaError("ORCA_BIN points to a .cmd/.bat shim with no orca.exe beside it; "
-                            "point it at orca.exe", "unsafe")
-        return exe
+    for var in ("ORCA_BIN", "ORCA_CLI_COMMAND"):
+        if os.environ.get(var):
+            exe = _safe_exe(os.environ[var])
+            if not exe:
+                raise OrcaError(f"{var} points to a .cmd/.bat shim with no orca.exe beside it; "
+                                "point it at orca.exe", "unsafe")
+            return exe
+    if platform.system() == "Linux" and shutil.which("orca-ide"):
+        return shutil.which("orca-ide")
     exe = _safe_exe(shutil.which("orca") or "")
-    if exe:
+    if exe and not _is_screen_reader(exe):
         return exe
     for c in _shim_candidates():
         if os.path.isfile(c):
