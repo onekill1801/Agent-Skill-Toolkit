@@ -366,8 +366,9 @@ def _scope_line(job: dict, review: dict, head: str) -> str:
     return f"> Phạm vi: chỉ đọc code (diff + source nhánh tại `{head}`). Chưa chạy build/test."
 
 
-def _render_full(job: dict, review: dict, inline_ok: set, approver: str) -> str:
-    """The team's "Code Review Summary" layout (the sample agreed with the user, 2026-10-16)."""
+def _render_full(job: dict, review: dict, inline_ok: set, approver: str, with_files: bool = True) -> str:
+    """The team's "Code Review Summary" layout (the sample agreed with the user, 2026-10-16).
+    with_files=False drops the Files Reviewed table (render_note does it when the note is over the limit)."""
     findings = review.get("findings", [])
     head = ((job.get("diff_refs") or {}).get("head_sha") or "")[:8]
     names = _short_names([f["file"] for f in findings if f.get("file")])
@@ -427,7 +428,9 @@ def _render_full(job: dict, review: dict, inline_ok: set, approver: str) -> str:
     if pos:
         lines += _section_break(lines) + ["### Positive Observations", ""] + [f"- {p.strip()}" for p in pos]
     files = ws.get("files") or []
-    if files:
+    if files and not with_files:
+        lines += _section_break(lines) + [f"_Files Reviewed ({len(files)} file) bỏ bớt vì review dài._"]
+    elif files:
         rel = _files_rel([f.get("path", "?") for f in files])
         per = {}
         for f in findings:
@@ -454,7 +457,10 @@ def _section_break(lines: list) -> list:
 def render_note(job: dict, review: dict, inline_ok: set, approver: str = "") -> str:
     if note_style() == "compact":
         return _render_compact(job, review, inline_ok, approver)
-    return _render_full(job, review, inline_ok, approver)
+    note = _render_full(job, review, inline_ok, approver)
+    if len(note) > rc.cfg_int("REVIEW_AUTO_POST_MAX_CHARS", 6000):   # too long: Files Reviewed goes first
+        note = _render_full(job, review, inline_ok, approver, with_files=False)
+    return note
 
 
 def render_inline(f: dict) -> str:
