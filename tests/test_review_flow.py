@@ -251,6 +251,29 @@ class ReviewFlowTest(unittest.TestCase):
         self.assertEqual(statuses[-1], "failed")
         self.assertEqual(self.task()["attempts"], 3)
 
+    def test_rerequest_after_a_failed_flow_takes_the_job_over(self):
+        """2026-11-04: the failed task left job 10081-460 'running' -> the new review was blocked."""
+        os.environ["FAKE_AGENT_MODE"] = "crash"
+        rf.enqueue("proj", 13)
+        self.assertEqual(self.work()[-1]["status"], "failed")
+        self.assertEqual(rc.load_job("77-13")["status"], "running")             # left behind by the failed task
+        os.environ["FAKE_AGENT_MODE"] = "ok"
+        out = rf.enqueue("proj", 13)
+        self.assertFalse(out["task_duplicate"])
+        self.assertEqual(self.work()[-1]["status"], "done")
+        self.assertEqual(self.posted, ["77-13"])
+
+    def test_task_blocked_behind_a_closed_holder_is_woken_by_reconcile(self):
+        os.environ["FAKE_AGENT_MODE"] = "crash"
+        rf.enqueue("proj", 14)
+        self.work()
+        os.environ["FAKE_AGENT_MODE"] = "ok"
+        with mock.patch.object(rf, "_orphaned_by_flow", return_value=False):   # the old code: blocked
+            rf.enqueue("proj", 14)
+            self.assertEqual(self.work()[-1]["status"], "blocked")
+        self.assertEqual(rf.reconcile()["reconciled"][0]["unblocked"], "holder closed")
+        self.assertEqual(self.work()[-1]["status"], "done")
+
     def test_job_claimed_by_orca_path_is_not_taken(self):
         import review_queue as rq
         rf.enqueue("proj", 12)

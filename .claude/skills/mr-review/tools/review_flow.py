@@ -77,6 +77,24 @@ def step_fetch(ctx) -> dict:
     return {"head": head, "sha": head}
 
 
+def _orphaned_by_flow(job: dict, store=None) -> bool:
+    """The job is 'running' for a flow task that is CLOSED (failed / cancelled / done) or gone: nobody
+    will ever finish or release it. 2026-11-04: a review that failed its 3 attempts kept job 10081-460
+    'running' and the re-requested review was blocked behind it."""
+    w = job.get("worker") or ""
+    if job.get("status") != "running" or not w.startswith("flow:"):
+        return False
+    try:
+        if store is not None:
+            holder = store.get(w[len("flow:"):])
+        else:
+            with store_mod.Store() as st:
+                holder = st.get(w[len("flow:"):])
+    except Exception:  # noqa: BLE001 — store unreadable: keep the conservative answer
+        return False
+    return not holder or holder.get("status") in store_mod.CLOSED
+
+
 def _take_job(jid: str, task_id: str) -> dict:
     """Claim the job file for this task (same lock as review_queue.claim_next)."""
     me = f"flow:{task_id}"
@@ -85,7 +103,9 @@ def _take_job(jid: str, task_id: str) -> dict:
         st = job.get("status")
         if st in rc.TERMINAL:
             return job
-        if st == "running" and job.get("worker") != me:
+        if st == "running" and job.get("worker") != me and _orphaned_by_flow(job):
+            rc.log_event(job, "orphan_taken_over", previous=job.get("worker"), worker=me)
+        elif st == "running" and job.get("worker") != me:
             raise E.NeedsHuman(f"job {jid} is being processed by {job.get('worker') or 'another worker'}")
         if st in ("queued", "stale", "running"):
             job.update(status="running", claimed_at=rc.now(), worker=me)
@@ -422,7 +442,7 @@ def step_review(ctx) -> dict:
             err = {"message": (p.stderr or p.stdout or "")[-400:]}
         if err.get("kind") == "quota":
             raise E.QuotaExceeded(err.get("resume_at") or time.time() + 1800, "agent", err.get("message", ""))
-        if err.get("kind") == "budget":
+        if err.get("kind") in ("budget", "auth"):   # auth = every account logged out: retrying burns attempts
             raise E.NeedsHuman(f"review agent: {err.get('message', '')[:300]}")
         raise RuntimeError(f"review agent failed: {err.get('message', '')[:400]}")
     review = rp.load_review(job)            # FileNotFoundError -> attempt counted
@@ -545,6 +565,10 @@ def reconcile() -> dict:
                 if st.resolve_blocked(t["id"], "done" if status == "posted" else "cancelled",
                                       by="reconcile", note=status):
                     out.append({"task": t["id"], "closed": status})
+                continue
+            if _orphaned_by_flow(job, st):          # holder task closed: this one can take the job over
+                if st.unblock(t["id"], by="reconcile"):
+                    out.append({"task": t["id"], "unblocked": "holder closed"})
                 continue
             if status in ("queued", "stale"):
                 st.invalidate(t["id"], reason=f"job reset to {status}")
