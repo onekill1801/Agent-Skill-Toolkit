@@ -22,11 +22,15 @@ import contextlib
 import json
 import math
 import os
+import re
+import socket
 import sqlite3
 import time
 import uuid
 
-from . import paths
+from . import paths, proc
+
+_OWNER_RE = re.compile(r"^[^@]+@(.+):(\d+)(?:#\d+)?$")
 
 OPEN = ("queued", "running", "paused_quota", "blocked")
 CLOSED = ("done", "failed", "cancelled")
@@ -330,6 +334,23 @@ class Store:
             sql += f" and ({' or '.join(parts) or '0'})"
         return sql, args
 
+    def _expire_dead_local_leases(self, now: float) -> int:
+        """A holder killed mid-step (supervisor reload, crash, Ctrl-C) would keep its slot until the
+        lease runs out (DEFAULT_LEASE_S) — capacity full, queue stalled. Owners named
+        '<name>@<this host>:<pid>[#n]' whose pid is gone are expired NOW so the normal claim path
+        (and its resource/capacity checks) takes them. Other hosts / other owner formats: untouched."""
+        host = socket.gethostname()
+        n = 0
+        for r in self.db.execute("select id, lease_owner from tasks where status='running' "
+                                 "and coalesce(lease_until,0)>=?", (now,)).fetchall():
+            m = _OWNER_RE.match(r["lease_owner"] or "")
+            if not m or m.group(1) != host or proc.pid_alive(int(m.group(2))):
+                continue
+            self.db.execute("update tasks set lease_until=? where id=? and status='running'", (now - 1, r["id"]))
+            self._event(r["id"], "lease_expired", owner=r["lease_owner"], reason="holder process gone")
+            n += 1
+        return n
+
     def running_count(self) -> int:
         return self.db.execute("select count(*) n from tasks where status='running' and lease_until>=?",
                                (time.time(),)).fetchone()["n"]
@@ -344,6 +365,7 @@ class Store:
         now = time.time()
         kind_sql = f" and t.kind in ({','.join('?' * len(kinds))})" if kinds else ""
         with self._tx():
+            self._expire_dead_local_leases(now)
             cap = self.capacity()
             if cap and self.running_count() >= cap:
                 return {}

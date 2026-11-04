@@ -5,6 +5,38 @@ import signal
 import subprocess
 
 
+def pid_alive(pid: int) -> bool:
+    """Is a process with this pid running on THIS machine? Unknown -> True (callers only act on a
+    definite 'dead'). Windows: OpenProcess + exit code — os.kill(pid, 0) there TERMINATES the process."""
+    if pid <= 0:
+        return True
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            k32.OpenProcess.restype = wintypes.HANDLE
+            h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not h:
+                return ctypes.get_last_error() == 5  # ACCESS_DENIED = exists, not ours
+            try:
+                code = wintypes.DWORD()
+                if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
+                    return True
+                return code.value == 259  # STILL_ACTIVE
+            finally:
+                k32.CloseHandle(h)
+        except (OSError, AttributeError, ValueError):
+            return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:  # EPERM: exists, other user
+        return True
+
+
 def popen_group_kwargs() -> dict:
     """Popen kwargs that put the child in its own group, so kill_tree() can take the whole tree."""
     if os.name == "nt":

@@ -70,6 +70,25 @@ class StoreTest(_Tmp):
         self.assertEqual(self.st.claim("w1")["ref"], "low")
         self.assertEqual(self.st.claim("w1"), {})
 
+    def test_dead_local_holder_frees_its_slot_without_waiting_for_the_lease(self):
+        """Supervisor reload killed the coordinator mid-step: its tasks must not hold capacity for
+        DEFAULT_LEASE_S. A live local holder, another host, or a free-form owner keeps its lease."""
+        import socket
+        host = socket.gethostname()
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        self.st.set_capacity(2)
+        b = self.st.add("k", "other-host")
+        a = self.st.add("k", "dead-holder")
+        self.st.add("k", "waiting")
+        self.assertEqual(self.st.claim(f"coordinator@not-{host}:{dead.pid}#0")["id"], b["id"])
+        self.assertEqual(self.st.claim(f"coordinator@{host}:{dead.pid}#1")["id"], a["id"])
+        got = self.st.claim(f"coordinator@{host}:{os.getpid()}#0")      # slot freed by the dead one
+        self.assertEqual(got["id"], a["id"])
+        self.assertEqual(self.st.claim(f"coordinator@{host}:{os.getpid()}#1"), {})  # b still held, cap 2
+        self.assertIn("lease_expired", [e["kind"] for e in self.st.events(a["id"])])
+        self.assertEqual(self.st.claim("free-form-owner"), {})
+
     def test_reclaim_with_same_owner_name_fences_the_stale_worker(self):
         """Codex R1 #1: owner names are not identity — every claim mints a new token."""
         t = self.st.add("k", "r")
@@ -441,6 +460,12 @@ class QuotaTest(unittest.TestCase):
 
     def test_auth_and_plain_errors(self):
         self.assertEqual(self.c("Error: Not logged in. Please run /login")["kind"], "auth")
+        # claude CLI wording seen 2026-11-04 (three accounts burnt all attempts as plain errors)
+        self.assertEqual(self.c("Failed to authenticate: OAuth session expired and could not be refreshed")["kind"],
+                         "auth")
+        self.assertEqual(self.c("Failed to authenticate: this login reached its time limit and cannot be renewed. "
+                                "Run `claude auth login`")["kind"], "auth")
+        self.assertEqual(self.c("the build failed: 3 tests red")["kind"], "error")
 
     def test_user_pattern(self):
         with mock.patch.dict(os.environ, {"TOOLKIT_QUOTA_PATTERNS": r"het han muc"}):
