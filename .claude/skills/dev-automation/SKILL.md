@@ -1,5 +1,5 @@
 ---
-name: Dev Automation Skill
+name: dev-automation
 description: >
   Automate development workflows: review GitLab merge requests, read Azure DevOps tasks,
   fix bugs, implement features, create merge requests, and notify testers.

@@ -192,6 +192,18 @@ def _compile(ctx):
     return {"passed": True}
 
 
+def _code_locations(clone_dir: str, text: str) -> str:
+    """Stack trace -> frames in THIS repo (code_context.trace, F.12): the fixer opens the right
+    files first instead of searching. Library frames are dropped. Best effort: '' on any error."""
+    try:
+        import code_context
+        frames = code_context.trace(clone_dir, text, limit=15)["frames"]
+    except Exception:  # noqa: BLE001
+        return ""
+    return "\n".join(f"{f['file']}:{f['line']}" + (f"  ({f['symbol']})" if f.get("symbol") else "")
+                     for f in frames)
+
+
 def _spawn_fixer(ctx, failure):
     """Headless agent edits code in clone_dir; returns its summary text."""
     ground = ""
@@ -199,7 +211,9 @@ def _spawn_fixer(ctx, failure):
     if os.path.isfile(gpath):
         with open(gpath, encoding="utf-8") as f:
             ground = f.read()[:6000]
+    locs = _code_locations(ctx["clone_dir"], failure.get("context") or "")
     prompt = (f"<failure kind=\"{failure['kind']}\">\n{failure['context']}\n</failure>\n"
+              + (f"<code_locations>\n{locs}\n</code_locations>\n" if locs else "")
               + (f"<grounding>\n{ground}\n</grounding>\n" if ground else "")
               + "Find the root cause in this working copy and FIX the code now.")
     return agent_runner.run_turn(prompt, system=_FIX_SYSTEM, backend=ctx["backend"],

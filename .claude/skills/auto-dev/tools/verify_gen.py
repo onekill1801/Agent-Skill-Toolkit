@@ -48,10 +48,13 @@ import run_log        # noqa: E402
 
 STEP_TYPES = {"api", "db", "kafka", "redis", "wait"}
 
-# Files whose change implies observable runtime behaviour (API/DB/messaging).
-_RUNTIME_HINT = re.compile(
-    r"controller|service|repository|resource|endpoint|handler|listener|consumer|"
-    r"producer|entity|dao|mapper|\.sql|migration|changelog|route|api",
+# Files whose change CANNOT be observed at runtime. Everything else is assumed
+# observable, so the verify gate is required (fail-safe — see AGENT_AUDIT.md #5).
+# Keep this list conservative: anything added here can ship on unit tests alone.
+_INERT = re.compile(
+    r"\.(md|txt|rst|adoc)$"
+    r"|(^|/)(docs?|\.github|\.agent)(/|$)"
+    r"|(^|/)(tests?|__tests__)(/|$)",
     re.IGNORECASE)
 
 # Spring mapping annotations -> (HTTP method, path). @RequestMapping ở cấp class là prefix.
@@ -94,14 +97,19 @@ def _plan_targets(plan_text):
 
 
 def touches_runtime(plan_text, task_type=None):
-    """Heuristic: the change lands in code whose effect is observable at runtime."""
+    """Fail-safe: True unless EVERY target is provably non-runtime (docs/tests).
+
+    The burden of proof is on "this is harmless", not on "this looks risky".
+    The previous version matched target names against a runtime allow-list and
+    returned False on a miss, so a behaviour change in an oddly named file
+    (`ReportAggregator.java`, `PriceRules.java`) silently skipped the verify gate
+    and shipped on unit tests alone. No parseable target now also means True:
+    a plan we cannot read is a plan we cannot clear.
+    """
     targets = _plan_targets(plan_text)
-    if any(_RUNTIME_HINT.search(t) for t in targets):
+    if not targets:
         return True
-    # No parseable targets: fall back to the whole plan text for strong hints.
-    if not targets and _RUNTIME_HINT.search(plan_text or ""):
-        return True
-    return False
+    return not all(_INERT.search(t) for t in targets)
 
 
 def _find_file(root, rel):

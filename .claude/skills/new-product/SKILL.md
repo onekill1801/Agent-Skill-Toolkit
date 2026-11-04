@@ -1,5 +1,5 @@
 ---
-name: New Product Scaffolder
+name: new-product
 description: >
   Create a BRAND-NEW product/project from a requirement description: clarify scope,
   design an architecture, scaffold a skeleton for a chosen tech stack, verify it

@@ -1,0 +1,43 @@
+{
+  "name": "atask create-task e2e (localhost)",
+  "_doc": "Goi API tao task tren atask localhost qua /api/ai/execute (PAT), roi SELECT bang `task` de xac nhan row that su duoc tao -> dam bao tinh nang dung. Auth: dat API_BASE_URL + API_AUTH_HEADER='X-aTask-PAT: <token>' qua env/registry (flow_check.api tu doc API_AUTH_HEADER). DB: dat --project atask --env <env> (hoac DB_* inline). Seed bien: --var listId=<list_task_id_that> --var taskName='e2e probe task'. CANH BAO: day la GHI - chay vao DB cuc bo/co lap, KHONG vao prod.",
+  "vars": {
+    "taskName": "e2e probe task",
+    "listId": "REPLACE_WITH_REAL_list_task_id"
+  },
+  "steps": [
+    {
+      "type": "api",
+      "name": "POST /api/ai/execute create_task",
+      "method": "POST",
+      "url": "/api/ai/execute",
+      "body": { "name": "create_task", "arguments": { "name": "{taskName}", "list_task_id": "{listId}" } },
+      "expect": { "status": 200 },
+      "saveFrom": { "newTaskId": "$.data.id" },
+      "_note": "Chinh '$.data.id' cho khop response that cua /api/ai/execute (co the la $.result.id / $.id). Chay rieng buoc nay 1 lan de xem JSON tra ve roi sua path."
+    },
+    {
+      "type": "db",
+      "name": "row task vua tao co trong DB",
+      "engine": "mysql",
+      "sql": "select id, name from task where id = '{newTaskId}'",
+      "expect": { "rows": 1, "value": "{newTaskId}" }
+    },
+    {
+      "type": "db",
+      "name": "ten task khop voi input",
+      "engine": "mysql",
+      "sql": "select name from task where id = '{newTaskId}'",
+      "expect": { "value": "{taskName}" }
+    },
+    {
+      "type": "api",
+      "name": "cleanup: delete_task",
+      "method": "POST",
+      "url": "/api/ai/execute",
+      "body": { "name": "delete_task", "arguments": { "task_id": "{newTaskId}" } },
+      "expect": { "status": 200 },
+      "continue_on_fail": true
+    }
+  ]
+}
