@@ -248,6 +248,48 @@ class TurnBudgetTest(Base):
         with self.assertRaises(quota.QuotaExceeded):
             self.ar.run_role("p", "r")
 
+    def test_logged_out_accounts_are_skipped_then_tried_last(self):
+        """2026-11-04: three expired logins used all 3 attempts of a review while one account worked."""
+        with open(os.path.join(self.tmp, "agents.json"), "w") as f:
+            json.dump({"roles": {"r": ["claude:opus@a", "claude:opus@b", "claude:opus@c"]}}, f)
+        dead = {"a", "b"}
+        calls = []
+
+        def fake_turn(prompt, **kw):
+            calls.append(kw["account"])
+            if kw["account"] in dead:
+                out = "Failed to authenticate: OAuth session expired and could not be refreshed"
+                raise self.ar._cli_failure(f"CLI 'claude' exit 1: {out}", "\n" + out)    # as _run_cli does
+            return "ok"
+        with mock.patch.object(self.ar, "slots_dir", return_value=os.path.join(self.tmp, "slots")), \
+                mock.patch.object(self.ar, "_balanced", side_effect=lambda specs, cfg: specs), \
+                mock.patch.object(self.ar, "run_turn", side_effect=fake_turn):
+            self.assertEqual(self.ar.run_role("p", "r")["used"], "claude:opus@c")    # same attempt, moves on
+            self.assertEqual(calls, ["a", "b", "c"])
+            calls.clear()
+            self.assertEqual(self.ar.run_role("p", "r")["used"], "claude:opus@c")    # dead logins go last
+            self.assertEqual(calls, ["c"])
+            dead.discard("a")                                                        # a re-logged in
+            dead.add("c")
+            calls.clear()
+            self.assertEqual(self.ar.run_role("p", "r")["used"], "claude:opus@a")    # still tried as last resort
+            self.assertFalse(self.ar.auth_bad("claude@a"))
+            dead.update({"a", "b", "c"})
+            with self.assertRaises(self.ar.AgentRunError) as e:
+                self.ar.run_role("p", "r")
+            self.assertEqual(e.exception.classification["kind"], "auth")             # -> review blocked, not failed
+
+    def test_account_token_comes_from_a_secret_file(self):
+        os.makedirs(os.path.join(self.tmp, "secrets"))
+        with open(os.path.join(self.tmp, "secrets", "a.token"), "w") as f:
+            f.write("tok-123\n")
+        cfg = {"accounts": {"claude": {"a": {"env": {"CLAUDE_CONFIG_DIR": "/x"},
+                                              "env_files": {"CLAUDE_CODE_OAUTH_TOKEN": "work:secrets/a.token",
+                                                            "GONE": "work:secrets/missing"}}}}}
+        self.assertEqual(self.ar._account_env(cfg, "claude", "a"),
+                         {"CLAUDE_CONFIG_DIR": "/x", "CLAUDE_CODE_OAUTH_TOKEN": "tok-123"})
+        self.assertEqual(self.ar.agent_env({"CLAUDE_CODE_OAUTH_TOKEN": "tok-123"})["CLAUDE_CODE_OAUTH_TOKEN"], "tok-123")
+
     def test_daily_cap_covers_every_caller(self):
         self.st.set_setting("daily_agent_runs", "1")
         self.assertEqual(self.turn(), "ok")                    # a direct call, no task

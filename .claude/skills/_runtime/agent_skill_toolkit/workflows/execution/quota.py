@@ -47,7 +47,11 @@ _JSON_ERR = (_ENVELOPE + r'"(?:type|code)"\s*:\s*"(?:rate_limit_error|overloaded
 _QUOTA = [_PREFIX + "(?:" + "|".join(_PHRASES) + r")(?=$|[\s.,;:!)|·-])", _JSON_ERR]
 _AUTH = [
     _PREFIX + r"(?:not logged in|please (?:log ?in|run .{0,20}login)|invalid (?:x-)?api[ _-]?key|"
-              r"oauth token (?:has )?expired|401\b[^\n]{0,40}(?:unauthori[sz]ed|authentication))",
+              r"oauth token (?:has )?expired|401\b[^\n]{0,40}(?:unauthori[sz]ed|authentication)|"
+              # claude CLI 2026: "Failed to authenticate: OAuth session expired and could not be refreshed"
+              #                  "Failed to authenticate: this login reached its time limit and cannot be renewed"
+              r"failed to authenticate\b|oauth session (?:has )?expired|"
+              r"login (?:has )?reached its time limit)",
     _ENVELOPE + r'"type"\s*:\s*"authentication_error"',
 ]
 _LIMIT_KIND = [("overloaded", r"overloaded|\b529\b"), ("rate_limit", r"rate[ _-]?limit|too many requests|\b429\b"),

@@ -53,6 +53,7 @@ import runpy  # noqa: E402
 
 runpy.run_path(os.path.join(_SKILLS, "_runtime", "bootstrap.py"))["activate"]()
 from agent_skill_toolkit.core import proc as proc_mod  # noqa: E402
+from agent_skill_toolkit.core import paths  # noqa: E402
 from agent_skill_toolkit.core import winexec  # noqa: E402
 from agent_skill_toolkit.workflows.execution import quota  # noqa: E402
 from agent_skill_toolkit.workflows.execution import usage as usage_mod  # noqa: E402
@@ -421,8 +422,24 @@ def parse_candidate(spec: str) -> dict:
 
 
 def _account_env(cfg: dict, backend: str, account: str) -> dict:
+    """`env` = literal values; `env_files` = {VAR: path} read at run time, so a secret (e.g. the
+    long-lived `claude setup-token` token as CLAUDE_CODE_OAUTH_TOKEN) stays in work/secrets/ and never
+    sits in agents.json. Path: `work:secrets/x.token` (relative to WORK_DIR), `~` or absolute.
+    An unreadable file is skipped (the account then falls back to its CLAUDE_CONFIG_DIR login)."""
     acct = ((cfg.get("accounts") or {}).get(backend) or {}).get(account or "") or {}
-    return {k: os.path.expanduser(str(v)) for k, v in (acct.get("env") or {}).items()}
+    env = {k: os.path.expanduser(str(v)) for k, v in (acct.get("env") or {}).items()}
+    for k, ref in (acct.get("env_files") or {}).items():
+        ref = str(ref)
+        path = os.path.join(paths.work_dir(), ref[len("work:"):]) if ref.startswith("work:") \
+            else os.path.expanduser(ref)
+        try:
+            with open(path, encoding="utf-8") as f:
+                val = f.read().strip()
+        except OSError:
+            continue
+        if val:
+            env[k] = val
+    return env
 
 
 SLOT_STALE_S = CLI_TIMEOUT * 3            # a slot file older than this is a crashed run (reclaimed)
@@ -468,6 +485,45 @@ class _Slot:
                     return
                 except OSError:
                     time.sleep(0.05 * (i + 1))
+
+
+def _auth_bad_path(key: str) -> str:
+    return os.path.join(slots_dir(), "auth_bad", key.replace("/", "_") + ".json")
+
+
+def auth_cooldown_s() -> int:
+    """How long an account whose login failed is tried LAST (AGENT_AUTH_COOLDOWN_MIN, default 60)."""
+    try:
+        return max(0, int(config.get("AGENT_AUTH_COOLDOWN_MIN", "60") or 60)) * 60
+    except ValueError:
+        return 3600
+
+
+def auth_bad(key: str) -> dict:
+    """{"at", "message"} while the account's last login failure is inside the cooldown, else {}."""
+    try:
+        with open(_auth_bad_path(key), encoding="utf-8") as f:
+            info = json.load(f)
+        return info if time.time() - float(info.get("at") or 0) < auth_cooldown_s() else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def mark_auth_bad(key: str, message: str = "") -> None:
+    try:
+        p = _auth_bad_path(key)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"at": time.time(), "message": message[:300]}, f, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def clear_auth_bad(key: str) -> None:
+    try:
+        os.remove(_auth_bad_path(key))
+    except OSError:
+        pass
 
 
 def usage_tier() -> str:
@@ -521,13 +577,21 @@ def run_role(prompt: str, role: str, *, system: str = None, cwd: str = None,
     if isinstance(specs, str):
         specs = [specs]
     specs = _balanced(specs, cfg)
+
+    def _key(spec):
+        c = parse_candidate(spec)
+        return f"{c['backend']}@{c['account'] or 'default'}"
+    # an account whose login just failed (expired OAuth, "time limit") goes LAST, not first: without
+    # this every turn re-tries the dead logins before reaching a working one. Still tried as a last
+    # resort, so a re-login is picked up without waiting for the cooldown.
+    specs = [s for s in specs if not auth_bad(_key(s))] + [s for s in specs if auth_bad(_key(s))]
     tried = []
     for spec in specs:
         c = parse_candidate(spec)
         if c["backend"] in avoid:
             tried.append({"spec": spec, "skipped": "avoided"})
             continue
-        key = f"{c['backend']}@{c['account'] or 'default'}"
+        key = _key(spec)
         limit = int(((cfg.get("limits") or {}).get(key) or {}).get("max_parallel", 99))
         slot = _Slot(key, limit, {"spec": spec, "role": role, "task_id": os.environ.get("TOOLKIT_TASK_ID", ""),
                                   "step": os.environ.get("TOOLKIT_STEP", "")})
@@ -539,10 +603,13 @@ def run_role(prompt: str, role: str, *, system: str = None, cwd: str = None,
                             timeout=timeout, cwd=cwd, role=role, notes=tried, read_only=read_only,
                             env_extra=_account_env(cfg, c["backend"], c["account"]),
                             account=c["account"] or "")
+            clear_auth_bad(key)
             return {"text": text, "used": spec, "tried": tried}
         except AgentRunError as e:
             msg = str(e)
             c = e.classification
+            if c.get("kind") == "auth":
+                mark_auth_bad(key, msg)
             tried.append({"spec": spec, "error": msg[:200], "kind": c.get("kind"),
                           "resume_at": c.get("resume_at")})
             if not c.get("retry_other_backend"):
@@ -554,6 +621,10 @@ def run_role(prompt: str, role: str, *, system: str = None, cwd: str = None,
     if quotas:                       # every candidate is limited: pause until the EARLIEST reset
         raise AgentQuotaError(f"all candidates for role '{role}' are rate/usage limited: {tried}",
                               {"kind": "quota", "resume_at": min(quotas), "retry_other_backend": False})
+    ran = [t for t in tried if t.get("kind")]
+    if ran and all(t["kind"] == "auth" for t in ran):   # every account that ran is logged out: a human re-logs
+        raise AgentRunError(f"every candidate for role '{role}' failed to authenticate (log in again): {tried}",
+                            {"kind": "auth", "resume_at": None, "retry_other_backend": False})
     raise AgentRunError(f"no candidate could run role '{role}': {tried}")
 
 
