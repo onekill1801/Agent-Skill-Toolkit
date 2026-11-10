@@ -86,6 +86,8 @@ def work_dir() -> str:
 
 
 def temp_dir() -> str:
-    d = os.path.join(repo_root(), "temp", "tg_approvals")
+    # same base as core.paths.state_dir: TOOLKIT_STATE_DIR moves ALL state (tests, sandboxes) — without
+    # it test runs leaked fake approval requests into the real temp/tg_approvals
+    d = os.path.join(os.environ.get("TOOLKIT_STATE_DIR") or os.path.join(repo_root(), "temp"), "tg_approvals")
     os.makedirs(d, exist_ok=True)
     return d

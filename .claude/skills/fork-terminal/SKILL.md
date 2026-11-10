@@ -1,5 +1,5 @@
 ---
-name: Fork Terminal Skill
+name: fork-terminal
 description: Fork a terminal session to a new terminal window. Use this when the user requests 'fork terminal' or 'create a new terminal' or 'new terminal: <command>' or 'fork session: <command>'.
 ---
 

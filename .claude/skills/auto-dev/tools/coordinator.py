@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+"""Coordinator facade (checklist F.7, design §5.2 / §11): run ALL queued work with shared limits and
+show the progress board (agent_skill_toolkit.workflows.coordinator).
+
+    python coordinator.py work  [--parallel N] [--once] [--interval 30] [--kinds review_mr,verify]   # N mặc định = capacity
+    python coordinator.py board [--json] [--hours 24]        # progress board (open + closed in last N h)
+    python coordinator.py accept <task_id> [--lane vua]      # accept an aTask proposal (atask_intake)
+    python coordinator.py capacity [N]                       # show / set the SHARED cap on live tasks
+    python coordinator.py usage [PCT] [--source claude]      # report usage % -> throttling tier (6 h)
+    python coordinator.py budget [--daily-agent-runs N]      # hard cap on agent turns per day (0 = none)
+
+Kinds run: review_mr (mr-review/review_flow) · verify (verify.py) · atask_intake (aTask proposal) ·
+proposal (proposals.py: debate -> ADR).
+`--parallel` = worker threads of this process; the cap on live tasks is ONE value stored in the
+database (`capacity`, initial TOOLKIT_MAX_PARALLEL or 2) for every worker loop on this machine.
+Two tasks with the same `resource` (repo@branch) never run at once; a task waits for its
+dependencies (store `depends_on`), and is blocked if one of them failed / was cancelled.
+"""
+
+import argparse
+import json
+import os
+import runpy
+import socket
+import sys
+from pathlib import Path
+
+runpy.run_path(str(Path(__file__).resolve().parents[2] / "_runtime" / "bootstrap.py"))["activate"]()
+from agent_skill_toolkit.core import human  # noqa: E402
+from agent_skill_toolkit.core import store as store_mod  # noqa: E402
+from agent_skill_toolkit.workflows import coordinator as C  # noqa: E402
+from agent_skill_toolkit.workflows.execution import usage as usage_mod  # noqa: E402
+from agent_skill_toolkit.workflows.intake import atask_flow  # noqa: E402
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, "..", "..", "dev-automation", "tools"))
+import probe_common as pc  # noqa: E402,F401  (UTF-8 stdout on Windows)
+
+
+def load_registry(kinds: list = None) -> tuple:
+    """(registry, hooks, warnings) from every workflow that can be loaded on this machine."""
+    from agent_skill_toolkit.workflows.proposal import flow as proposal_flow
+    from agent_skill_toolkit.workflows.refactor import program as refactor_program
+    reg, hooks, warn = {**atask_flow.REGISTRY, **proposal_flow.REGISTRY, **refactor_program.REGISTRY}, [], []
+    try:
+        import verify
+        reg.update(verify.REGISTRY)
+    except Exception as e:  # noqa: BLE001
+        warn.append(f"verify_ladder unavailable: {type(e).__name__}: {e}")
+    try:
+        sys.path.insert(0, os.path.join(_HERE, "..", "..", "mr-review", "tools"))
+        import review_flow
+        reg.update(review_flow.REGISTRY)
+        hooks.append(review_flow.reconcile)
+    except Exception as e:  # noqa: BLE001
+        warn.append(f"review_mr unavailable: {type(e).__name__}: {e}")
+    if kinds:
+        unknown = [k for k in kinds if k not in reg]
+        if unknown:
+            raise ValueError(f"unknown / unavailable kinds {unknown} (have {sorted(reg)})")
+        reg = {k: v for k, v in reg.items() if k in kinds}
+    return reg, hooks, warn
+
+
+def accept(task_id: str, lane: str = "") -> dict:
+    human.require("accept an aTask proposal")
+    with store_mod.Store() as st:
+        t = st.get(task_id)
+        if not t or t["kind"] != atask_flow.KIND:
+            raise ValueError(f"{task_id} is not an {atask_flow.KIND} task")
+        if t["status"] != "blocked" or not str(t.get("last_error") or "").startswith(atask_flow.PROPOSAL):
+            # blocked for another reason (dependency, bad data, ...) is NOT a proposal (Codex F.7 #5)
+            raise ValueError(f"{task_id} is not waiting for a decision on a proposal "
+                             f"(status {t['status']}, step {t.get('step') or '-'})")
+        tri_cp = next((c for c in reversed(st.checkpoints(task_id, valid_only=True))
+                       if c["step"] == "triage"), {})
+        tri = tri_cp.get("data") or {}
+        if not tri.get("kind"):
+            raise ValueError(f"{task_id} has no triage result — cannot accept")
+        lane = lane or tri.get("lane") or ""
+        if lane and lane not in ("nho", "vua", "lon", "de_xuat"):
+            raise ValueError("lane must be nho|vua|lon|de_xuat")
+        # resolve EXACTLY the revision inspected above, in ONE statement: same update time, proposal
+        # marker, and the triage checkpoint used is still valid — else nothing changes (Codex F.7 R2/R3)
+        ok = st.resolve_blocked(task_id, "done", by="human", note=json.dumps(
+            {"accepted": True, "kind": tri.get("kind"), "lane": lane}, ensure_ascii=False),
+            if_updated=t["updated"], if_error_prefix=atask_flow.PROPOSAL, if_checkpoint_valid=tri_cp["id"])
+        if not ok:
+            raise ValueError(f"{task_id} changed while accepting — look at it again (coordinator.py board)")
+    return {"task_id": task_id, "accepted": ok, "kind": tri.get("kind"), "lane": lane}
+
+
+def worker_threads(explicit=None) -> int:
+    """--parallel, else TOOLKIT_MAX_PARALLEL, else the SHARED `capacity` of the store (so `capacity 10`
+    is the one knob: more threads than that could never get work; capacity 0 = no cap -> 2)."""
+    if explicit is not None:                       # --parallel 0 -> 1 thread, as before
+        return max(1, int(explicit))
+    try:
+        env_n = int(os.environ.get("TOOLKIT_MAX_PARALLEL") or 0)
+    except ValueError:
+        env_n = 0
+    if env_n > 0:                                  # 0 / unset / junk -> the stored capacity decides
+        return env_n
+    with store_mod.Store() as st:
+        cap = st.capacity()
+    return cap if cap > 0 else 2
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="coordinator.py")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("work")
+    p.add_argument("--parallel", type=int, default=None,
+                   help="worker threads (default: TOOLKIT_MAX_PARALLEL, else the stored `capacity`)")
+    p.add_argument("--once", action="store_true")
+    p.add_argument("--interval", type=float, default=30)
+    p.add_argument("--kinds", default="")
+    p.add_argument("--owner", default=f"coordinator@{socket.gethostname()}:{os.getpid()}")
+    p = sub.add_parser("board")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--hours", type=float, default=24)
+    p = sub.add_parser("capacity")
+    p.add_argument("n", nargs="?", type=int, help="set the shared cap (0 = none); omit to show it")
+    p = sub.add_parser("usage")
+    p.add_argument("pct", nargs="?", type=float)
+    p.add_argument("--source", default="")
+    p.add_argument("--resets-at", type=float, default=None, help="epoch of the provider reset, if known")
+    p = sub.add_parser("budget")
+    p.add_argument("--daily-agent-runs", type=int, default=None)
+    p = sub.add_parser("accept")
+    p.add_argument("task_id")
+    p.add_argument("--lane", default="")
+    a = ap.parse_args(argv)
+    try:
+        if a.cmd == "work":
+            reg, hooks, warn = load_registry([k for k in a.kinds.split(",") if k])
+            for w in warn:
+                print(f"[coordinator] {w}", file=sys.stderr)
+
+            def show(tick):
+                if tick.get("blocked_orphans"):
+                    print(f"[coordinator] blocked (dependency failed): {tick['blocked_orphans']}", file=sys.stderr)
+            out = C.Coordinator(reg, worker_threads(a.parallel), a.owner, hooks).run(
+                once=a.once, interval=a.interval, on_tick=show)
+            out["warnings"] = warn
+        elif a.cmd == "board":
+            with store_mod.Store() as st:
+                b = C.board(st, a.hours)
+            if not a.json:
+                print(b["text"])
+                return 0
+            out = b
+        elif a.cmd == "usage":
+            with store_mod.Store() as st:
+                out = (usage_mod.set_level(st, a.pct, a.source, resets_at=a.resets_at) if a.pct is not None
+                       else usage_mod.level(st))
+                out["claim_policy"] = st.claim_policy()
+        elif a.cmd == "budget":
+            with store_mod.Store() as st:
+                if a.daily_agent_runs is not None:
+                    st.set_setting("daily_agent_runs", str(max(0, a.daily_agent_runs)), by="cli")
+                out = {"daily_agent_runs": int(st.get_setting("daily_agent_runs") or 0),
+                       "today": usage_mod.agent_usage(st, since=usage_mod.local_midnight())}
+        elif a.cmd == "capacity":
+            with store_mod.Store() as st:
+                if a.n is not None:
+                    st.set_capacity(a.n, by="cli")
+                out = {"max_running": st.capacity(), "running": st.running_count()}
+        else:
+            out = accept(a.task_id, a.lane)
+    except (ValueError, PermissionError, RuntimeError) as e:
+        out = {"error": True, "message": str(e)}
+    return pc.emit(out)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

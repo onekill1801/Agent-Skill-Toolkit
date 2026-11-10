@@ -1,0 +1,7 @@
+{
+  "name": "agent-skill-toolkit",
+  "version": "0.3.0",
+  "description": "Domain harness: GitLab/Azure/aTask/TChat/Jenkins/k8s tools, MR review queue with human-gated posting, auto-dev pipeline.",
+  "author": {"name": "onekill1801"},
+  "skills": "./.claude/skills"
+}

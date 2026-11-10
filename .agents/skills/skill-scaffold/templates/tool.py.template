@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""{{MODULE_DESCRIPTION}}
+
+Usage:
+{{CLI_USAGE_LINES}}
+"""
+
+import json
+import sys
+import urllib.error
+import urllib.request
+
+import config
+
+
+def _ssl_context():
+    import ssl
+    if config.get("SSL_VERIFY", "true").lower() in ("false", "0", "no"):
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    return ssl.create_default_context()
+
+
+def _request(url: str, method: str = "GET", data: dict | None = None) -> dict:
+    token = config.get("{{TOKEN_ENV_VAR}}")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    body = json.dumps(data).encode() if data else None
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, context=_ssl_context()) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        return {"error": True, "status": e.code, "message": e.read().decode() if e.fp else ""}
+
+
+{{TOOL_FUNCTIONS}}
+
+
+def _print_json(data):
+    output = json.dumps(data, indent=2, ensure_ascii=False)
+    sys.stdout.buffer.write(output.encode("utf-8"))
+    sys.stdout.buffer.write(b"\n")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print(__doc__)
+        sys.exit(1)
+    # {{CLI_DISPATCH}}
+    print(__doc__)
+    sys.exit(1)
