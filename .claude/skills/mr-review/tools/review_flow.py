@@ -403,7 +403,9 @@ PROMPT = """You are the MR review worker. Process review job {jid} with the tool
 Follow .claude/skills/mr-review/SKILL.md exactly. The workspace is ALREADY prepared:
   ws.json : {ws_path}
   worktree: {worktree}
-Write the review to {worktree}.review.json (schema in review_post.py), then run
+Write the review to {worktree}.review.json (schema in review_post.py) as UTF-8 - the text is Vietnamese:
+use apply_patch or python open(path, "w", encoding="utf-8"); never PowerShell Set-Content/Out-File/">"
+(ANSI on Windows turns every Vietnamese letter into "?"). Then run
   python {tools}/review_post.py validate {jid}
 until it prints "valid": true. Then STOP.
 Do NOT run request-approval, approve, post or sweep, and do not call any GitLab/TChat write.

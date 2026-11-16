@@ -78,8 +78,36 @@ def load_review(job: dict, override: str = "") -> dict:
         return json.load(f)
 
 
+_CODE_SPAN = re.compile(r"```.*?```|`[^`\n]*`", re.S)
+# a Vietnamese letter written through a non-UTF-8 (ANSI) path becomes '?' or U+FFFD: "Ch?a x?c minh"
+_LOST_LETTER = re.compile(r"[^\W\d_]\?+[^\W\d_]|�")
+
+
+def _texts(review: dict) -> list:
+    out = [review.get(k) for k in ("summary", "verdict_note", "scope")]
+    for f in review.get("findings") or []:
+        if isinstance(f, dict):
+            out += [f.get(k) for k in ("title", "body", "suggestion")]
+    out += list(review.get("positives") or [])
+    for c in (review.get("compliance") or {}).values() if isinstance(review.get("compliance"), dict) else ():
+        if isinstance(c, dict):
+            out.append(c.get("note"))
+    return [t for t in out if isinstance(t, str)]
+
+
+def mis_encoded(review: dict) -> int:
+    """How many letters look lost to a non-UTF-8 write (code spans ignored). 16/11: 18 reviews written by
+    Codex through PowerShell's ANSI default went out as 'Ch?a x?c minh'."""
+    return sum(len(_LOST_LETTER.findall(_CODE_SPAN.sub(" ", t))) for t in _texts(review))
+
+
 def validate(job: dict, review: dict) -> list:
     errs = []
+    lost = mis_encoded(review)
+    if lost >= 3:
+        errs.append(f"text looks mis-encoded ({lost} letters became '?'): rewrite review.json as UTF-8 "
+                    "(python open(..., 'w', encoding='utf-8') or apply_patch; never PowerShell "
+                    "Set-Content/Out-File/'>' on Windows)")
     head = (job.get("diff_refs") or {}).get("head_sha") or job.get("head_sha")
     if review.get("head_sha") != head:
         errs.append(f"head_sha {str(review.get('head_sha'))[:10]} != prepared head {str(head)[:10]}")
