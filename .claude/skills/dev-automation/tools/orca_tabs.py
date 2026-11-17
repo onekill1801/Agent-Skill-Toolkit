@@ -69,10 +69,18 @@ def _cmdlines() -> list:
               "Get-CimInstance Win32_Process | ForEach-Object { $_.CommandLine }"]
         text = subprocess.run(ps, capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=30, stdin=subprocess.DEVNULL).stdout
-        return [shlex.split(ln, posix=False) for ln in text.splitlines() if ln.strip()]
+        return [_split(ln, posix=False) for ln in text.splitlines() if ln.strip()]
     text = subprocess.run(["ps", "-axww", "-o", "args="], capture_output=True, text=True,
                           errors="replace", timeout=30, stdin=subprocess.DEVNULL).stdout
-    return [shlex.split(ln) for ln in text.splitlines() if ln.strip()]
+    return [_split(ln) for ln in text.splitlines() if ln.strip()]
+
+
+def _split(line: str, posix: bool = True) -> list:
+    """shlex.split, but a command line with an unbalanced quote (common on Windows) falls back to whitespace."""
+    try:
+        return shlex.split(line, posix=posix)
+    except ValueError:
+        return line.split()
 
 
 def running(cmdlines: list) -> set:

@@ -192,7 +192,7 @@ def _primary_account():
 # Lượt "investigate" từ người khác trong group (nguồn fchat, tin cậy thấp — F.5): agent CHỈ ĐỌC.
 # Chặn cứng ở CLI (không phụ thuộc lời dặn trong prompt): không Bash, không ghi file, không mạng,
 # không sub-agent; hook duyệt Telegram vẫn gắn và chỉ tự duyệt nhóm 'read'.
-READONLY_DENY = ["Bash", "PowerShell", "Edit", "MultiEdit", "Write", "NotebookEdit", "WebFetch", "WebSearch",
+READONLY_DENY = ["Bash", "PowerShell", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch",
                  "Task", "Agent", "KillShell", "BashOutput"]
 READONLY_ALLOW = ["Read", "Grep", "Glob"]
 READONLY_SYS = ("\n\nCHẾ ĐỘ CHỈ ĐỌC: yêu cầu đến từ một thành viên group (không phải chủ tài khoản). Chỉ được "

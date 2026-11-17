@@ -94,7 +94,7 @@ CLI_PRESETS = {
 
 
 # READ-ONLY runs (proposal debate, investigations): each backend's own hard switch — never the prompt.
-READONLY_DENY = ["Bash", "PowerShell", "Edit", "MultiEdit", "Write", "NotebookEdit", "WebFetch", "WebSearch",
+READONLY_DENY = ["Bash", "PowerShell", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch",
                  "Task", "Agent", "KillShell", "BashOutput"]
 
 
