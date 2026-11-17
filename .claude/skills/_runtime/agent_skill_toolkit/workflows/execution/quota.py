@@ -31,7 +31,7 @@ _PREFIX = (r"^\s*(?:[•●✗✖×>]\s*)?"                                  # a
            r"(?:\[?[\w .-]{0,24}(?:error|warn(?:ing)?|fatal)\]?\s*[:\-]\s*)?")
 _PHRASES = [
     r"(?:claude ai )?usage limit (?:reached|exceeded|hit)",
-    r"you(?:'ve| have) (?:hit|reached) your (?:usage |rate )?limit",
+    r"you(?:['’]ve| have) (?:hit|reached) your (?:usage |rate )?limit",   # codex writes "You’ve" (curly)
     r"(?:5|five)[- ]hour (?:usage )?limit (?:reached|hit)", r"weekly (?:usage )?limit (?:reached|hit)",
     r"rate[ _-]?limit(?:ed| exceeded| reached)\b", r"(?:429:?\s*)?too many requests\b",
     r"you exceeded your (?:current )?quota", r"credit balance is too low",
@@ -96,7 +96,8 @@ def parse_reset(text: str, now: float = None) -> float:
             return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).timestamp()
         except ValueError:
             pass
-    m = re.search(r"resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", t, re.I)   # "resets 3pm"
+    m = re.search(r"(?:resets?|try again)\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", t, re.I)
+    # "resets 3pm" / codex "try again at 3:54 PM"
     if m:
         h, mi, ap = int(m.group(1)), int(m.group(2) or 0), (m.group(3) or "").lower()
         if ap == "pm" and h < 12:
