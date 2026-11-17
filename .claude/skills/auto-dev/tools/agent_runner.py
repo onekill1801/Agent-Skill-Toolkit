@@ -63,6 +63,7 @@ DEFAULT_API_MODEL = config.get("ANTHROPIC_MODEL") or "claude-opus-5-5"
 DEFAULT_BASE_URL = "https://api.anthropic.com"
 DEFAULT_MAX_TOKENS = 4000
 CLI_TIMEOUT = 600
+BUSY_RETRY_S = 120          # every usable account is busy (slots taken): pause the task this long, then retry
 API_TIMEOUT = 300
 
 # argv templates per CLI; {model} is replaced by the model (the --model pair is
@@ -621,7 +622,13 @@ def run_role(prompt: str, role: str, *, system: str = None, cwd: str = None,
     if quotas:                       # every candidate is limited: pause until the EARLIEST reset
         raise AgentQuotaError(f"all candidates for role '{role}' are rate/usage limited: {tried}",
                               {"kind": "quota", "resume_at": min(quotas), "retry_other_backend": False})
+    busy = [t for t in tried if t.get("skipped") == "no free slot"]
     ran = [t for t in tried if t.get("kind")]
+    if busy and all(t["kind"] in ("auth", "quota") for t in ran):
+        # a working account is only BUSY (all its slots taken): wait for a slot, never block on "log in again"
+        raise AgentQuotaError(f"every usable candidate for role '{role}' is busy (no free slot): {tried}",
+                              {"kind": "quota", "limit": "busy", "resume_at": time.time() + BUSY_RETRY_S,
+                               "retry_other_backend": False})
     if ran and all(t["kind"] == "auth" for t in ran):   # every account that ran is logged out: a human re-logs
         raise AgentRunError(f"every candidate for role '{role}' failed to authenticate (log in again): {tried}",
                             {"kind": "auth", "resume_at": None, "retry_other_backend": False})
