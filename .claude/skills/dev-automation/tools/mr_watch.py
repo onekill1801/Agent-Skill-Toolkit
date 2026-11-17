@@ -260,6 +260,24 @@ def _enqueue_review(mr) -> bool:
     return True
 
 
+CREATED_AFTER = ""   # ISO-8601 UTC (--created-after / MR_WATCH_CREATED_AFTER): older MRs are never reviewed
+
+
+def _parse_ts(s: str) -> float:
+    import datetime as _dt
+    return _dt.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+
+
+def _before_cutoff(mr) -> bool:
+    """True = MR opened before CREATED_AFTER -> ignore it even when it gets new commits."""
+    if not CREATED_AFTER:
+        return False
+    try:
+        return _parse_ts(mr.get("created_at") or "") < _parse_ts(CREATED_AFTER)
+    except ValueError:
+        return False          # unknown created_at: do not drop a possibly new MR
+
+
 def poll_once(username, who, include_drafts, spawn, state, max_per_cycle=3, baseline=False):
     mrs = gitlab_api.list_review_merge_requests(username, who)
     if mrs and isinstance(mrs[0], dict) and mrs[0].get("error"):
@@ -273,8 +291,10 @@ def poll_once(username, who, include_drafts, spawn, state, max_per_cycle=3, base
         if state.get(key) == mr["sha"]:
             continue   # already handled at this SHA
 
-        if baseline:
-            state[key] = mr["sha"]      # first run: record silently, don't review backlog
+        if baseline or _before_cutoff(mr):
+            state[key] = mr["sha"]      # first run / opened before the cutoff: record silently, no review
+            if not baseline:
+                _save_state(state)
             continue
 
         tag = "cập nhật (commit mới)" if key in state else "mới"
@@ -339,8 +359,15 @@ if __name__ == "__main__":
                    help="store = enqueue a durable review task (default); terminal = legacy claude terminal")
     p.add_argument("--review-existing", action="store_true",
                    help="also review the current backlog (skip first-run baseline)")
+    p.add_argument("--created-after", default=None,
+                   help="ISO time (UTC); only review MRs OPENED after it — older ones are skipped even on new "
+                        "commits (default: env MR_WATCH_CREATED_AFTER, else no cutoff)")
     a = p.parse_args()
     MODE = a.mode
+    CREATED_AFTER = a.created_after or config.get("MR_WATCH_CREATED_AFTER") or ""
+    if CREATED_AFTER:
+        _parse_ts(CREATED_AFTER)   # fail fast on a malformed value
+        print(f"[{_now()}] chỉ review MR mở sau {CREATED_AFTER}")
     if a.once:
         u = gitlab_api.current_user()
         if isinstance(u, dict) and u.get("error"):

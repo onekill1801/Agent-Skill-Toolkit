@@ -262,6 +262,7 @@ def list_review_merge_requests(username: str, who: str = "reviewer",
                 "target_branch": mr.get("target_branch", ""),
                 "web_url": mr.get("web_url", ""),
                 "updated_at": mr.get("updated_at", ""),
+                "created_at": mr.get("created_at", ""),
                 "draft": mr.get("draft", mr.get("work_in_progress", False)),
             })
     return merged
