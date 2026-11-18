@@ -1,5 +1,5 @@
 ---
-name: aTask Automation
+name: atask-automation
 description: >
   Manage tasks, checklists, comments, projects, sprints, workspaces, and analytics
   in the aTask platform via its AI-agent REST API (PAT auth).

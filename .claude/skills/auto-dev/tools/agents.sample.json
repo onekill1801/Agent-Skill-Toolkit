@@ -1,0 +1,24 @@
+{
+  "_comment": "Copy to work/agents.json (gitignored) and adapt. Candidate = backend[:model][@account]; tried in order, next one on rate limit / auth error / no free slot.",
+  "accounts": {
+    "claude": {
+      "work":     {"env": {"HOME": "~/.claude-work", "USERPROFILE": "~/.claude-work"}},
+      "personal": {"env": {"HOME": "~/.claude-personal", "USERPROFILE": "~/.claude-personal"}}
+    },
+    "codex": {
+      "main": {"env": {"CODEX_HOME": "~/.codex"}}
+    }
+  },
+  "roles": {
+    "default":     ["claude:sonnet@work", "claude:sonnet@personal", "codex"],
+    "coordinator": ["claude:opus@work", "claude:opus@personal", "codex"],
+    "implement":   ["codex@main", "claude:sonnet@personal"],
+    "review":      ["claude:sonnet@work", "codex@main", "claude:sonnet@personal"],
+    "log_read":    ["claude:haiku@personal", "codex@main"]
+  },
+  "limits": {
+    "claude@work":     {"max_parallel": 3},
+    "claude@personal": {"max_parallel": 2},
+    "codex@main":      {"max_parallel": 2}
+  }
+}

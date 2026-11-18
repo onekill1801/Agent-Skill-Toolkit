@@ -164,11 +164,29 @@ def cmd_parse(args):
         approved = not a["answer"]
         out_items.append({"n": i, "text": x["text"], "approved": approved,
                           "comment": a["answer"] or None})
-    return {"ok": True, "gate": args.gate, "run_id": args.run,
-            "approved_all": all(it["approved"] for it in out_items),
-            "items": out_items,
-            "next": ("mọi mục OK -> run_log.py checkpoint <RID> <gate> approved; "
-                     "mục có comment -> THỰC HIỆN chỉnh + ghi feedback.py add --action edited")}
+    approved_all = all(it["approved"] for it in out_items)
+    out = {"ok": True, "gate": args.gate, "run_id": args.run,
+           "approved_all": approved_all, "items": out_items}
+
+    # Ghi checkpoint NGAY tại đây thay vì trả về chuỗi nhắc agent tự ghi. Trước
+    # đây bước này là prose: không có gì kiểm tra agent có ghi hay không, nên mốc
+    # duyệt chỉ là trạng thái trang trí (AGENT_AUDIT.md #3, #14).
+    if args.gate in run_log.CHECKPOINTS:
+        try:
+            run_log.cmd_checkpoint(argparse.Namespace(
+                run_id=args.run, name=args.gate,
+                status="approved" if approved_all else "rejected",
+                source="telegram", proof=_reply_path(args.run, args.gate)))
+            out["checkpoint_recorded"] = {"name": args.gate, "source": "telegram",
+                                          "status": "approved" if approved_all else "rejected"}
+        except ValueError as e:       # run chưa init -> báo, đừng nuốt
+            out["checkpoint_error"] = str(e)
+
+    out["next"] = ("mọi mục OK -> đã ghi checkpoint, đi tiếp; "
+                   "mục có comment -> THỰC HIỆN chỉnh + ghi feedback.py add --action edited"
+                   if approved_all else
+                   "có mục bị từ chối -> checkpoint = rejected, sửa rồi gửi lại gate")
+    return out
 
 
 def main():

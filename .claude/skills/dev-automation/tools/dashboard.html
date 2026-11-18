@@ -1,0 +1,717 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Toolkit Dashboard</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --line: #e3e6ea; --text: #1d232b; --muted: #6b7480;
+  --accent: #2f6fdb; --ok: #1f9d55; --warn: #c27c0e; --bad: #d14343; --info: #6b52c8;
+  --chip: #eef1f5; --code: #f1f3f6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12151a; --panel: #1a1f26; --line: #2a313b; --text: #e3e7ec; --muted: #8b95a3;
+    --accent: #6b9cf0; --ok: #46c27f; --warn: #e2a33b; --bad: #ef6b6b; --info: #a08cf0;
+    --chip: #232a33; --code: #232a33;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12151a; --panel: #1a1f26; --line: #2a313b; --text: #e3e7ec; --muted: #8b95a3;
+  --accent: #6b9cf0; --ok: #46c27f; --warn: #e2a33b; --bad: #ef6b6b; --info: #a08cf0;
+  --chip: #232a33; --code: #232a33;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif; }
+header { position: sticky; top: 0; z-index: 5; background: var(--panel); border-bottom: 1px solid var(--line);
+  padding: 10px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+header h1 { font-size: 16px; margin: 0; }
+header .meta { color: var(--muted); font-size: 12px; }
+header .spacer { flex: 1; }
+button, select { font: inherit; background: var(--chip); color: var(--text); border: 1px solid var(--line);
+  border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+main { padding: 16px; max-width: 1400px; margin: 0 auto; display: grid; gap: 16px; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.kpi .v { font-size: 24px; font-weight: 600; }
+.kpi .l { color: var(--muted); font-size: 12px; }
+.kpi.bad .v { color: var(--bad); } .kpi.warn .v { color: var(--warn); } .kpi.ok .v { color: var(--ok); }
+section.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+section.card > h2 { margin: 0; font-size: 14px; padding: 10px 14px; border-bottom: 1px solid var(--line);
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+section.card > h2 .count { color: var(--muted); font-weight: 400; }
+section.card > h2 .hint { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: auto; }
+.body { padding: 0; overflow-x: auto; }
+.empty { color: var(--muted); padding: 12px 14px; }
+.err { color: var(--bad); padding: 12px 14px; white-space: pre-wrap; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 6px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+td.num { text-align: right; white-space: nowrap; }
+.mono, code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+code { background: var(--code); padding: 1px 5px; border-radius: 4px; cursor: copy; white-space: nowrap; }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; background: var(--chip); white-space: nowrap; }
+.s-running { color: var(--accent); } .s-queued { color: var(--muted); } .s-blocked { color: var(--bad); }
+.s-paused_quota { color: var(--warn); } .s-done { color: var(--ok); } .s-failed { color: var(--bad); }
+.s-cancelled { color: var(--muted); }
+.note { color: var(--muted); font-size: 12px; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip { font-size: 12px; padding: 2px 10px; border-radius: 999px; background: var(--chip); border: 1px solid var(--line); cursor: pointer; }
+.chip.on { border-color: var(--accent); color: var(--accent); }
+.bar { position: relative; height: 8px; width: 90px; background: var(--chip); border-radius: 4px; overflow: hidden; display: inline-block; vertical-align: middle; }
+.bar > i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--ok); }
+.bar.mid > i { background: var(--warn); } .bar.low > i { background: var(--bad); }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; }
+.indent { display: inline-block; }
+details.help { border-bottom: 1px solid var(--line); padding: 6px 14px; font-size: 12px; }
+details.help summary { cursor: pointer; color: var(--muted); }
+details.help ul { margin: 6px 0 2px; padding-left: 18px; }
+details.help li { margin: 3px 0; }
+details.help li .d { color: var(--muted); }
+.set-group { padding: 4px 14px 2px; font-weight: 600; color: var(--accent); }
+.set-row td:first-child { width: 38%; }
+.set-row input[type=text], .set-row input[type=number], .set-row select { width: 100%; max-width: 420px; font: inherit;
+  background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+.set-row.changed td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.set-row label.cb { margin-right: 12px; white-space: nowrap; }
+.set-actions { padding: 10px 14px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; border-top: 1px solid var(--line); }
+.set-actions .primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.set-actions .primary:disabled { opacity: .5; cursor: not-allowed; }
+.okmsg { color: var(--ok); } .badmsg { color: var(--bad); }
+.secret { display: inline-block; margin: 2px 8px 2px 0; font-size: 12px; }
+.tabbar { display: flex; gap: 2px; padding: 0 10px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.tab { padding: 7px 12px; font: inherit; font-size: 13px; cursor: pointer; color: var(--muted); background: none; border: 0;
+  border-bottom: 2px solid transparent; border-radius: 0; margin-bottom: -1px; user-select: none; }
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tab:hover { color: var(--text); }
+.tab.on { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.tab .n { font-weight: 400; color: var(--muted); margin-left: 3px; }
+.tab.on .n { color: var(--accent); }
+.tab.alert .n { color: var(--bad); font-weight: 600; }
+.pager { display: flex; gap: 8px; align-items: center; justify-content: flex-end; padding: 6px 14px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+.pager button { font-size: 12px; padding: 2px 10px; }
+.toast { position: fixed; bottom: 16px; right: 16px; background: var(--text); color: var(--bg); padding: 6px 12px; border-radius: 6px; opacity: 0; transition: opacity .2s; }
+.toast.show { opacity: .92; }
+@media (max-width: 600px) { .grid2 { grid-template-columns: 1fr; } main { padding: 12px 16px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Toolkit Dashboard</h1>
+  <span class="meta" id="meta">đang tải…</span>
+  <span class="spacer"></span>
+  <label class="meta">Tự làm mới
+    <select id="interval">
+      <option value="5">5 giây</option>
+      <option value="10" selected>10 giây</option>
+      <option value="30">30 giây</option>
+      <option value="0">Tắt</option>
+    </select>
+  </label>
+  <button id="refresh" title="Đọc lại ngay">↻ Làm mới</button>
+  <button id="theme" title="Sáng / tối">◐</button>
+</header>
+<main>
+  <div class="kpis" id="kpis"></div>
+
+  <section class="card" id="attention">
+    <h2>Cần bạn xử lý <span class="count" id="attn-count"></span>
+      <span class="hint">bấm vào lệnh để copy — chạy ở terminal thật</span></h2>
+    <div data-help="attention"></div>
+    <div class="body" id="attn-body"></div>
+  </section>
+
+  <section class="card">
+    <h2>Việc trong hàng đợi <span class="count" id="tasks-count"></span>
+      <span class="chips" id="kind-chips"></span>
+      <span class="hint">mở + đóng trong 24 giờ · <code>coordinator.py board</code></span></h2>
+    <div data-help="tasks"></div>
+    <div class="tabbar" id="tasks-tabs"></div>
+    <div class="body" id="tasks-body"></div>
+  </section>
+
+  <section class="card">
+    <h2>Tài khoản agent <span class="count" id="acct-count"></span>
+      <span class="hint">dung lượng đọc thẳng từ Anthropic (5 phút/lần), không được thì lấy số của Orca · * = tài khoản Orca đang chọn</span></h2>
+    <div data-help="accounts"></div>
+    <div class="body" id="acct-body"></div>
+  </section>
+
+  <section class="card">
+    <h2>Review MR <span class="count" id="rev-count"></span>
+      <span class="hint"><code>review_flow.py status</code></span></h2>
+    <div data-help="reviews"></div>
+    <div class="tabbar" id="rev-tabs"></div>
+    <div class="body" id="rev-body"></div>
+  </section>
+
+  <div class="grid2">
+    <section class="card"><h2>Daemon <span class="count" id="dmn-count"></span>
+      <span class="hint"><code>daemon_common.py status</code></span></h2><div data-help="daemons"></div><div class="body" id="dmn-body"></div></section>
+    <section class="card"><h2>Pipeline run <span class="count" id="run-count"></span></h2><div data-help="runs"></div><div class="body" id="run-body"></div></section>
+    <section class="card"><h2>Hàng đợi intake <span class="count" id="q-count"></span></h2><div data-help="queue"></div><div class="body" id="q-body"></div></section>
+    <section class="card"><h2>Port-forward <span class="count" id="fw-count"></span>
+      <span class="hint"><code>podfwd.py list</code></span></h2><div data-help="forwards"></div><div class="body" id="fw-body"></div></section>
+    <section class="card"><h2>Feedback (sổ học) <span class="count" id="fb-count"></span></h2><div data-help="feedback"></div><div class="body" id="fb-body"></div></section>
+    <section class="card"><h2>Kubernetes &amp; DB</h2><div data-help="k8s"></div>
+      <div class="empty">Chỉ đọc qua <code>k8s.py</code>; sửa cluster: nhờ Claude trong phiên bạn đang ngồi (hook hỏi từng lệnh ghi).</div></section>
+  </div>
+
+  <section class="card" id="startup">
+    <h2>Khởi động — mỗi lệnh một tab terminal trong Orca
+      <span class="hint">chạy từ gốc repo này · bấm để copy · Ctrl+C trong tab để dừng</span></h2>
+    <div class="body" id="startup-body"></div>
+  </section>
+
+  <section class="card" id="settings">
+    <h2>Cài đặt <span class="count" id="set-count"></span>
+      <span class="hint" id="set-hint"></span></h2>
+    <div data-help="settings"></div>
+    <div class="body" id="set-body"><div class="empty">đang tải…</div></div>
+    <div class="set-actions">
+      <button class="primary" id="set-save" disabled>Lưu thay đổi</button>
+      <button id="set-reload">Tải lại</button>
+      <span id="set-msg" class="note"></span>
+    </div>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+const STATUS = { queued: "chờ", running: "đang chạy", paused_quota: "hết quota", blocked: "chờ bạn",
+  done: "xong", failed: "lỗi", cancelled: "đã huỷ" };
+const ICON = { queued: "⏳", running: "🔄", paused_quota: "⏸", blocked: "✋", done: "✅", failed: "❌", cancelled: "🚫" };
+const KIND = { review_mr: "Review MR", verify: "Thang kiểm", proposal: "Đề xuất", atask_intake: "aTask",
+  refactor_program: "Refactor", refactor_slice: "Lát refactor", refactor_publish: "Publish lát", code: "Code",
+  investigate: "Điều tra" };
+const T = ".claude/skills";
+let state = null, kindFilter = "", timer = null, showAllAttn = false;
+
+const $ = (id) => document.getElementById(id);
+function esc(v) {
+  return String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+const code = (s) => `<code data-copy="${esc(s)}">${esc(s)}</code>`;
+function ago(ts) {
+  if (!ts) return "";
+  const t = typeof ts === "number" ? ts * (ts > 1e12 ? 1 : 1000) : Date.parse(ts);
+  if (!isFinite(t)) return esc(ts);
+  const s = Math.round((Date.now() - t) / 1000);
+  if (s < 0) return "sắp tới";
+  if (s < 60) return s + " giây trước";
+  if (s < 3600) return Math.round(s / 60) + " phút trước";
+  if (s < 86400) return Math.round(s / 3600) + " giờ trước";
+  return Math.round(s / 86400) + " ngày trước";
+}
+function clock(epoch) {
+  if (!epoch) return "";
+  const d = new Date(epoch * 1000);
+  return d.toLocaleString("vi-VN", { weekday: "short", hour: "2-digit", minute: "2-digit" });
+}
+function table(cols, rows) {
+  if (!rows.length) return `<div class="empty">Không có gì.</div>`;
+  return `<table><thead><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>` +
+    rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("") + `</tbody></table>`;
+}
+function section(name) {
+  const s = state && state.sections[name];
+  if (!s) return { err: "chưa có dữ liệu" };
+  return s.ok ? { data: s.data } : { err: s.error };
+}
+function setBody(id, countId, sec, render) {
+  const el = $(id);
+  if (sec.err) { el.innerHTML = `<div class="err">${esc(sec.err)}</div>`; if (countId) $(countId).textContent = ""; return; }
+  const out = render(sec.data);
+  el.innerHTML = out.html;
+  if (countId) $(countId).textContent = out.count === undefined ? "" : `(${out.count})`;
+}
+function statusBadge(s) { return `<span class="badge s-${esc(s)}">${ICON[s] || ""} ${esc(STATUS[s] || s)}</span>`; }
+function bar(left) {
+  if (left === null || left === undefined) return "";
+  const cls = left < 20 ? "low" : left < 50 ? "mid" : "";
+  return `<span class="bar ${cls}"><i style="width:${Math.max(0, Math.min(100, left))}%"></i></span>`;
+}
+function pct(b) {
+  if (!b) return `<span class="note">?</span>`;
+  if (b.reset_passed) return `<span class="note" title="đã qua giờ reset sau lần đọc — số mới chưa biết">reset?</span>`;
+  return `${bar(b.left)} ${Math.round(b.left)}%`;
+}
+
+// what could NOT be read for the "needs you" view: a failed section or a skipped file must never look
+// like "nothing to do" (Codex dashboard #5, R2 #2)
+const ATTN_LABEL = { store: "hàng đợi việc", approvals: "yêu cầu duyệt", reviews: "review MR" };
+function attentionGaps() {
+  const gaps = [];
+  for (const k of Object.keys(ATTN_LABEL)) {
+    const s = state.sections[k];
+    if (!s || !s.ok) gaps.push(`${ATTN_LABEL[k]} — ${s ? s.error : "chưa có dữ liệu"}`);
+    else if (s.data && s.data.unreadable) gaps.push(`${ATTN_LABEL[k]} — ${s.data.unreadable} file không đọc được`);
+  }
+  return gaps;
+}
+
+// ---- tabs + paging for the long lists (tasks, reviews): the chosen tab is remembered per list
+const PAGE = 25;
+// a tab whose statuses are "*" takes every status no other tab names: nothing can fall through
+const TABS = {
+  tasks: [["active", "Đang chạy", ["running", "queued", "paused_quota"]], ["attn", "Chờ bạn", ["blocked", "failed"]],
+          ["closed", "Xong / khác", "*"], ["all", "Tất cả", null]],
+  reviews: [["active", "Đang làm", ["queued", "running", "approved"]],
+            ["attn", "Chờ bạn", ["awaiting_approval", "needs_human", "blocked"]],
+            ["posted", "Đã đăng", ["posted"]], ["other", "Lỗi / khác", "*"], ["all", "Tất cả", null]],
+};
+const tabSel = {}, tabPage = {};
+try { Object.assign(tabSel, JSON.parse(localStorage.getItem("dash.tabs") || "{}")); } catch (e) {}
+function tabbed(list, items, statusOf, barId) {
+  const defs = TABS[list];
+  const named = new Set(defs.flatMap((d) => Array.isArray(d[2]) ? d[2] : []));
+  const inTab = (key) => {
+    const d = defs.find((x) => x[0] === key);
+    if (!d || !d[2]) return items;
+    return items.filter((i) => d[2] === "*" ? !named.has(statusOf(i)) : d[2].includes(statusOf(i)));
+  };
+  if (!defs.some((d) => d[0] === tabSel[list])) {          // first visit: the first non-empty tab, remembered
+    tabSel[list] = (defs.find((d) => inTab(d[0]).length) || defs[0])[0];
+    try { localStorage.setItem("dash.tabs", JSON.stringify(tabSel)); } catch (e) {}
+  }
+  const bar = $(barId);
+  const ae = document.activeElement;
+  const focused = ae && ae.getAttribute ? ae.getAttribute("data-tab") : null;   // keep keyboard focus over refreshes
+  bar.setAttribute("role", "tablist");
+  bar.innerHTML = defs.map(([k, label]) => {
+    const n = inTab(k).length, on = k === tabSel[list];
+    return `<button type="button" role="tab" aria-selected="${on}" class="tab ${on ? "on" : ""} ${k === "attn" && n ? "alert" : ""}" data-tab="${list}:${k}">${esc(label)}<span class="n">${n}</span></button>`;
+  }).join("");
+  if (focused && focused.startsWith(list + ":") && bar.querySelector) {
+    const again = bar.querySelector(`[data-tab="${focused}"]`);
+    if (again) again.focus();
+  }
+  const rows = inTab(tabSel[list]);
+  const pages = Math.max(1, Math.ceil(rows.length / PAGE));
+  const page = Math.min(tabPage[list] || 0, pages - 1);
+  tabPage[list] = page;
+  const pager = pages > 1 ? `<div class="pager">${rows.length} dòng · trang ${page + 1}/${pages}
+    <button data-page="${list}:${page - 1}" ${page ? "" : "disabled"}>‹ Trước</button>
+    <button data-page="${list}:${page + 1}" ${page < pages - 1 ? "" : "disabled"}>Sau ›</button></div>` : "";
+  return { rows: rows.slice(page * PAGE, page * PAGE + PAGE), pager };
+}
+
+function renderKpis() {
+  const st = section("store").data || {};
+  const counts = (st.summary || {}).counts || {};
+  const usage = (st.summary || {}).usage || {};
+  const set = st.settings || {};
+  const appr = ((section("approvals").data || {}).items || []).length;
+  const gaps = attentionGaps();
+  const accts = ((section("accounts").data || {}).accounts) || [];
+  const busy = accts.filter((a) => a.running.length).length;
+  const tier = { normal: "bình thường", save: "tiết kiệm", critical: "khẩn", exhausted: "hết" }[usage.tier] || usage.tier || "?";
+  const k = [
+    ["Đang chạy", counts.running || 0, ""],
+    ["Chờ bạn", ((counts.blocked || 0) + appr) + (gaps.length ? "+?" : ""),
+      (counts.blocked || 0) + appr ? "bad" : gaps.length ? "warn" : "ok"],
+    ["Hết quota (tạm dừng)", counts.paused_quota || 0, counts.paused_quota ? "warn" : ""],
+    ["Đang chờ chạy", counts.queued || 0, ""],
+    ["Xong (24h)", st.done_24h || 0, "ok"],
+    [`Lỗi (${st.failed_window_days || 7} ngày)`, st.failed_window_count || 0, st.failed_window_count ? "bad" : ""],
+    ["Mức dùng", tier + (usage.pct != null ? ` ${Math.round(usage.pct)}%` : ""), usage.tier && usage.tier !== "normal" ? "warn" : ""],
+    ["Song song tối đa", set.capacity ?? "?", ""],
+    ["Lượt agent hôm nay", (set.agent_runs_today ?? 0) + (set.daily_agent_runs ? ` / ${set.daily_agent_runs}` : ""), ""],
+    ["Tài khoản đang bận", `${busy} / ${accts.length}`, ""],
+  ];
+  $("kpis").innerHTML = k.map(([l, v, c]) => `<div class="kpi ${c}"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join("");
+}
+
+function renderAttention() {
+  const rows = [];
+  const st = section("store").data || {};
+  // blocked = open (always on the board); failed come from their own uncapped query (Codex R3 #2)
+  for (const r of [...(st.rows || []).filter((x) => x.status === "blocked"), ...(st.failed_recent || [])]) {
+    rows.push([statusBadge(r.status), `<b>${esc(KIND[r.kind] || r.kind)}</b> · ${esc(r.title)}<div class="note">${esc(r.note)}` +
+      (r.status === "failed" && r.updated ? ` · ${ago(r.updated)}` : "") + `</div>`,
+      code(`python ${T}/dev-automation/tools/taskstore.py show ${r.id}`) +
+      (r.status === "blocked" ? "<br>" + code(`python ${T}/dev-automation/tools/taskstore.py unblock ${r.id}`) : "")]);
+  }
+  const moreFailed = (st.failed_window_count || 0) - (st.failed_recent || []).length;
+  for (const a of ((section("approvals").data || {}).items) || []) {
+    const job = (/^post review (\S+)/.exec(a.summary || "") || [])[1];
+    rows.push([`<span class="badge s-blocked">🔐 duyệt</span>`, `<b>${esc(a.tool)}</b> · ${esc(a.summary)}<div class="note">${ago(a.created)} · risk ${esc(a.risk)} · id ${esc(a.id)}</div>`,
+      `<span class="note">Duyệt qua Telegram${job ? ", hoặc:" : ""}</span>` +
+      (job ? "<br>" + code(`python ${T}/mr-review/tools/review_post.py approve ${job}`) : "")]);
+  }
+  for (const j of ((section("reviews").data || {}).jobs) || []) {
+    for (const f of j.notify_open || []) {
+      const why = f.state === "failed"
+        ? (f.attempts >= 5 ? `thử ${esc(f.attempts)} lần · đã ngừng tự thử` : `thử ${esc(f.attempts)} lần · sweep tự thử lại`)
+        : "có thể tin đã tới — kiểm group rồi mới gửi lại (tránh trùng)";
+      rows.push([`<span class="badge s-failed">📣 báo group: ${esc(f.state)}</span>`,
+        `<b>${esc(j.mr)}</b> · đã đăng review nhưng chưa chắc đã báo vào group<div class="note">${esc(f.error)} · ${why}</div>`,
+        code(`python ${T}/mr-review/tools/review_post.py notify ${j.id}`)]);
+    }
+    if (["awaiting_approval", "needs_human", "blocked"].includes(j.status)) {
+      rows.push([`<span class="badge s-blocked">${esc(j.status)}</span>`, `<b>${esc(j.mr)}</b> · ${esc(j.title)}`,
+        code(`python ${T}/mr-review/tools/review_post.py render ${j.id}`) + "<br>" + code(`python ${T}/mr-review/tools/review_post.py approve ${j.id}`)]);
+    }
+  }
+  const failed = attentionGaps();
+  if (moreFailed > 0) failed.push(`${moreFailed} việc lỗi cũ hơn không liệt kê — taskstore.py list --status failed`);
+  const warn = failed.length
+    ? `<div class="err">⚠ Không đọc được: ${failed.map(esc).join("; ")}. Danh sách dưới có thể THIẾU.</div>`
+    : "";
+  $("attn-count").textContent = `(${rows.length}${failed.length ? "+?" : ""})`;
+  const MAX = showAllAttn ? rows.length : 15;
+  $("attn-body").innerHTML = warn + (rows.length
+    ? table(["", "Việc", "Lệnh"], rows.slice(0, MAX)) +
+      (rows.length > MAX ? `<div class="empty"><span class="chip" data-more="1">Xem thêm ${rows.length - MAX} mục</span></div>` : "")
+    : failed.length ? "" : `<div class="empty">Không có việc nào chờ bạn. 👍</div>`);
+}
+
+function renderTasks() {
+  setBody("tasks-body", "tasks-count", section("store"), (d) => {
+    if (!d.exists) return { html: `<div class="empty">Chưa có store (temp/toolkit.db). Thêm việc: <code>review_flow.py enqueue</code>, <code>verify.py start</code>, <code>proposals.py scan --enqueue</code>…</div>`, count: 0 };
+    const rows = d.rows || [];
+    const kinds = [...new Set(rows.map((r) => r.kind))].sort();
+    $("kind-chips").innerHTML = [["", "Tất cả"], ...kinds.map((k) => [k, KIND[k] || k])].map(([k, l]) =>
+      `<span class="chip ${k === kindFilter ? "on" : ""}" data-kind="${esc(k)}">${esc(l)} ${k ? `(${rows.filter((r) => r.kind === k).length})` : ""}</span>`).join("");
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+    const depth = (r) => { let n = 0, p = r.parent; while (p && byId[p] && n < 6) { n++; p = byId[p].parent; } return n; };
+    const order = { blocked: 0, running: 1, paused_quota: 2, queued: 3, failed: 4, done: 5, cancelled: 6 };
+    // children right under their parent, parents ordered by status
+    const roots = rows.filter((r) => !r.parent || !byId[r.parent]).sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
+    const kids = {};
+    rows.forEach((r) => { if (r.parent && byId[r.parent]) (kids[r.parent] = kids[r.parent] || []).push(r); });
+    const flat = [];
+    const walk = (r, seen) => { if (seen.has(r.id)) return; seen.add(r.id); flat.push(r); (kids[r.id] || []).forEach((c) => walk(c, seen)); };
+    const seen = new Set(); roots.forEach((r) => walk(r, seen));
+    const filtered = flat.filter((r) => !kindFilter || r.kind === kindFilter);
+    const { rows: shown, pager } = tabbed("tasks", filtered, (r) => r.status, "tasks-tabs");
+    return { count: filtered.length, html: table(["Trạng thái", "Loại", "Việc", "Bước", "Ghi chú", "ID"], shown.map((r) => [
+      statusBadge(r.status), esc(KIND[r.kind] || r.kind),
+      `<span class="indent" style="width:${depth(r) * 18}px"></span>${depth(r) ? "└ " : ""}${esc(r.title)}` +
+        (r.resource ? `<div class="note mono">${esc(r.resource)}</div>` : ""),
+      esc(r.step) + (r.done_steps && r.done_steps.length ? `<div class="note">xong: ${esc(r.done_steps.join(", "))}</div>` : ""),
+      `<span class="note">${esc(r.note)}${r.attempts > 1 ? ` · lần ${esc(r.attempts)}` : ""}${r.source ? ` · từ ${esc(r.source)}` : ""}</span>`,
+      `<span class="mono note">${esc(r.id)}</span>`])) + pager };
+  });
+}
+
+function renderAccounts() {
+  setBody("acct-body", "acct-count", section("accounts"), (d) => {
+    const rows = (d.accounts || []).map((a) => {
+      const u = a.usage || {};
+      const src = { live: "Orca, trực tiếp", api: u.age_min ? `API, ${u.age_min} phút trước` : "API, vừa đọc",
+        cached: u.age_min != null ? `Orca, ${u.age_min} phút trước` : "Orca (cache)", none: "—" }[a.usage_source] || "";
+      const resets = [u.session, u.weekly].filter((b) => b && b.resets_at && !b.reset_passed).map((b) => b.resets_at);
+      const doing = a.running.length ? a.running.map((x) => `🔄 ${esc(x.role || "?")} ${esc(x.task_id || "")} ${esc(x.step || "")} <span class="note">(${esc(x.minutes)} phút)</span>`).join("<br>") : `<span class="note">rảnh</span>`;
+      const last = a.last ? `<div class="note">gần nhất: ${esc(a.last.model || "")} ${esc(a.last.task_id || "")} · ${ago(a.last.ts)}</div>` : "";
+      return [`<b>${esc(a.account)}${a.orca_active ? " *" : ""}</b><div class="note">${esc(a.email || "")}${a.org ? " · " + esc(a.org) : ""}</div>` +
+              (a.warning ? `<div class="note" style="color:var(--bad)">${esc(a.warning)}</div>` : "") +
+              (a.api_error && a.usage_source !== "api" ? `<div class="note" style="color:var(--warn)">không đọc trực tiếp được: ${esc(a.api_error)}</div>` : ""),
+        pct(u.session), pct(u.weekly), resets.length ? esc(clock(Math.min(...resets))) : "", `<span class="note">${esc(src)}</span>`,
+        `${a.today.runs} lượt<div class="note">${Math.round(a.today.seconds / 60)} phút</div>`, doing + last];
+    });
+    let html = table(["Tài khoản", "5 giờ còn", "Tuần còn", "Reset sớm nhất", "Số liệu", "Hôm nay", "Đang làm"], rows);
+    if (d.unattributed) html += `<div class="empty">Không rõ tài khoản: ${d.unattributed.today.runs} lượt hôm nay, ${d.unattributed.running.length} đang chạy (gọi không qua role).</div>`;
+    if (d.orca !== "ok") html += `<div class="err">Orca không đọc được${d.orca_error ? ": " + esc(d.orca_error) : ""} — không có số dung lượng.</div>`;
+    return { html, count: rows.length };
+  });
+}
+
+function renderReviews() {
+  setBody("rev-body", "rev-count", section("reviews"), (d) => {
+    const jobs = d.jobs || [];
+    const { rows, pager } = tabbed("reviews", jobs, (j) => j.status, "rev-tabs");
+    return { count: jobs.length, html: table(["Trạng thái", "MR", "Tiêu đề", "Kết luận", "Nhánh", "Ai nhờ", "Cập nhật"], rows.map((j) => [
+      `<span class="badge">${esc(j.status)}</span>`, `<span class="mono">${esc(j.mr)}</span>`, esc(j.title),
+      esc(j.verdict || ""), `<span class="note mono">${esc(j.branches)}</span>`, esc(j.by), `<span class="note">${ago(j.updated)}</span>`])) + pager };
+  });
+}
+
+function renderSystem() {
+  setBody("dmn-body", "dmn-count", section("daemons"), (d) => ({ count: d.length, html: table(["Daemon", "Sự kiện cuối", "Lúc", "Chi tiết"],
+    d.map((x) => [esc(x.daemon), `<span class="badge">${esc(x.event)}</span>`, esc(x.age), `<span class="note">${esc(x.detail)}</span>`])) }));
+  setBody("run-body", "run-count", section("runs"), (d) => {
+    const open = d.filter((r) => r.open);
+    return { count: open.length, html: table(["Run", "Task", "Project", "Giai đoạn", "Tiến độ"], open.map((r) => [
+      `<span class="mono">${esc(r.run_id)}</span>`, esc(r.task_id), esc(r.project), (r.failed ? "❌ " : "") + esc(r.current_stage), esc(r.stages_done)])) };
+  });
+  setBody("q-body", "q-count", section("queue"), (d) => {
+    const items = d.items || [];
+    return { count: items.length, html: table(["Trạng thái", "Task", "Tên", "Lúc"], items.map((i) => [
+      `<span class="badge">${esc(i.state)}</span>`, esc(i.task_id), esc(i.name), esc(i.age)])) +
+      ((d.locks || []).length ? `<div class="empty">Khoá: ${d.locks.map((l) => esc(l.owner) + " " + esc(l.age)).join(", ")}</div>` : "") };
+  });
+  setBody("fw-body", "fw-count", section("forwards"), (d) => {
+    const f = d.forwards || [];
+    return { count: f.length, html: table(["Tên", "Local", "Đích", "Context", "Đang nghe", "Nối lại"], f.map((x) => [
+      esc(x.name), `<span class="mono">${esc(x.local)}</span>`, `<span class="mono">${esc(x.target)}</span>`,
+      esc(x.context || ""), x.listening ? "✅" : (x.supervisor_alive ? "⏳" : "❌"), esc(x.restarts)])) };
+  });
+  setBody("fb-body", "fb-count", section("feedback"), (d) => ({ count: d.length, html: table(["Project", "Bản ghi", "Lần sửa tay", "Tỉ lệ thẳng"],
+    d.map((x) => [esc(x.project), `<span class="num">${esc(x.records)}</span>`, esc(x.corrections),
+      x.straight_through_rate == null ? "" : Math.round(x.straight_through_rate * 100) + "%"])) }));
+}
+
+// ------------------------------------------------------------------ command help per card
+const DA = `python ${T}/dev-automation/tools`, AD = `python ${T}/auto-dev/tools`, MR = `python ${T}/mr-review/tools`,
+  TC = `python ${T}/tchat-automation/tools`, RC = `python ${T}/remote-control/tools`;
+const HELP = {
+  attention: [
+    [`${MR}/review_post.py render <job>`, "xem đúng nội dung review sẽ đăng (job = <project_id>-<iid>, vd 5401-1202)"],
+    [`${MR}/review_post.py approve <job>`, "duyệt đăng review — chỉ bạn gõ ở terminal thật (hoặc bấm Duyệt trên Telegram)"],
+    [`${MR}/review_rules.py check <job>`, "vì sao review không được tự đăng"],
+    [`${MR}/review_post.py request-approval <job>`, "gửi lại thẻ duyệt khi thẻ cũ hết hạn"],
+    [`${DA}/taskstore.py unblock <id>`, "cho việc bị chặn chạy tiếp (sau khi bạn đã xử lý tay)"],
+    [`${DA}/taskstore.py cancel <id>`, "huỷ việc"],
+  ],
+  tasks: [
+    [`${AD}/coordinator.py work`, "WORKER: lấy việc 'chờ' ra chạy — phải có tab này thì việc mới chạy"],
+    [`${AD}/coordinator.py board`, "bảng tiến độ ở terminal"],
+    [`${DA}/taskstore.py list --status queued`, "liệt kê việc theo trạng thái (queued, blocked, failed…)"],
+    [`${DA}/taskstore.py show <id>`, "chi tiết một việc"],
+    [`${DA}/taskstore.py events <id>`, "lịch sử từng bước của một việc"],
+    [`${MR}/review_flow.py enqueue --project etask --iid 123`, "xếp review một MR bằng tay"],
+    [`${AD}/verify.py start --repo work/etask`, "thang kiểm: build → test → suite → review chéo tới khi xanh"],
+    [`${AD}/proposals.py scan --repo work/etask --enqueue`, "quét đề xuất cải tiến (không tốn token)"],
+  ],
+  accounts: [
+    [`${AD}/accounts.py`, "bảng tài khoản ở terminal (--json, --orca-only)"],
+    [`work/agents.json`, "danh sách tài khoản + thứ tự dùng theo vai (sửa tay)"],
+    ["(mở tài khoản trong Orca)", "khi báo 'token hết hạn' — toolkit không tự gia hạn token"],
+  ],
+  reviews: [
+    [`${MR}/review_flow.py status`, "các review đang mở"],
+    [`${MR}/review_flow.py work --once`, "chạy một lượt review bằng tay (thường tab Coordinator tự làm)"],
+    [`${MR}/review_flow.py reconcile`, "MR có commit mới → xếp review lại; việc đã duyệt → đi tiếp"],
+    [`${MR}/review_post.py sweep`, "đăng các review đã duyệt (group_watch tự chạy mỗi 30 giây)"],
+    [`${DA}/mr_watch.py --interval 300`, "tự tìm MR gắn tên bạn mỗi 5 phút → xếp review"],
+  ],
+  daemons: [
+    [`${DA}/daemon_common.py status`, "sự kiện cuối của từng daemon"],
+    [`${TC}/auth.py token-status`, "token TChat còn bao lâu; hết hạn: auth.py refresh"],
+    [`${DA}/status.py`, "tổng hợp: daemon, pipeline, hàng đợi, duyệt chờ"],
+  ],
+  runs: [[`${DA}/run_log.py list`, "các pipeline run (auto-dev)"]],
+  queue: [[`${DA}/status.py --section queue`, "hàng đợi intake cũ (atask_watch / queue)"]],
+  forwards: [
+    [`${DA}/k8s.py forwards --listening`, "forward đã lưu trong Lens, cái nào đang mở"],
+    [`${DA}/podfwd.py start svc/<db> 13310:3306 --project etask --env dev --name etask-db`, "mở forward nền, tự nối lại (PROD: --allow-prod)"],
+    [`${DA}/podfwd.py list`, "các forward do toolkit mở"],
+    [`${DA}/podfwd.py stop <name|all>`, "đóng forward"],
+    [`${DA}/probe_db.py query --engine mysql --host 127.0.0.1 --port 13310 --name etask --sql "select 1"`, "query qua forward (user/pass: biến môi trường DB_USER / DB_PASSWORD)"],
+  ],
+  feedback: [[`${DA}/feedback.py stats --project etask`, "thống kê can thiệp của người (sổ học)"]],
+  k8s: [
+    [`${DA}/k8s.py access --project etask --env dev`, "token kubeconfig còn hạn không, được làm gì"],
+    [`${DA}/k8s.py pods --project etask --env dev`, "danh sách pod (deploys, events tương tự)"],
+    [`${DA}/k8s.py logs --project etask --env dev deploy/<app> --since 30m --errors -C 3`, "gộp log lỗi mọi pod của deploy"],
+    [`${DA}/k8s.py contexts`, "context có trên máy; không có --project thì ghi --context … -n …"],
+    [`${DA}/vpn.py status`, "mạng nội bộ có thông không (exit 0 = OK)"],
+  ],
+  settings: [
+    [`${DA}/toolkit_settings.py list`, "xem các cài đặt này ở terminal"],
+    [`${DA}/toolkit_settings.py set REVIEW_AUTO_POST auto`, "đổi ở terminal (hook hỏi xác nhận)"],
+    [`${DA}/dashboard.py serve`, "link có #key=… in ra ở tab này mới sửa được; key đổi mỗi lần chạy"],
+    [".env (sửa tay)", "token / mật khẩu không sửa ở đây — trang chỉ cho biết đã đặt hay chưa"],
+  ],
+};
+const STARTUP = [   // each under supervise.py: restarted when it exits or when code / .env change
+  ["Coordinator", `python ${T}/dev-automation/tools/supervise.py --name Coordinator -- python -u ${T}/auto-dev/tools/coordinator.py work`, "worker — bắt buộc để việc 'chờ' được chạy"],
+  ["TChat group_watch", `python ${T}/dev-automation/tools/supervise.py --name group_watch -- python -u ${T}/tchat-automation/tools/group_watch.py`, "nghe group TChat → xếp review; đăng review đã duyệt + báo lại group"],
+  ["TG bot OPS", `python ${T}/dev-automation/tools/supervise.py --name tg_ops -- python -u ${T}/remote-control/tools/telegram_bridge.py --bot ops --mode approvals-only`, "nút Duyệt / Từ chối trên Telegram"],
+  ["TG bot CODE", `python ${T}/dev-automation/tools/supervise.py --name tg_code -- python -u ${T}/remote-control/tools/telegram_bridge.py`, "nhắn Telegram → Claude chạy lệnh (tuỳ chọn)"],
+  ["MR watch", `python ${T}/dev-automation/tools/supervise.py --name mr_watch -- python -u ${T}/dev-automation/tools/mr_watch.py --interval 300`, "tự tìm MR gắn tên bạn (tuỳ chọn)"],
+  ["Dashboard", `python ${T}/dev-automation/tools/supervise.py --name dashboard --no-reload -- python ${T}/dev-automation/tools/dashboard.py serve`, "trang này (key mới mỗi lần chạy lại — mở link mới in ở tab)"],
+];
+function renderHelp() {
+  document.querySelectorAll("[data-help]").forEach((el) => {
+    const items = HELP[el.getAttribute("data-help")] || [];
+    if (!items.length) return;
+    el.innerHTML = `<details class="help"><summary>Lệnh &amp; cách dùng (${items.length})</summary><ul>` +
+      items.map(([c, d]) => `<li>${c.startsWith("(") || c.endsWith(".json") || c.startsWith(".env") ? `<b>${esc(c)}</b>` : code(c)} <span class="d">— ${esc(d)}</span></li>`).join("") +
+      `</ul></details>`;
+  });
+  $("startup-body").innerHTML = table(["Tab", "Lệnh", "Làm gì"], STARTUP.map(([n, c, d]) => [`<b>${esc(n)}</b>`, code(c), `<span class="note">${esc(d)}</span>`])) +
+    `<div class="empty">Bọc bởi <code>supervise.py</code>: daemon thoát/lỗi → tự chạy lại (2 s → 60 s); có commit mới hoặc .env / agents.json đổi → tự chạy lại để dùng code/cấu hình mới. Ctrl+C trong tab = dừng hẳn. Mỗi daemon chỉ chạy <b>một bản</b>. Dòng khởi động bot Telegram phải in <code>Hub repo: …Agent-Skill-Toolkit</code>. Đổi cài đặt .env → restart tab được ghi bên cạnh.</div>`;
+}
+
+// ------------------------------------------------------------------ settings
+let editKey = "", settings = null, setBusy = false;
+(function takeKey() {
+  const m = /(?:^#|&)key=([\w-]{16,})/.exec(location.hash || "");
+  if (m) {
+    editKey = m[1];
+    try { sessionStorage.setItem("dash.key", editKey); } catch (e) {}
+    history.replaceState(null, "", location.pathname + location.search);   // keep it out of the address bar
+  } else {
+    try { editKey = sessionStorage.getItem("dash.key") || ""; } catch (e) {}
+  }
+})();
+const shown = (it) => (it.set && it.value !== "" && it.value != null ? String(it.value) : String(it.default ?? ""));
+function control(it) {
+  const v = shown(it), k = esc(it.key), dis = editKey ? "" : " disabled";
+  if (it.kind === "enum") return `<select data-set="${k}"${dis}>${it.choices.map((c) => `<option ${c === v ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>`;
+  if (it.kind === "bool") return `<select data-set="${k}"${dis}><option value="1" ${v === "1" ? "selected" : ""}>Bật (1)</option><option value="0" ${v === "0" ? "selected" : ""}>Tắt (0)</option></select>`;
+  if (it.kind === "int") return `<input type="number" data-set="${k}" value="${esc(v)}" min="${esc(it.lo)}" max="${esc(it.hi)}"${dis}>`;
+  if (it.kind === "multi") {
+    const on = new Set(v.split(",").filter(Boolean));
+    return `<span data-set="${k}" data-multi="1">${it.choices.map((c) => `<label class="cb"><input type="checkbox" value="${esc(c)}" ${on.has(c) ? "checked" : ""}${dis}> ${esc(c)}</label>`).join("")}</span>`;
+  }
+  return `<input type="text" data-set="${k}" value="${esc(v)}" placeholder="${esc(it.default || "(trống)")}"${dis}>`;
+}
+function readControl(el) {
+  if (el.dataset.multi) return [...el.querySelectorAll("input:checked")].map((i) => i.value).join(",");
+  return el.value.trim();
+}
+function pendingChanges() {
+  const out = {};
+  if (!settings) return out;
+  document.querySelectorAll("[data-set]").forEach((el) => {
+    const it = settings.items.find((x) => x.key === el.dataset.set);
+    const v = readControl(el);
+    const row = el.closest("tr");
+    const same = (a, b) => (el.dataset.multi                   // a selection: order does not matter (R1 #4)
+      ? [...new Set(a.split(",").filter(Boolean))].sort().join() === [...new Set(b.split(",").filter(Boolean))].sort().join()
+      : a === b);
+    const changed = it && !same(v, shown(it));
+    if (row) row.classList.toggle("changed", !!changed);
+    if (changed) out[it.key] = v;
+  });
+  return out;
+}
+function renderSettings(resp) {
+  const body = $("set-body");
+  if (!resp.ok) { body.innerHTML = `<div class="err">${esc(resp.error)}</div>`; return; }
+  settings = resp.data;
+  const editable = resp.editable && !!editKey;
+  $("set-hint").innerHTML = editable ? "đổi giá trị rồi bấm <b>Lưu thay đổi</b>"
+    : resp.editable ? "⚠ chỉ xem — mở link có <code>#key=…</code> in ở tab dashboard.py để sửa"
+    : "⚠ chỉ xem — dashboard chạy với --read-only";
+  if (!resp.editable) editKey = "";                       // --read-only server: no form
+  $("set-count").textContent = `(${settings.items.length})`;
+  let html = `<div class="empty mono">.env: ${esc(settings.env_file)}${settings.env_exists ? "" : " — CHƯA CÓ FILE"}</div>`;
+  if (settings.warnings.length) html += `<div class="err">${settings.warnings.map((w) => "⚠ " + esc(w)).join("<br>")}</div>`;
+  let group = null, rows = [];
+  const flush = () => { if (rows.length) html += `<div class="set-group">${esc(group)}</div>` + table(["Cài đặt", "Giá trị", "Áp dụng"], rows).replace(/<tr><td>/g, '<tr class="set-row"><td>'); rows = []; };
+  for (const it of settings.items) {
+    if (it.group !== group) { flush(); group = it.group; }
+    rows.push([`<b>${esc(it.label)}</b>${it.sensitive ? ' <span class="badge" title="ảnh hưởng an toàn — hỏi xác nhận khi lưu">nhạy cảm</span>' : ""}` +
+      `<div class="note"><span class="mono">${esc(it.key)}</span>${it.help ? " — " + esc(it.help) : ""}</div>` +
+      (it.set ? "" : `<div class="note">chưa đặt → dùng mặc định <span class="mono">${esc(it.default || "(trống)")}</span></div>`) +
+      (it.env_override ? `<div class="note" style="color:var(--warn)">biến môi trường của tiến trình dashboard đang khác file</div>` : ""),
+      control(it),
+      `<span class="note">${it.store ? "ngay lập tức" : "restart: " + esc(it.restart.join(", ") || "—")}</span>`]);
+  }
+  flush();
+  html += `<div class="empty"><b>Khoá bí mật</b> (chỉ cho biết đã đặt hay chưa — sửa tay trong .env): ` +
+    settings.secrets.map((s) => `<span class="secret">${s.set ? "✅" : "⬜"} <span class="mono">${esc(s.key)}</span></span>`).join("") + `</div>`;
+  body.innerHTML = html;
+  $("set-save").disabled = true;
+}
+async function loadSettings() {
+  try {
+    const r = await fetch("/api/settings", { cache: "no-store" });
+    renderSettings(await r.json());
+  } catch (e) { $("set-body").innerHTML = `<div class="err">Không tải được cài đặt: ${esc(e.message)}</div>`; }
+}
+async function saveSettings() {
+  const changes = pendingChanges();
+  const keys = Object.keys(changes);
+  if (!keys.length || setBusy) return;
+  const sens = keys.filter((k) => (settings.items.find((x) => x.key === k) || {}).sensitive);
+  const list = keys.map((k) => `${k}: ${shown(settings.items.find((x) => x.key === k)) || "(trống)"} → ${changes[k] || "(trống)"}`).join("\n");
+  if (!confirm((sens.length ? "Có thay đổi NHẠY CẢM (" + sens.join(", ") + ").\n\n" : "") + "Lưu các thay đổi?\n\n" + list)) return;
+  const expected = {};
+  for (const k of keys) { const it = settings.items.find((x) => x.key === k); expected[k] = it.set && it.value != null ? String(it.value) : ""; }
+  setBusy = true; $("set-msg").textContent = "đang lưu…"; $("set-msg").className = "note";
+  try {
+    const r = await fetch("/api/settings", { method: "POST", cache: "no-store",
+      headers: { "Content-Type": "application/json", "X-Dashboard-Key": editKey },
+      body: JSON.stringify({ changes, expected }) });
+    const out = await r.json();
+    if (!out.ok) throw new Error(out.error || ("HTTP " + r.status));
+    const n = Object.keys(out.changed || {}).length;
+    $("set-msg").innerHTML = `<span class="okmsg">Đã lưu ${n} thay đổi.</span>` +
+      (out.restart && out.restart.length ? ` Restart tab: <b>${esc(out.restart.join(", "))}</b> (Ctrl+C rồi chạy lại lệnh ở mục Khởi động).` : " Áp dụng ngay.");
+    await loadSettings(); load(true);
+  } catch (e) {
+    $("set-msg").innerHTML = `<span class="badmsg">Không lưu được: ${esc(e.message)}</span>`;
+  } finally { setBusy = false; }
+}
+document.addEventListener("input", (e) => { if (e.target.closest("#set-body")) $("set-save").disabled = !Object.keys(pendingChanges()).length || !editKey; });
+document.addEventListener("change", (e) => { if (e.target.closest("#set-body")) $("set-save").disabled = !Object.keys(pendingChanges()).length || !editKey; });
+
+function render() {
+  if (state.pending) { $("meta").textContent = "đang tạo dữ liệu lần đầu…"; return; }
+  const slow = Object.entries(state.sections).filter(([, s]) => s.ms > 1500).map(([k, s]) => `${k} ${s.ms}ms`);
+  $("meta").textContent = `${state.host} · cập nhật ${new Date(state.generated_at * 1000).toLocaleTimeString("vi-VN")}` +
+    (slow.length ? ` · chậm: ${slow.join(", ")}` : "");
+  renderKpis(); renderAttention(); renderTasks(); renderAccounts(); renderReviews(); renderSystem();
+}
+
+async function load(fresh) {
+  try {
+    const res = await fetch("/api/state" + (fresh ? "?fresh=1" : ""), { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    state = await res.json();
+    render();
+  } catch (e) {
+    $("meta").textContent = "Mất kết nối tới dashboard.py (" + e.message + ") — server còn chạy không?";
+  }
+}
+function schedule() {
+  clearInterval(timer);
+  const s = +$("interval").value;
+  try { localStorage.setItem("dash.interval", String(s)); } catch (e) {}
+  if (s > 0) timer = setInterval(() => { if (!document.hidden) load(false); }, s * 1000);
+}
+function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("show"); setTimeout(() => t.classList.remove("show"), 1200); }
+
+document.addEventListener("click", (e) => {
+  const c = e.target.closest("[data-copy]");
+  if (c) {
+    const text = c.getAttribute("data-copy");
+    (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject()).then(() => toast("Đã copy lệnh"), () => {
+      const r = document.createRange(); r.selectNodeContents(c); const s = getSelection(); s.removeAllRanges(); s.addRange(r); toast("Đã chọn — Ctrl+C");
+    });
+    return;
+  }
+  if (e.target.closest("[data-more]")) { showAllAttn = true; render(); return; }
+  const tb = e.target.closest("[data-tab]");
+  if (tb) {
+    const [list, key] = tb.getAttribute("data-tab").split(":");
+    tabSel[list] = key; tabPage[list] = 0;
+    try { localStorage.setItem("dash.tabs", JSON.stringify(tabSel)); } catch (err) {}
+    render(); return;
+  }
+  const pg = e.target.closest("[data-page]");
+  if (pg && !pg.disabled) { const [list, p] = pg.getAttribute("data-page").split(":"); tabPage[list] = +p; render(); return; }
+  const k = e.target.closest("[data-kind]");
+  if (k) { kindFilter = k.getAttribute("data-kind"); tabPage.tasks = 0; render(); }
+});
+$("refresh").addEventListener("click", () => load(true));
+$("interval").addEventListener("change", schedule);
+$("theme").addEventListener("click", () => {
+  const root = document.documentElement;
+  const dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  root.dataset.theme = dark ? "light" : "dark";
+  try { localStorage.setItem("dash.theme", root.dataset.theme); } catch (e) {}
+});
+try {
+  const th = localStorage.getItem("dash.theme"); if (th) document.documentElement.dataset.theme = th;
+  const iv = localStorage.getItem("dash.interval"); if (iv !== null) $("interval").value = iv;
+} catch (e) {}
+$("set-save").addEventListener("click", saveSettings);
+$("set-reload").addEventListener("click", () => { $("set-msg").textContent = ""; loadSettings(); });
+renderHelp();
+schedule();
+load(true);
+loadSettings();
+</script>
+</body>
+</html>

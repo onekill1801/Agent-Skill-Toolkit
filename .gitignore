@@ -149,3 +149,7 @@ work/
 
 # Claude Code local settings (máy-cụ-thể, không commit)
 .claude/settings.local.json
+
+# Plaintext credential dumps — never commit
+dbbeaver.txt
+*credentials*.txt
