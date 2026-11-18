@@ -261,8 +261,10 @@ def prepare(jid: str, with_merge: bool = False) -> dict:
     codegraph = {"status": "disabled"}
     if rc.config.get("REVIEW_CODEGRAPH", "1").lower() not in ("0", "false", "no"):
         import cg                                            # dev-automation/tools (on sys.path)
-        with rc.file_lock(f"codegraph-seed-{pid}", timeout=900):   # one seed copy/sync at a time per project
-            codegraph = cg.prepare(wt, pid, clone_dir=repo.path if not repo.bare else "")
+        tb = mr.get("target_branch") or ""
+        # one seed per (project, target branch); one copy/sync at a time per seed
+        with rc.file_lock("codegraph-seed-" + re.sub(r"[^A-Za-z0-9_.-]", "_", f"{pid}-{tb}"), timeout=900):
+            codegraph = cg.prepare(wt, pid, clone_dir=repo.path if not repo.bare else "", branch=tb)
         if codegraph.get("status") == "ready":
             codegraph.update(cg.analyze(wt, base, head, title=mr.get("title") or "",
                                         out=wt + ".codegraph.md"))

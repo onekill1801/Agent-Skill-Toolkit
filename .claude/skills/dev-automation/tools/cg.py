@@ -100,22 +100,26 @@ def _exclude_index(worktree: str) -> None:
         pass
 
 
-def _seed_store(project_id) -> str:
-    return os.path.join(project_config._work_dir(), "cache", "codegraph-seeds", str(project_id))
+def _seed_store(project_id, branch: str = "") -> str:
+    """One seed per (project, target branch): branches that differ a lot (etask merge/rfc vs
+    merge/rfc-into-vitess) would otherwise re-index every differing file each time they alternate."""
+    name = str(project_id) + (("@" + re.sub(r"[^A-Za-z0-9_.-]", "_", branch)) if branch else "")
+    return os.path.join(project_config._work_dir(), "cache", "codegraph-seeds", name)
 
 
 def _has_db(d: str) -> bool:
     return bool(d) and os.path.isfile(os.path.join(d, "codegraph.db"))
 
 
-def find_seed(project_id, clone_dir: str = "", seed: str = "") -> str:
+def find_seed(project_id, clone_dir: str = "", seed: str = "", branch: str = "") -> str:
     reg = {}
     for p in _registry().values():
         if isinstance(p, dict) and str(p.get("gitlab_project_id")) == str(project_id):
             reg = p
             break
     for cand in (seed and os.path.join(os.path.expanduser(seed), ".codegraph"),
-                 _seed_store(project_id),
+                 branch and _seed_store(project_id, branch),
+                 _seed_store(project_id),             # a branch's first run starts from the project seed
                  clone_dir and os.path.join(clone_dir, ".codegraph"),
                  reg.get("clone_dir") and os.path.join(reg["clone_dir"], ".codegraph"),
                  reg.get("codegraph_seed") and os.path.join(os.path.expanduser(reg["codegraph_seed"]), ".codegraph")):
@@ -140,12 +144,12 @@ def _copy_db(src: str, dst: str) -> None:
             shutil.copy2(s, os.path.join(dst, n))
 
 
-def save_seed(worktree: str, project_id) -> bool:
-    """Snapshot the worktree's (synced) index as the project's seed, atomically."""
+def save_seed(worktree: str, project_id, branch: str = "") -> bool:
+    """Snapshot the worktree's (synced) index as the (project, branch) seed, atomically."""
     src = os.path.join(worktree, ".codegraph")
     if not _has_db(src):
         return False
-    store = _seed_store(project_id)
+    store = _seed_store(project_id, branch)
     tmp = store + f".tmp-{os.getpid()}"
     shutil.rmtree(tmp, ignore_errors=True)
     _run(["sync", "-q"], cwd=worktree, timeout=120)          # flush WAL state before copying
@@ -158,12 +162,13 @@ def save_seed(worktree: str, project_id) -> bool:
     return True
 
 
-def prepare(worktree: str, project_id, clone_dir: str = "", seed: str = "") -> dict:
+def prepare(worktree: str, project_id, clone_dir: str = "", seed: str = "", branch: str = "") -> dict:
+    """branch = the MR's target branch: the seed is read from / saved to that branch's own slot."""
     if not available():
         return {"status": "unavailable", "hint": "install codegraph to get impact analysis"}
     t0 = time.time()
     local = os.path.join(worktree, ".codegraph")
-    src = "" if _has_db(local) else find_seed(project_id, clone_dir, seed)
+    src = "" if _has_db(local) else find_seed(project_id, clone_dir, seed, branch)
     _exclude_index(worktree)
     try:
         if src:
@@ -183,7 +188,7 @@ def prepare(worktree: str, project_id, clone_dir: str = "", seed: str = "") -> d
         return {"status": "unavailable", "message": str(e)[:200]}
     if p.returncode != 0 or not _has_db(local):
         return {"status": "error", "message": (p.stderr or p.stdout).strip()[-300:]}
-    saved = save_seed(worktree, project_id)
+    saved = save_seed(worktree, project_id, branch)
     return {"status": "ready", "mode": mode, "seed": src or None, "seed_saved": saved,
             "seconds": round(time.time() - t0, 1)}
 
@@ -308,6 +313,7 @@ def main(argv=None) -> int:
     p.add_argument("--project-id", required=True)
     p.add_argument("--clone-dir", default="")
     p.add_argument("--seed", default="")
+    p.add_argument("--branch", default="", help="target branch: use / save that branch's own seed")
     p = sub.add_parser("analyze")
     p.add_argument("worktree")
     p.add_argument("--base", required=True)
@@ -318,7 +324,7 @@ def main(argv=None) -> int:
     p.add_argument("worktree")
     a = ap.parse_args(argv)
     if a.cmd == "prepare":
-        out = prepare(a.worktree, a.project_id, a.clone_dir, a.seed)
+        out = prepare(a.worktree, a.project_id, a.clone_dir, a.seed, a.branch)
     elif a.cmd == "analyze":
         out = analyze(a.worktree, a.base, a.head, a.title, a.out)
     else:
