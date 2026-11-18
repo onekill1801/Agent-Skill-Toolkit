@@ -40,7 +40,7 @@ python agentkit.py deploy_log --service workflow --commit
 # Service lạ: chỉ repo 1 lần rồi nhớ
 python agentkit.py deploy_log --service eDlm-ext --gitlab-id 1234 --branch prod --save-alias
 ```
-Cờ: `--desc "..."` (ghi đè) · `--env Prod|Demo` · `--confirm <user>` · `--date DD/MM/YYYY` ·
+Cờ: `--desc "..."` (ghi đè) · `--env Prod|Demo` · `--confirm <user>` · `--date DD/MM/YYYY` · `--tab "Tháng MM-YYYY"` (khi tab tháng mới chưa có) ·
 `--gitlab-id <id>` · `--branch <b>` · `--save-alias` · `--json`.
 
 ## Guardrail
