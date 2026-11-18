@@ -51,7 +51,8 @@ def load_registry(kinds: list = None) -> tuple:
         sys.path.insert(0, os.path.join(_HERE, "..", "..", "mr-review", "tools"))
         import review_flow
         reg.update(review_flow.REGISTRY)
-        hooks.append(review_flow.reconcile)
+        if not kinds or "review_mr" in kinds:   # review off on this machine -> don't re-enqueue reviews either
+            hooks.append(review_flow.reconcile)
     except Exception as e:  # noqa: BLE001
         warn.append(f"review_mr unavailable: {type(e).__name__}: {e}")
     if kinds:
