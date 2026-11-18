@@ -188,14 +188,19 @@ def _task_id(result: dict) -> str:
     return d.get("id") or d.get("taskId") or ""
 
 
-def create_task_ready(name: str, existing_id: str = None, set_status: bool = True) -> tuple:
+def create_task_ready(name: str, existing_id: str = None, set_status: bool = True,
+                      description: str = None, due_date: str = None) -> tuple:
     """Create the aTask task (or reuse existing_id), set it to ready_to_deploy, return (task_id, task_code, link)."""
     tid = existing_id
     if not tid:
         # create_task takes the status (group_task id) directly; a later update_task would need explicit
         # project membership on the AI channel (AgentWriteAuthorizer), which the UI does not require.
-        res = atask.execute_tool("create_task", {"name": name, "list_task_id": LIST_ID,
-                                                 "status": STATUS_READY_TO_DEPLOY})
+        task_args = {"name": name, "list_task_id": LIST_ID, "status": STATUS_READY_TO_DEPLOY}
+        if description:
+            task_args["description"] = description
+        if due_date:
+            task_args["due_date"] = due_date
+        res = atask.execute_tool("create_task", task_args)
         atask.check_error(res, "create_task")
         tid = _task_id(res)
         if not tid:
@@ -225,6 +230,10 @@ def main():
                     help="reuse an already-created aTask task (resume after a partial run) instead of creating one")
     ap.add_argument("--skip-status", action="store_true",
                     help="do not set ready_to_deploy (PAT may lack edit rights on the list; set it in the UI)")
+    ap.add_argument("--tab", default=None,
+                    help="sheet tab to write (default: 'Tháng MM-YYYY' of today; team may keep using last month's tab)")
+    ap.add_argument("--due", default=None, help="aTask due date, ISO-8601 e.g. 2026-11-02T16:59:00Z")
+    ap.add_argument("--task-desc", default=None, help="aTask task description")
     ap.add_argument("--commit", action="store_true", help="actually create task + write row")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
@@ -259,13 +268,14 @@ def main():
     except Exception:
         tab_title = None
     # Prefer the gid-mapped tab if it matches this month; else the month-named tab.
-    target_tab = tab if (tab_title is None or tab_title == tab) else tab
+    target_tab = args.tab or tab
     row_idx = next_row(target_tab)
 
     plan = {
         "dry_run": not args.commit,
         "desc_source": desc_source,
-        "aTask": {"list": LIST_ID, "name": msg, "status": "ready_to_deploy"},
+        "aTask": {"list": LIST_ID, "name": msg, "status": "ready_to_deploy",
+                  "due": args.due, "description": args.task_desc},
         "sheet": {"tab": target_tab, "row": row_idx,
                   "cells": {"B": args.env, "C": args.service, "F": desc,
                             "H": args.confirm, "N": date_str, "P": "<task link after create>",
@@ -278,7 +288,7 @@ def main():
         return
 
     # --- writes ---
-    tid, code, link = create_task_ready(msg, args.task_id, not args.skip_status)
+    tid, code, link = create_task_ready(msg, args.task_id, not args.skip_status, args.task_desc, args.due)
     plan["aTask"].update({"id": tid, "code": code, "link": link})
     plan["sheet"]["cells"]["P"] = link
     row = build_row(args.service, desc, args.env, args.confirm, link, date_str)
