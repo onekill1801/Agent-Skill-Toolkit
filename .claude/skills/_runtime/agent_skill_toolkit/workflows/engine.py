@@ -25,6 +25,7 @@ Raise from a step:
 """
 
 import os
+import sys
 import threading
 import time
 import traceback
@@ -211,4 +212,23 @@ def work_once(st: store_mod.Store, owner: str, registry: dict, kinds: tuple = ()
         except store_mod.LeaseLost:
             return {"status": "lease_lost", "task": task["id"]}
         return {"status": "blocked", "task": task["id"]}
-    return {"task": task["id"], **run(st, task, steps, lease_s)}
+    res = {"task": task["id"], **run(st, task, steps, lease_s)}
+    _outcome_hook(task, res)
+    return res
+
+
+# {kind: fn(task, result)} — called after a run that ended failed / blocked / paused_quota (e.g. review_flow
+# tells the requester). A hook error is logged and never changes the task's outcome.
+OUTCOME_HOOKS = {}
+PROBLEM_STATUSES = ("failed", "blocked", "paused_quota")
+
+
+def _outcome_hook(task: dict, res: dict) -> None:
+    hook = OUTCOME_HOOKS.get(task.get("kind"))
+    if not hook or res.get("status") not in PROBLEM_STATUSES:
+        return
+    try:
+        hook(task, res)
+    except Exception as e:  # noqa: BLE001
+        print(f"[WARN] outcome hook for {task.get('kind')} {task.get('id')}: {type(e).__name__}: {e}",
+              file=sys.stderr)

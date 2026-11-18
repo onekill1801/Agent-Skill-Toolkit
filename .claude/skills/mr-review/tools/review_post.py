@@ -996,6 +996,89 @@ def deliver_notices(jid: str, review: dict = None, force: bool = False) -> list:
     return out
 
 
+# --------------------------------------------------------------------------- problem notices
+# A review that fails / waits / is postponed tells its FChat requesters once (per kind, head and request
+# count), so a request is never silently dropped. REVIEW_PROBLEM_NOTIFY=0 turns it off.
+
+def problem_note(kind: str, reason: str = "", resume_at: float = None) -> str:
+    """Plain words for the requester — never the raw error (paths, accounts, tokens stay out)."""
+    r = (reason or "").lower()
+    if kind == "paused":
+        at = time.strftime("%H:%M", time.localtime(resume_at)) if resume_at else ""
+        return f"tạm hoãn — hết lượt dùng AI, tự chạy lại lúc {at}" if at else "tạm hoãn — hết lượt dùng AI, sẽ tự chạy lại"
+    if kind == "blocked":
+        if r.startswith("awaiting approval"):
+            return "đã review xong, đang chờ duyệt nội dung trước khi đăng"
+        if "authenticate" in r or "log in" in r or "logged out" in r:
+            return "tài khoản AI cần đăng nhập lại — đã báo chủ tool, sẽ chạy tiếp sau đó"
+        return "đang chờ chủ tool xử lý — sẽ báo khi có kết quả"
+    return "review không chạy xong sau nhiều lần thử — vui lòng gửi lại yêu cầu sau ít phút"
+
+
+def _problem_key(job: dict, kind: str) -> str:
+    head = job.get("rerequested_head") or job.get("head_sha") or ""
+    return f"{kind}:{head[:12]}:{len(job.get('requests') or [])}"
+
+
+def notify_problem(jid: str, kind: str, reason: str = "", resume_at: float = None) -> list:
+    """kind = failed | blocked | paused. Returns [{key, state, error}] of what was sent ([] = nothing to do)."""
+    if (rc.config.get("REVIEW_PROBLEM_NOTIFY") or "1").strip().lower() in ("0", "off", "false", "no"):
+        return []
+    if kind == "paused" and resume_at and resume_at - time.time() < rc.cfg_int("REVIEW_PROBLEM_MIN_WAIT_SEC", 600):
+        return []                                  # a short pause (busy slot, rate limit) is not worth a message
+    key = _problem_key(rc.load_job(jid) or {}, kind)
+    with rc.file_lock("queue"):                    # claim the notice once, under the lock every job writer uses
+        job = rc.load_job(jid)
+        if not job or job.get("status") in ("posted", "cancelled", "rejected"):
+            return []
+        reqs = _requesters(job)
+        sent = job.setdefault("problem_notices", {})
+        if not reqs or key in sent:
+            return []
+        sent[key] = {"state": "sending", "at": rc.now()}
+        rc.save_job(job, sync=False)
+    note = problem_note(kind, reason, resume_at)
+    text = f"⚠️ Review {job.get('project_path')}!{job['iid']}: {note}. {job.get('web_url', '')}"
+    boards, out = board_groups(), []
+    batches = {}
+    for r in reqs.values():                        # board group: one card for everyone; elsewhere: one per person
+        batches.setdefault(r["group"] if r.get("group") in boards else _notify_key(r), []).append(r)
+    for rs in batches.values():
+        state, err = _send_problem(job, rs, kind == "failed", note, text)
+        out.append({"key": _notify_key(rs[0]), "state": state, "error": err})
+    final = "sent" if all(o["state"] == "sent" for o in out) else (out[0]["state"] if out else "failed")
+    with rc.file_lock("queue"):
+        job = rc.load_job(jid)
+        if job:
+            job.setdefault("problem_notices", {})[key] = {"state": final, "at": rc.now()}
+            rc.log_event(job, f"problem_notified_{kind}", recipients=len(out), state=final)
+            rc.save_job(job, sync=False)
+    return out
+
+
+def _send_problem(job: dict, rs: list, failed: bool, note: str, text: str) -> tuple:
+    r = rs[0]
+    if r.get("group") not in board_groups():
+        return _send_one(r, text)
+    try:
+        from agent_skill_toolkit.core import board_store
+        from agent_skill_toolkit.workflows.group_board import review as board_review
+        people = [{"id": x.get("by_id") or "", "name": x.get("by") or ""} for x in rs if x.get("by")]
+        with board_review.lock(r["group"], board_review.ref_of(job), timeout=60):
+            with board_store.Board() as b:
+                res = board_review.on_problem(b, r["group"], job, failed, note,
+                                              people[0] if people else None, also=people[1:])
+            if res is None:                        # the card already shows a result: nothing to correct
+                return "sent", ""
+            card, (ctext, cpeople) = res
+            return _send_one(r, ctext, card["id"], cpeople)
+    except TimeoutError:
+        return "failed", "thẻ bảng việc đang bận"
+    except Exception as e:  # noqa: BLE001 — a board problem must not swallow the notice
+        print(f"[WARN] board card (problem) for {job.get('id')}: {type(e).__name__}: {e}", file=sys.stderr)
+        return _send_one(r, text)
+
+
 def _notices_due(job: dict) -> bool:
     now = rc.now()
     return any(_due(n, now) or (n.get("state") == "sending" and now - (n.get("at") or 0) > NOTIFY_SENDING_STALE_S)

@@ -163,6 +163,19 @@ def reconcile_overdue(board, group: str, card_id: str, job: dict, now: float = N
     return None
 
 
+def on_problem(board, group: str, job: dict, failed: bool, note: str, requester: dict, also=()):
+    """The review run of this card's round failed (`failed` -> card `lỗi`) or is delayed (paused / waiting:
+    the card stays `chờ bot`, `note` says why). Caller holds the card lock. Returns (card, (text, people)), or
+    None when the card already shows a result (a problem of a later re-run must not hide a posted verdict)."""
+    card = _open(board, group, job)
+    if card.get("state") != "pending":
+        return None
+    if failed:
+        card = board.card_update(group, card["id"], state="error", summary=note, **_payload(job))
+        return card, render.render_review(card, requester or card["payload"].get("requester"), also=also)
+    return card, render.render_review(card, requester or card["payload"].get("requester"), note=note, also=also)
+
+
 def on_result(board, group: str, job: dict, verdict: str, summary: str, requester: dict, also=()) -> tuple:
     """The review of job.head_sha was posted (caller holds the card lock). Returns (card, (text, people)).
     A result for a head other than the round in progress is recorded but does not move the card."""

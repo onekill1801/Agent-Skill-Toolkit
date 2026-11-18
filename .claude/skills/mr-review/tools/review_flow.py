@@ -498,6 +498,22 @@ STEPS = [("fetch", step_fetch, live_head), ("prepare", step_prepare), ("review",
 REGISTRY = {KIND: STEPS}
 
 
+def on_problem(task: dict, res: dict) -> None:
+    """engine outcome hook: tell the FChat requesters when a review failed for good, waits for a human,
+    or is postponed by an AI usage limit (review_post.notify_problem: once per kind/head/request count)."""
+    jid = (task.get("data") or {}).get("job_id") or task.get("ref") or ""
+    kind = {"failed": "failed", "blocked": "blocked", "paused_quota": "paused"}.get(res.get("status"))
+    if not jid or not kind:
+        return
+    out = rp.notify_problem(jid, kind, reason=res.get("reason") or res.get("error") or "",
+                            resume_at=res.get("resume_at"))
+    if out:
+        print(f"[review_flow] {jid}: báo {kind} cho {len(out)} nơi: {[o['state'] for o in out]}", flush=True)
+
+
+E.OUTCOME_HOOKS[KIND] = on_problem
+
+
 # ----------------------------------------------------------------------------- commands
 
 _JOB_BRIEF = ("id", "project_id", "iid", "project_path", "web_url", "title", "head_sha", "rerequested_head",
