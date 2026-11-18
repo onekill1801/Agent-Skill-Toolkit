@@ -610,12 +610,15 @@ class Store:
                     self._event(r["id"], "blocked", error=why)
                     out.append(r["id"])
 
-    def cancel(self, task_id: str, by: str = ""):
+    def cancel(self, task_id: str, by: str = "", failed_too: bool = False):
+        """Open task -> cancelled. failed_too: also dismiss a FAILED one (clears it from the problem lists;
+        dependents treat failed and cancelled alike)."""
+        allowed = OPEN + (("failed",) if failed_too else ())
         with self._tx():
             n = self.db.execute(
                 f"update tasks set status='cancelled', lease_owner=null, lease_token=null, lease_until=null, "
-                f"updated=? where id=? and status in ({','.join('?' * len(OPEN))})",
-                (time.time(), task_id, *OPEN)).rowcount
+                f"updated=? where id=? and status in ({','.join('?' * len(allowed))})",
+                (time.time(), task_id, *allowed)).rowcount
             if n:
                 self._event(task_id, "cancelled", by=by)
         return bool(n)

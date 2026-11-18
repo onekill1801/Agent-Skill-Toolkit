@@ -9,6 +9,7 @@ State is local (temp/toolkit.db, or $TOOLKIT_STORE); nothing here talks to an ou
     python taskstore.py events [<task_id>] [--limit 50]
     python taskstore.py add <kind> <ref> [--title T] [--priority 5] [--data '{"k":1}']
     python taskstore.py unblock|cancel <task_id>      # human actions
+    python taskstore.py cancel <task_id> --failed     # also dismiss a task that already failed
 """
 
 import argparse
@@ -43,8 +44,10 @@ def main(argv=None) -> int:
     p.add_argument("--title", default="")
     p.add_argument("--priority", type=int, default=5)
     p.add_argument("--data", default="{}")
-    for name in ("unblock", "cancel"):
-        sub.add_parser(name).add_argument("task_id")
+    sub.add_parser("unblock").add_argument("task_id")
+    p = sub.add_parser("cancel")
+    p.add_argument("task_id")
+    p.add_argument("--failed", action="store_true", help="also dismiss a task that already FAILED")
     a = ap.parse_args(argv)
     with store_mod.Store() as st:
         if a.cmd == "summary":
@@ -68,7 +71,7 @@ def main(argv=None) -> int:
         elif a.cmd == "unblock":
             out = {"task_id": a.task_id, "unblocked": st.unblock(a.task_id, by="cli")}
         else:
-            out = {"task_id": a.task_id, "cancelled": st.cancel(a.task_id, by="cli")}
+            out = {"task_id": a.task_id, "cancelled": st.cancel(a.task_id, by="cli", failed_too=a.failed)}
     return pc.emit(out)
 
 

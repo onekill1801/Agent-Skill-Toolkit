@@ -24,6 +24,7 @@ from agent_skill_toolkit.workflows.group_board import render
 ACK_AFTER_S = 180
 OVERDUE_S = 30 * 60
 RECHECK_S = 5 * 60
+STALE_ROUND_S = 2 * 3600       # a round whose job ended elsewhere / vanished is closed after this long
 JOB_DEAD = ("failed", "cancelled", "rejected")
 VERDICT_STATES = tuple(render.VERDICT_STATE.values())
 
@@ -137,26 +138,47 @@ def overdue_due(board, group: str, now: float = None) -> list:
 
 
 def reconcile_overdue(board, group: str, card_id: str, job: dict, now: float = None):
-    """Under the card lock, with the job as read from the queue ({} = unknown). Returns (card, (text, people))
-    to send when the card changed, else None (re-checked again after RECHECK_S)."""
+    """Under the card lock, with the job as read from the queue ({} = unknown, {"missing": True} = the queue has
+    no job for this MR). Returns (card, (text, people)) to send when the card changed, else None (re-checked
+    again after RECHECK_S).
+    A round that can no longer finish is closed after STALE_ROUND_S: the queue's job ended at another commit
+    (the round's commit was force-pushed away, or its re-request was left behind), or the job is gone."""
     now = now or time.time()
     c = board.card_get(group, card_id)
     if c.get("state") != "pending":
         return None
     p = c["payload"]
-    st = (job or {}).get("status") or ""
-    # the job was read OUTSIDE the lock: it must be about the round the card is waiting for now
+    job = job or {}
+    st = job.get("status") or ""
     rh = p.get("round_head")
-    same_round = not rh or rh in ((job or {}).get("head_sha"), (job or {}).get("rerequested_head"))
-    if not same_round:
+    stale = now - float(p.get("requested_at") or now) >= STALE_ROUND_S
+    if job.get("missing"):
+        if stale:
+            c = board.card_update(group, card_id, state="error",
+                                  summary="hàng đợi không còn job review của MR này (MR đã đóng/merge?) "
+                                          "— gửi lại yêu cầu nếu cần")
+            return c, render.render_review(c, p.get("requester"))
         board.card_update(group, card_id, overdue_next_at=now + RECHECK_S)
         return None
-    if st == "posted" and job.get("verdict") and (not rh or job.get("head_sha") == rh):
+    # the job was read OUTSIDE the lock: it must be about the round the card is waiting for now
+    same_round = not rh or rh in (job.get("head_sha"), job.get("rerequested_head"))
+    if same_round and st == "posted" and job.get("verdict") and (not rh or job.get("head_sha") == rh):
         c = board.card_update(group, card_id, state=render.VERDICT_STATE.get(job["verdict"], "comment"),
                               head=job.get("head_sha"), ack_sent=True,
                               summary=p.get("summary") or "đã đăng nhận xét trên GitLab")
         return c, render.render_review(c, p.get("requester"))
-    if st in JOB_DEAD:
+    if same_round and st in JOB_DEAD:
+        c = board.card_update(group, card_id, state="error", summary=f"job review {st} — gửi lại yêu cầu")
+        return c, render.render_review(c, p.get("requester"))
+    # one job per MR: once it is terminal at another commit, nothing will review this round any more
+    if stale and st == "posted" and job.get("verdict") and job.get("head_sha"):
+        head = job["head_sha"]
+        c = board.card_update(group, card_id, state=render.VERDICT_STATE.get(job["verdict"], "comment"),
+                              head=head, round_head=head, ack_sent=True,
+                              summary=f"đã review commit {head[:8]}; commit {(rh or '')[:8]} không còn được "
+                                      "review — gửi lại yêu cầu nếu cần")
+        return c, render.render_review(c, p.get("requester"))
+    if stale and st in JOB_DEAD:
         c = board.card_update(group, card_id, state="error", summary=f"job review {st} — gửi lại yêu cầu")
         return c, render.render_review(c, p.get("requester"))
     board.card_update(group, card_id, overdue_next_at=now + RECHECK_S)      # running / unknown: look again later

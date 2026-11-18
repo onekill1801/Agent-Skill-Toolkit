@@ -374,8 +374,10 @@ def _review_cards(gid, group_type, sender_name, sender_id, res, started=None):
 
 
 def _job_info(job_id):
-    """Job review như hàng đợi đang giữ ({} = không đọc được)."""
+    """Job review như hàng đợi đang giữ ({} = không đọc được, {"missing": True} = hàng đợi không có job này)."""
     res = _run_tool("review_queue.py", "show", str(job_id or ""))
+    if isinstance(res, dict) and res.get("error") and str(res.get("message") or "").startswith("no job "):
+        return {"missing": True}
     return {} if not isinstance(res, dict) or res.get("error") else res
 
 
