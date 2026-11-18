@@ -42,7 +42,7 @@ review.json (default: <worktree>.review.json):
 }
 REVIEW_NOTE_STYLE=full (default): the "Code Review Summary" layout agreed with the team — MR/Date/Commit/
 Verdict header, "> Phạm vi" line, Overview, Critical/Major (Why:/Suggestion:) and Minor/Nitpicks (one
-paragraph), Standards Compliance, Positive Observations, Files Reviewed (from ws.json).
+paragraph), Standards Compliance, Positive Observations.
 REVIEW_NOTE_STYLE=compact: verdict + summary + one or two lines per finding (nits: title only).
 REVIEW_INLINE_COMMENTS=1 also posts findings with file:line on the diff line (default 0: one note only).
 """
@@ -362,28 +362,6 @@ def _title(t: str) -> str:
     return t if t[-1:] in ".!?:…" else t + "."
 
 
-_SRC_ROOT = re.compile(r"^(?:.*?/)?src/(?:main|test|it|integrationTest)/(?:java|kotlin|groovy|scala|resources)/")
-
-
-def _files_rel(paths: list) -> dict:
-    """{path: path without its source root (src/main/java/, src/test/java/...) and without the package
-    prefix ALL changed files share} - src/main/java/com/fis/etask/module/x/A.java -> module/x/A.java."""
-    split = [_SRC_ROOT.sub("", p.replace("\\", "/")).split("/") for p in paths]
-    common = 0
-    if len(split) > 1:
-        for parts in zip(*[s[:-1] for s in split]):
-            if len(set(parts)) != 1:
-                break
-            common += 1
-    common = max(0, common - 1)          # keep one shared folder for context (module/task/..., as the team writes it)
-    out = {p: "/".join(s[common:]) for p, s in zip(paths, split)}
-    seen = {}
-    for label in out.values():
-        seen[label] = seen.get(label, 0) + 1
-    # a label shared by two files (same package in two modules / source roots): show their full paths
-    return {p: (p.replace(chr(92), "/") if seen[label] > 1 else label) for p, label in out.items()}   # Codex layout R1 #2
-
-
 def _scope_line(job: dict, review: dict, head: str) -> str:
     """'> Phạm vi: …' — the reviewer's own note, else what the tests list says was (not) run."""
     if isinstance(review.get("scope"), str) and review["scope"].strip():
@@ -394,9 +372,9 @@ def _scope_line(job: dict, review: dict, head: str) -> str:
     return f"> Phạm vi: chỉ đọc code (diff + source nhánh tại `{head}`). Chưa chạy build/test."
 
 
-def _render_full(job: dict, review: dict, inline_ok: set, approver: str, with_files: bool = True) -> str:
-    """The team's "Code Review Summary" layout (the sample agreed with the user, 2026-10-16).
-    with_files=False drops the Files Reviewed table (render_note does it when the note is over the limit)."""
+def _render_full(job: dict, review: dict, inline_ok: set, approver: str) -> str:
+    """The team's "Code Review Summary" layout (the sample agreed with the user, 2026-10-16; no Files
+    Reviewed table since 2026-11-16 — the user asked to drop it)."""
     findings = review.get("findings", [])
     head = ((job.get("diff_refs") or {}).get("head_sha") or "")[:8]
     names = _short_names([f["file"] for f in findings if f.get("file")])
@@ -455,22 +433,6 @@ def _render_full(job: dict, review: dict, inline_ok: set, approver: str, with_fi
     pos = [p for p in (review.get("positives") or []) if isinstance(p, str) and p.strip()]
     if pos:
         lines += _section_break(lines) + ["### Positive Observations", ""] + [f"- {p.strip()}" for p in pos]
-    files = ws.get("files") or []
-    if files and not with_files:
-        lines += _section_break(lines) + [f"_Files Reviewed ({len(files)} file) bỏ bớt vì review dài._"]
-    elif files:
-        rel = _files_rel([f.get("path", "?") for f in files])
-        per = {}
-        for f in findings:
-            if f.get("file"):
-                per[f["file"]] = per.get(f["file"], 0) + 1
-        lines += _section_break(lines) + ["### Files Reviewed", "", "| File | Lines Changed | Issues Found |",
-                                          "|------|--------------|--------------|"]
-        for f in files:
-            add, rem = f.get("added"), f.get("removed")
-            size = "binary" if add is None else f"+{add} / -{rem}"
-            path = _cell(rel.get(f.get("path", "?"), "?")).replace("`", "'")
-            lines.append(f"| `{path}` | {size} | {per.get(f.get('path'), 0)} |")
     # ONE pass over the exact text the rules check: fences are judged on the whole note, never per
     # field (a field's fence could pair with another field's in the posted note — Codex fmt R2)
     return defang("\n".join(lines).rstrip() + "\n")
@@ -485,10 +447,7 @@ def _section_break(lines: list) -> list:
 def render_note(job: dict, review: dict, inline_ok: set, approver: str = "") -> str:
     if note_style() == "compact":
         return _render_compact(job, review, inline_ok, approver)
-    note = _render_full(job, review, inline_ok, approver)
-    if len(note) > rc.cfg_int("REVIEW_AUTO_POST_MAX_CHARS", 6000):   # too long: Files Reviewed goes first
-        note = _render_full(job, review, inline_ok, approver, with_files=False)
-    return note
+    return _render_full(job, review, inline_ok, approver)
 
 
 def render_inline(f: dict) -> str:

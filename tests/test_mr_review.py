@@ -194,20 +194,13 @@ class PostGateTest(unittest.TestCase):
             "Nên ghi ngắn mục đích.\n\n---",
             "### Standards Compliance\n\n| Category | Status | Notes |",
             "| Security | ✅ | a\\|b |", "| Testing | 🟡 | Chưa có test (xem Major 1) |", "| Correctness | — |  |",
-            "### Positive Observations\n\n- Tái sử dụng batchInsert.\n\n---\n\n### Files Reviewed",
-            "| `module/task/TaskHistoryRecorder.java` | +85 / -40 | 2 |", "| `module/integration/MassImportTasks.java` | +4 / -4 | 0 |"]
+            "### Positive Observations\n\n- Tái sử dụng batchInsert."]
         for e in expect:
             self.assertIn(e, note)
+        self.assertNotIn("Files Reviewed", note)                              # dropped 2026-11-16 (user)
+        self.assertTrue(note.rstrip().endswith("- Tái sử dụng batchInsert."))
         self.assertTrue(note.startswith(rr.marker(job)))
         self.assertNotIn("AI review ·", note)                                  # no footer in the team layout
-
-    def test_file_labels_stay_unique(self):                                   # Codex layout R1 #2
-        rel = rp._files_rel(["one/src/main/java/com/acme/Foo.java", "two/src/main/java/com/acme/Foo.java",
-                             "one/src/main/java/com/acme/Bar.java"])
-        self.assertEqual(len(set(rel.values())), 3)
-        self.assertEqual(rel["one/src/main/java/com/acme/Foo.java"], "one/src/main/java/com/acme/Foo.java")
-        self.assertEqual(rp._files_rel(["a\\b\\C.java"]), {"a\\b\\C.java": "a/b/C.java"})
-        self.assertEqual(rp._files_rel(["README.md"]), {"README.md": "README.md"})
 
     def test_why_and_suggestion_are_separate_lines(self):                     # Codex layout R1 #1
         f = [{"severity": "blocker", "title": "t", "body": "b", "suggestion": "```java\nx();\n```"}]
@@ -282,12 +275,6 @@ class PostGateTest(unittest.TestCase):
                                                                "Testing": {"status": "good"},
                                                                "Security": {"status": []}}, positives="x"))
         self.assertEqual(len(errs), 4)                                      # no TypeError (Codex fmt R1 #2)
-
-    def test_files_table_escapes_pipes(self):                               # Codex fmt R1 #3
-        with mock.patch.object(rp, "_ws", return_value={"files": [{"path": "src/a|b.py", "added": 1, "removed": 0}]}):
-            note = rp.render_note(self.job(), self.review(findings=[]), set())
-        self.assertIn("| `src/a\\|b.py` | +1 / -0 | 0 |", note)
-
 
 import review_rules as rr  # noqa: E402
 

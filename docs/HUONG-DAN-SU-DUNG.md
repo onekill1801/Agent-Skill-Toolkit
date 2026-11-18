@@ -166,8 +166,8 @@ không chứa secret, không link ra ngoài GitLab, không có HTML/ký hiệu c
 
 **Comment đăng lên GitLab** — mặc định là mẫu **"Code Review Summary"** của team (`REVIEW_NOTE_STYLE=full`):
 MR / Reviewer / Date / Commit / Overall Verdict (+ ghi chú), dòng `> Phạm vi: …`, Overview, 🔴 Critical / 🟡 Major
-(mỗi mục: tiêu đề, `Why:`, `Suggestion:`), 🟢 Minor / Nitpicks (một đoạn), Standards Compliance, Positive Observations,
-Files Reviewed. `compact` = bản rút gọn không bảng (mỗi lỗi 1–2 dòng).
+(mỗi mục: tiêu đề, `Why:`, `Suggestion:`), 🟢 Minor / Nitpicks (một đoạn), Standards Compliance, Positive Observations
+(không còn bảng Files Reviewed). `compact` = bản rút gọn không bảng (mỗi lỗi 1–2 dòng).
 **Comment thẳng vào dòng code** (`REVIEW_INLINE_COMMENTS`) mặc định **tắt** — mọi lỗi gom trong một comment.
 Bật (`1`) khi muốn tác giả thấy lỗi ngay tại dòng trong diff và resolve từng cái. Đổi cả hai ở thẻ Cài đặt của dashboard.
 

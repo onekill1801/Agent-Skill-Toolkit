@@ -97,8 +97,8 @@ Review against:
 - Default note (REVIEW_NOTE_STYLE=full) = the team's "Code Review Summary": header (MR, Date, Commit, Verdict +
   `verdict_note`), `> Phạm vi:` = `scope`, Overview = `summary`, 🔴 Critical = `blocker`, 🟡 Major = `major`
   (`body` → **Why:**, `suggestion` → **Suggestion:**), 🟢 Minor/Nitpicks = `minor`+`nit` (title + one short
-  paragraph), Standards Compliance = `compliance` (fill all 6), Positive Observations = `positives` (2–4 cụ thể),
-  Files Reviewed from ws.json. Titles are short statements (the renderer adds the final "."); findings with
+  paragraph), Standards Compliance = `compliance` (fill all 6), Positive Observations = `positives` (2–4 cụ thể)
+  (no Files Reviewed table). Titles are short statements (the renderer adds the final "."); findings with
   no file (e.g. "MR chưa có description") are fine. REVIEW_NOTE_STYLE=compact = short note without tables.
 - Put code identifiers in backticks (`` `@Test` ``, `` `findById` ``). Every `@` outside fenced code
   (the MR author included) gets an invisible word joiner after it when rendered, so a review never
