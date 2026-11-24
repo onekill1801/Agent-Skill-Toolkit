@@ -288,7 +288,10 @@ class SameHeadQueueTest(unittest.TestCase):
         self.assertTrue(r.get("same_head"))
         self.assertEqual(r["job"]["status"], "posted")
         self.assertEqual([x["by"] for x in r["job"]["requests"]], ["A", "B"])
-        self.assertFalse(rq.add_job("proj", 5, requester="C")["duplicate"])     # without the flag: a new round
+        # since review rounds (24/11) the default for every source: a second review of the same commit could
+        # never be posted (one marker per head) and overwrote the round the member saw
+        self.assertTrue(rq.add_job("proj", 5, requester="C").get("same_head"))
+        self.assertFalse(rq.add_job("proj", 5, requester="D", skip_same_head=False)["duplicate"])   # explicit opt-out
 
 
 class CardNoticeTest(unittest.TestCase):

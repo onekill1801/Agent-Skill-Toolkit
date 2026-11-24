@@ -191,6 +191,110 @@ def _ws_paths(job: dict) -> tuple:
     return wt, wt + ".ws.json", wt + ".merge"
 
 
+class AlreadyReviewed(RuntimeError):
+    """prepare refused: the head being prepared already has a POSTED review (review_rounds)."""
+
+
+def _seen(job: dict) -> str:
+    return json.dumps([job.get(k) for k in ("posted_rounds", "previous", "diff_refs", "status")], sort_keys=True,
+                      default=str)
+
+
+def _save_ledger(jid: str, gen, seen: str, previous: dict, ledger: list) -> None:
+    """Record rounds found posted (lost responses) on the job — only if it is still the job prepare read."""
+    with rc.file_lock("queue"):
+        job = rc.load_job(jid)
+        if job.get("gen") != gen or _seen(job) != seen:
+            raise RuntimeError(f"job {jid} changed during prepare — retry")
+        job.update(posted_rounds=ledger, previous=previous or job.get("previous"))
+        rc.log_event(job, "ledger_recorded", rounds=len(ledger))
+        rc.save_job(job)
+
+
+def _known_previous(job: dict, pid, iid, head: str) -> tuple:
+    """(previous, ledger): the round this prepare compares against and every posted round of the MR — both
+    normalised and SAVED on the job (the tamper snapshot and the next round read the same paths — R2 #3):
+      * the job's own last round when its head moved after a POST whose response was lost (marker on the MR):
+        the member saw it, whatever the job status says (R2 #2 — the coordinator re-prepares before post runs);
+        it is archived + recorded like any posted round
+      * a job queued before rounds existed: its posted review sits at the per-head path (R1 #3)"""
+    import review_rounds
+    import review_rules as rr
+    previous = dict(job.get("previous") or {})
+    ledger = list(job.get("posted_rounds") or [])
+    if previous.get("status") == "posted" and not review_rounds.posted_at_head(ledger, previous.get("head_sha")):
+        ledger.insert(0, previous)                         # a job from before the ledger
+    old_head = (job.get("diff_refs") or {}).get("head_sha")
+    old_wt = job.get("worktree") or ""
+    # only a draft that was APPROVED can have reached GitLab: no approval = no lookup (no GitLab call per re-prepare)
+    may_be_posted = bool(job.get("approval")) or job.get("status") in ("approved", "posted")
+    if (may_be_posted and old_head and old_head != head and old_wt and previous.get("head_sha") != old_head
+            and os.path.exists(old_wt + ".review.json")):
+        try:
+            with rc.gitlab_project(pid) as gl:
+                note = rr.posted_note(gl, {**job, "diff_refs": {"head_sha": old_head}})
+        except Exception as e:  # noqa: BLE001
+            # unknown is NOT "not posted": moving the job on would lose the round for good — retry later (R3 #2)
+            raise RuntimeError(f"could not check whether the review of {old_head[:8]} was posted "
+                               f"({type(e).__name__}: {str(e)[:150]}) — retry later") from e
+        if note:
+            try:
+                with open(old_wt + ".review.json", encoding="utf-8") as f:
+                    verdict = (json.load(f) or {}).get("verdict") or ""
+            except (OSError, ValueError, AttributeError):
+                verdict = ""
+            previous, _ = review_rounds.adopt_posted({**job, "head_sha": old_head, "worktree": old_wt,
+                                                      "diff_refs": {"head_sha": old_head},
+                                                      "review_file": old_wt + ".review.json"}, note, verdict)
+            ledger = review_rounds.with_entry(ledger, previous)
+            rc.log_event(job, "posted_reconciled", before_prepare=True, head=old_head[:8])
+    for e in [previous, *ledger]:
+        h = e.get("head_sha")
+        if e.get("status") == "posted" and h and not e.get("review_file"):
+            legacy = rc.reviews_dir(str(pid), f"{iid}@{h[:8]}")
+            e.update(worktree=legacy, review_file=legacy + ".review.json")
+    return previous, ledger
+
+
+def _write_prev(job: dict, repo, wt: str, pid, iid, head: str) -> dict:
+    """<wt>.prev.json for a re-review (review_rounds): what the previous POSTED round asked, the member's
+    replies since, and the lines changed since. None on a first round. Never fails the prepare."""
+    import review_rounds
+    import review_rules as rr
+    path = review_rounds.prev_path(wt)
+
+    def git(*args):
+        try:
+            return repo.git(*args)
+        except (RuntimeError, OSError, subprocess.SubprocessError):
+            return None
+
+    def notes():
+        with rc.gitlab_project(pid) as gl:
+            return list(rr.all_pages(gl, f"/merge_requests/{iid}/notes?sort=asc&order_by=created_at", "notes"))
+
+    previous = dict(job.get("previous") or {})              # normalised by _known_previous
+    prev_head = previous.get("head_sha")
+    if prev_head and not repo.has(prev_head):
+        with rc.file_lock(f"repo-{pid}", timeout=900):
+            git("fetch", "--quiet", "origin", prev_head)
+    try:
+        data = review_rounds.build({**job, "previous": previous, "worktree": wt}, git, notes, rr.MARKER_RE,
+                                   head=head)
+    except Exception as e:  # noqa: BLE001 — a broken previous round must not block this review
+        data = None
+        rc.log_event(job, "prev_round_error", error=f"{type(e).__name__}: {e}"[:200])
+    if data is None:
+        # nothing to remove: a prev.json left at this path is ignored unless THIS prepare records its hash
+        return None
+    # written aside, published by prepare under the queue lock only once the job is verified unchanged (R5 #1)
+    tmp = f"{path}.tmp-{job.get('gen') or 'x'}-{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return {"round": data["round"], "prev_json": path, "tmp": tmp, "sha": review_rounds.file_sha(tmp),
+            "open": len(data["open"]), "replies": len(data["replies"]), "delta": data["delta"] is not None}
+
+
 # --------------------------------------------------------------------------- commands
 
 def prepare(jid: str, with_merge: bool = False) -> dict:
@@ -205,6 +309,21 @@ def prepare(jid: str, with_merge: bool = False) -> dict:
     base, start, head = refs.get("base_sha"), refs.get("start_sha"), refs.get("head_sha") or mr.get("sha")
     if not (base and start and head):
         raise RuntimeError("MR has no diff_refs yet (GitLab still computing the diff?) — retry later")
+    import review_rounds
+    gen = job.get("gen")
+    # what this prepare read: if any of it changes before the locked save (a sweeper reconciled / requeued the job),
+    # the prepare is stale and retries — never saves an older ledger over a newer one (R6 #2)
+    seen = _seen(job)
+    known, ledger = _known_previous(job, pid, iid, head)    # before the job's head / worktree move on
+    if review_rounds.posted_at_head(ledger, head):
+        # the MR is back at a commit whose review was already posted — by ANY earlier round (force-push): that
+        # round must stay as the member saw it — never draft over its files / marker (Codex rounds R4 #2, R5 #3).
+        # A round found posted just now (lost response) is recorded first, or it would be lost (R6 #1).
+        if ledger != (job.get("posted_rounds") or []):
+            _save_ledger(jid, gen, seen, known, ledger)
+        raise AlreadyReviewed(f"MR !{iid} is at {head[:8]}, already reviewed (posted) — nothing to do")
+    round_now = review_rounds.round_of(known) if (known or {}).get("status") == "posted" else int(job.get("round") or 1)
+    job["previous"], job["round"] = known or None, round_now
     job["head_sha"] = head
     wt, ws_json, wt_merge = _ws_paths(job)
 
@@ -269,7 +388,11 @@ def prepare(jid: str, with_merge: bool = False) -> dict:
             codegraph.update(cg.analyze(wt, base, head, title=mr.get("title") or "",
                                         out=wt + ".codegraph.md"))
 
+    previous_round = _write_prev(job, repo, wt, pid, iid, head)
+    prev_tmp = (previous_round or {}).pop("tmp", None)
+
     ws = {
+        "previous_round": previous_round,
         "job_id": jid, "project_id": pid, "project_path": job.get("project_path"), "iid": iid,
         "title": mr.get("title"), "web_url": mr.get("web_url"),
         "author": (mr.get("author") or {}).get("username"),
@@ -289,15 +412,32 @@ def prepare(jid: str, with_merge: bool = False) -> dict:
         json.dump(ws, f, ensure_ascii=False, indent=2)
     with rc.file_lock("queue"):
         job = rc.load_job(jid)
+        why = (f"job {jid} was replaced by a newer request during prepare" if job.get("gen") != gen else
+               f"job {jid} changed during prepare (reconciled / requeued)" if _seen(job) != seen else
+               # ended while we prepared (e.g. a sweeper posted the OLD head meanwhile): never stamp the new head on
+               # a posted / cancelled job — that would turn the next real request into a "same head" no-op (R3 #1)
+               f"job {jid} became {job.get('status')} during prepare" if job.get("status") in rc.TERMINAL else "")
+        if why:
+            if prev_tmp:
+                try:
+                    os.remove(prev_tmp)
+                except OSError:
+                    pass
+            raise RuntimeError(why + " — not overwriting it")
+        if prev_tmp:
+            os.replace(prev_tmp, review_rounds.prev_path(wt))      # published only for the verified job (R5 #1)
         job.update(head_sha=head, worktree=wt, ws_path=ws_json, diff_refs=ws["diff_refs"],
-                   title=mr.get("title", job.get("title")))
+                   title=mr.get("title", job.get("title")),
+                   previous=known or None, round=round_now, posted_rounds=ledger,
+                   # the validator refuses a prev.json that no longer matches this (review_rounds.prev_state)
+                   prev_json_sha=(previous_round or {}).get("sha") or None)
         rc.log_event(job, "prepared", head=head[:8], files=len(files), new_commits=commits["new"])
         rc.save_job(job)
     rc.board_card(job, status="in-progress",
                   note=f"Đang review · {len(files)} file · {commits['new']}/{commits['total']} commit mới · "
                        f"{mr.get('source_branch')} → {mr.get('target_branch')}")
     return {k: ws[k] for k in ("job_id", "worktree", "diff_refs", "files_changed", "lines_added",
-                               "lines_removed", "merge", "codegraph")} | {"ws_path": ws_json,
+                               "lines_removed", "merge", "codegraph", "previous_round")} | {"ws_path": ws_json,
                                                             "commits": {k: v for k, v in commits.items() if k != "list"}}
 
 

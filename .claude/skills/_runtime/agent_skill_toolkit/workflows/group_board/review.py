@@ -82,8 +82,8 @@ def on_request(board, group: str, job: dict, requester: dict, unchanged: bool = 
             card, requester, note="chưa có commit mới từ lượt review trước — giữ kết quả này")}
     # (an "unchanged" answer that started AFTER the round in progress is the queue's current truth: the job is
     #  posted at that head — a stale one was already caught by the time check above)
-    if unchanged and job.get("verdict"):        # posted before the board existed: the card learns the verdict
-        card = board.card_update(group, card["id"], state=render.VERDICT_STATE.get(job["verdict"], "comment"),
+    if unchanged:        # posted before the board existed: the card learns the verdict (none recorded → comment)
+        card = board.card_update(group, card["id"], state=render.VERDICT_STATE.get(job.get("verdict"), "comment"),
                                  requester=requester, head=head, round_head=head, requested_at=now,
                                  ack_sent=True, **_payload(job))
         return {"card": card, "send": render.render_review(

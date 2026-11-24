@@ -25,8 +25,10 @@ Job status: queued -> running -> awaiting_approval -> approved -> posted
 import argparse
 import os
 import sys
+import uuid
 
 import review_common as rc
+import review_rounds
 
 PRIORITY_DEFAULT = 5   # 0 = most urgent
 
@@ -67,9 +69,11 @@ def _reap(jobs: list) -> None:
 
 
 def add_job(project, iid, *, requester="", requester_id="", source="manual", group="",
-            group_type="", priority=PRIORITY_DEFAULT, note="", mr=None, skip_same_head=False) -> dict:
-    """skip_same_head: the MR's last review was POSTED at the current head commit -> no new round
-    ({"duplicate": True, "same_head": True}; the request is still recorded on the job)."""
+            group_type="", priority=PRIORITY_DEFAULT, note="", mr=None, skip_same_head=True) -> dict:
+    """The MR's last review was POSTED at the current head commit -> no new round ({"duplicate": True,
+    "same_head": True}; the request is still recorded on the job). Default for every source since review rounds
+    (24/11): a second review of the same commit could never be posted anyway (one marker per head → the post
+    step "reconciles" it as already posted) and it overwrote the round the member saw (Codex rounds R2 #1)."""
     project_id, path = rc.resolve_project_id(project)
     mr = mr or rc.gitlab_mr(project_id, iid)
     if mr.get("state") != "opened":
@@ -80,6 +84,21 @@ def add_job(project, iid, *, requester="", requester_id="", source="manual", gro
         head = (mr.get("diff_refs") or {}).get("head_sha") or mr.get("sha")
         request = {"at": rc.now(), "by": requester, "by_id": requester_id, "source": source,
                    "group": group, "group_type": group_type, "note": note[:500]}
+        ledger = review_rounds.ledger_of(job)
+        posted = review_rounds.posted_at_head(ledger, head) if (skip_same_head and job) else None
+        if posted:
+            # this commit's review is ALREADY on GitLab (any earlier round — also after a force-push back while
+            # another round runs): no new round, and never merged into a running round of another commit (its
+            # result would be reported to this requester). Answer with THAT round (Codex rounds R3 #5, R5 #3/#4).
+            own = job.get("status") == "posted" and job.get("head_sha") == head
+            if own:
+                job.setdefault("requests", []).append(request)
+            rc.log_event(job, "same_head_request", by=requester, head=head[:8])
+            saved = rc.save_job(job)
+            # that round's verdict only — never the (maybe failed) current job's; unknown stays None (R6 #4)
+            view = {**saved, "head_sha": head, "verdict": posted.get("verdict"),
+                    "status": "posted", "rerequested_head": None, "round": posted.get("round")}
+            return {"job": view, "duplicate": True, "same_head": True}
         if job and job.get("status") not in rc.TERMINAL:
             job.setdefault("requests", []).append(request)
             job["priority"] = min(job.get("priority", PRIORITY_DEFAULT), priority)
@@ -87,19 +106,17 @@ def add_job(project, iid, *, requester="", requester_id="", source="manual", gro
                 job["rerequested_head"] = head        # post step will mark the review stale
             rc.log_event(job, "merged_request", by=requester)
             return {"job": rc.save_job(job), "duplicate": True}
-        if skip_same_head and job and job.get("status") == "posted" and job.get("head_sha") == head and job.get("verdict"):
-            job.setdefault("requests", []).append(request)
-            rc.log_event(job, "same_head_request", by=requester)
-            return {"job": rc.save_job(job), "duplicate": True, "same_head": True}
+        previous = review_rounds.previous_of(job)
         job = {
-            "id": jid, "project_id": project_id, "iid": int(iid),
+            "id": jid, "project_id": project_id, "iid": int(iid), "round": review_rounds.round_of(previous),
+            "gen": uuid.uuid4().hex[:12],     # identity of THIS round: prepare never writes into a replaced job
             "project_path": path or (mr.get("references") or {}).get("full", "").split("!")[0],
             "title": mr.get("title", ""), "web_url": mr.get("web_url", ""),
             "author": (mr.get("author") or {}).get("username", ""),
             "source_branch": mr.get("source_branch"), "target_branch": mr.get("target_branch"),
             "head_sha": head, "status": "queued", "priority": priority, "attempts": 0,
             "created": rc.now(), "requests": [request],
-            "previous": {k: job.get(k) for k in ("status", "head_sha", "verdict")} if job else None,
+            "previous": previous, "posted_rounds": ledger,
         }
         rc.log_event(job, "queued", by=requester, source=source)
         return {"job": rc.save_job(job), "duplicate": False}
@@ -201,8 +218,10 @@ def main(argv=None) -> int:
                        group_type=a.group_type, priority=a.priority)
             if a.cmd == "add":
                 res = review_flow.enqueue(a.project, a.iid, note=a.note, **req)
-                out = {"job": rc.load_job(res["job_id"]), "duplicate": res["job_duplicate"],
-                       "task_id": res["task_id"]}
+                # same_head: the answer describes the POSTED round (the stored job may be a later failed one)
+                out = {"job": res["job"] if res.get("same_head") else rc.load_job(res["job_id"]),
+                       "duplicate": res["job_duplicate"],
+                       "task_id": res.get("task_id"), "same_head": bool(res.get("same_head"))}
             else:
                 out = review_flow.enqueue_text(a.text, a.default_project, note=a.note or a.text, **req)
         elif a.cmd == "pending":

@@ -224,11 +224,16 @@ def all_pages(gl, path: str, what: str, per_page: int = 100, max_pages: int = 20
     raise RuntimeError(f"MR {what}: more than {max_pages} pages — reconcile by hand")
 
 
+def posted_note(gl, job: dict):
+    """Our note for this head on the MR (any page), or None."""
+    want = marker(job)
+    return next((n for n in all_pages(gl, f"/merge_requests/{job['iid']}/notes?sort=desc&order_by=created_at", "notes")
+                 if want in (n.get("body") or "")), None)
+
+
 def already_posted(gl, job: dict) -> bool:
     """Reconcile before (re)posting: is our marker for this head already on the MR (any page)?"""
-    want = marker(job)
-    return any(want in (n.get("body") or "")
-               for n in all_pages(gl, f"/merge_requests/{job['iid']}/notes?sort=desc&order_by=created_at", "notes"))
+    return posted_note(gl, job) is not None
 
 
 def main(argv=None) -> int:

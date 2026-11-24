@@ -1142,8 +1142,17 @@ def _enqueue_review(gid, group_type, sender_name, sender_id, text):
     print(f"[{_now()}] [review] {sender_name}: jobs={jobs} -> {mode}")
     if board:
         return          # bảng việc: thẻ R ở trên là lời báo đã nhận
+    # MR đã review ở đúng commit này (review_rounds, 24/11: không mở vòng mới cho cùng head) — nói rõ, đừng hứa kết quả
+    unchanged = [str(x) for x in res.get("unchanged") or []]
+    same = (f"{', '.join(unchanged)}: chưa có commit mới kể từ lần review trước — xem review đã đăng trên GitLab; "
+            "đẩy commit sửa rồi gửi lại để review vòng sau.") if unchanged else ""
+    if not jobs:
+        if same:
+            _post_tagged(gid, group_type, sender_name, sender_id, board_render.defuse("🤖 " + same))
+        return
     _post_tagged(gid, group_type, sender_name, sender_id,
-                 f"🤖 Đã nhận yêu cầu review {', '.join(jobs)} — {mode}. Kết quả sẽ báo lại ở đây.")
+                 f"🤖 Đã nhận yêu cầu review {', '.join(jobs)} — {mode}. Kết quả sẽ báo lại ở đây."
+                 + (f"\n{board_render.defuse(same)}" if same else ""))
 
 
 def _sweeper(interval=30):

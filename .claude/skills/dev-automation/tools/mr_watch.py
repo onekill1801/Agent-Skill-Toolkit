@@ -247,6 +247,10 @@ def _enqueue_review(mr) -> bool:
         out = json.loads(p.stdout or "{}")
         if not isinstance(out, dict):
             out = {"error": True, "message": f"unexpected output: {str(out)[:100]}"}
+        elif p.returncode == 0 and out.get("same_head") and out.get("job_id"):
+            # already reviewed (posted) at this commit: nothing to queue, and nothing to retry (review rounds 24/11)
+            print(f"[{_now()}] -> MR !{mr['iid']} đã review ở commit này — chờ commit mới")
+            return True
         elif p.returncode != 0 or not out.get("task_id") or not out.get("job_id"):
             # a crash / empty answer is NOT "queued": the MR stays unmarked and is retried (Codex F.5 #4)
             out = {"error": True, "message": out.get("message") or f"exit {p.returncode}: {(p.stderr or '')[-200:]}"}

@@ -57,6 +57,7 @@ import sys
 import time
 
 import review_common as rc
+import review_rounds
 import review_rules as rr
 
 VERDICTS = ("APPROVE", "REQUEST_CHANGES", "COMMENT")
@@ -89,6 +90,8 @@ def _texts(review: dict) -> list:
         if isinstance(f, dict):
             out += [f.get(k) for k in ("title", "body", "suggestion")]
     out += list(review.get("positives") or [])
+    pfs = review.get("previous_findings")
+    out += [pf.get("note") for pf in (pfs if isinstance(pfs, list) else []) if isinstance(pf, dict)]
     for c in (review.get("compliance") or {}).values() if isinstance(review.get("compliance"), dict) else ():
         if isinstance(c, dict):
             out.append(c.get("note"))
@@ -159,6 +162,8 @@ def validate(job: dict, review: dict) -> list:
     if review.get("verdict") == "APPROVE" and any(isinstance(f, dict) and f.get("severity") == "blocker"
                                                  for f in findings):
         errs.append("verdict APPROVE with a blocker finding is contradictory")
+    prev, prev_err = review_rounds.prev_state(job)                        # re-review: previous round first
+    errs += [prev_err] if prev_err else review_rounds.check(review, prev)
     return errs
 
 
@@ -327,6 +332,9 @@ def _render_compact(job: dict, review: dict, inline_ok: set, approver: str) -> s
     where = f" · `{job['source_branch']}` → `{job['target_branch']}`" if job.get("source_branch") else ""
     lines = [rr.marker(job), f"### 🤖 Code Review — {VERDICT_ICON[review['verdict']]}",
              f"!{job['iid']}{where} · `{head}`", "", _clip(review["summary"], 400)]
+    prev = review_rounds.load_prev(job)
+    if prev:
+        lines += [""] + review_rounds.render_section(review, prev, _cell, _title, compact=True)
     n = 0
     for title, sevs, _ in COMPACT_SECTIONS:
         items = [(i, f) for i, f in enumerate(findings) if f.get("severity") in sevs]
@@ -344,7 +352,7 @@ def _render_compact(job: dict, review: dict, inline_ok: set, approver: str) -> s
             lines.append(f"{n}. {_loc_short(f, names)}**{f['title']}**{_short(f)}")
             if f.get("suggestion"):
                 lines.append(_labelled("   ↳ _Sửa:_", _clip(f["suggestion"])))
-    if not findings:
+    if not findings and not review_rounds.open_by_severity(review, prev):
         lines += ["", "Không có vấn đề cần sửa. 👍"]
     failed = [t for t in (review.get("tests") or []) if t.get("result") == "fail"]
     if failed:
@@ -392,11 +400,17 @@ def _render_full(job: dict, review: dict, inline_ok: set, approver: str) -> str:
     lines += [f"**Overall Verdict:** {VERDICT_ICON[review['verdict']]}"
               + (f" ({note.strip()})" if isinstance(note, str) and note.strip() else ""),
               "", _scope_line(job, review, head), "", "---", "", "### Overview", "", review["summary"].strip()]
+    prev = review_rounds.load_prev(job)
+    if prev:
+        lines += _section_break(lines) + review_rounds.render_section(review, prev, _cell, _title)
+    still = review_rounds.open_by_severity(review, prev)
     for title, sevs, empty in SECTIONS:
         lines += _section_break(lines) + [f"### {title}", ""]
         items = [(i, f) for i, f in enumerate(findings) if f.get("severity") in sevs]
         if not items:
-            lines.append(empty)
+            carried = sum(still.get(s, 0) for s in sevs)
+            lines.append(f"Không có mục mới — còn {carried} mục chưa xong ở phần Đối chiếu vòng trước."
+                         if carried else empty)
         for n, (i, f) in enumerate(items, 1):
             loc = (f"[`{names[f['file']]}`" + (f":{f['line']}" if f.get("line") else "") + "] ") if f.get("file") else ""
             head_line = f"**{n}. {loc}{_title(f['title'])}**"
@@ -716,6 +730,15 @@ def _post_locked(jid: str, dry_run: bool, notify: bool) -> dict:
     import review_ws
     st = review_ws.check_stale(jid)
     if st["stale"]:
+        # a previous try may have posted and lost the response: the member SAW that round, so the requeued
+        # round must compare against it — reconcile BEFORE requeueing (Codex rounds R1 #7)
+        with rc.gitlab_project(job["project_id"]) as gl:
+            seen = rr.posted_note(gl, job)
+        if seen:
+            entry, nxt = review_rounds.adopt_posted(job, seen, review.get("verdict"))
+            job.update(previous=entry, round=nxt,
+                       posted_rounds=review_rounds.with_entry(job.get("posted_rounds"), entry))
+            rc.log_event(job, "posted_reconciled", before_stale=True)
         job.update(status="queued" if st["state"] == "opened" else "cancelled", head_sha=st["current_head"],
                    approval=None, previous_review=job.get("review_file"))
         rc.log_event(job, "stale", reviewed=str(st["reviewed_head"])[:8], current=str(st["current_head"])[:8])
@@ -738,8 +761,14 @@ def _post_locked(jid: str, dry_run: bool, notify: bool) -> dict:
     done = set(job.get("inline_done", {}).get(head, [])) & set(inline_cands)
     inline_ok = set(done)
     with rc.gitlab_project(job["project_id"]) as gl:
-        if rr.already_posted(gl, job):                      # reconcile: lost response on a previous try
-            job.update(status="posted", posted_at=rc.now(), auto_posted=auto, reconciled=True)
+        seen = rr.posted_note(gl, job)                      # reconcile: lost response on a previous try
+        if seen:
+            # posted_at = when GitLab took the note: member replies after it belong to the next round (R3 #3)
+            at = review_rounds._epoch(seen.get("created_at")) if isinstance(seen, dict) else 0
+            job.update(status="posted", posted_at=int(at) or rc.now(), auto_posted=auto, reconciled=True,
+                       note_id=seen.get("id") if isinstance(seen, dict) else None)
+            job["posted_rounds"] = review_rounds.with_entry(job.get("posted_rounds"), review_rounds.record_posted(
+                job, job["posted_at"], review.get("verdict"), job.get("note_id")))
             rc.log_event(job, "posted_reconciled")
             _save_posted(job, notify)              # the lost try never told anyone: sweep delivers these
             return {"job_id": jid, "posted": True, "reconciled": True}
@@ -767,6 +796,9 @@ def _post_locked(jid: str, dry_run: bool, notify: bool) -> dict:
     rw.ledger_add(job["project_id"], job["iid"], reviewed)
     job.update(status="posted", posted_at=rc.now(), note_id=note.get("id"), inline_posted=len(inline_ok),
                auto_posted=auto)
+    # the round the member now sees: archived (immutable) + recorded — later rounds read history only from here
+    job["posted_rounds"] = review_rounds.with_entry(job.get("posted_rounds"), review_rounds.record_posted(
+        job, job["posted_at"], review.get("verdict"), note.get("id")))
     rc.log_event(job, "posted", verdict=review["verdict"], inline=len(inline_ok), auto=auto)
     _save_posted(job, notify)                      # notices seeded in the SAME save as "posted"
     out = {"job_id": jid, "posted": True, "verdict": review["verdict"], "inline": len(inline_ok),
