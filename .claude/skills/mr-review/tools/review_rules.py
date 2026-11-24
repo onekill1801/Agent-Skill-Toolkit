@@ -185,8 +185,9 @@ def posted_today() -> int:
                if j.get("status") == "posted" and j.get("auto_posted") and (j.get("posted_at") or 0) >= start)
 
 
-def evaluate(job: dict, note: str, inline_bodies: list) -> dict:
-    """Decide whether this exact payload may be posted without a human. No side effects."""
+def evaluate(job: dict, note: str, inline_bodies: list, review=None) -> dict:
+    """Decide whether this exact payload may be posted without a human. No side effects.
+    review = the review.json behind the payload: its coverage gaps (REVIEW_COVERAGE=on) need a human."""
     m = mode()
     reasons = []
     if m == "off":
@@ -205,8 +206,18 @@ def evaluate(job: dict, note: str, inline_bodies: list) -> dict:
     reasons += content_problems(job, [note, *inline_bodies])
     if posted_today() >= rc.cfg_int("REVIEW_AUTO_POST_DAILY_MAX", 30):
         reasons.append("daily auto-post cap reached")
+    cov = None
+    if review is not None:
+        import review_coverage
+        cov = review_coverage.evaluate(job, review)
+        if cov["mode"] == "on":                       # the mode pinned at prepare (review_coverage.job_mode)
+            reasons += [f"coverage: {e}" for e in cov["errors"][:5]]
+            reasons += [f"coverage: {g['path']} {g['status']}" for g in cov["gaps"][:10]]
     passed = not reasons
-    return {"mode": m, "rules_passed": passed, "auto_post": passed and m == "auto", "reasons": reasons}
+    out = {"mode": m, "rules_passed": passed, "auto_post": passed and m == "auto", "reasons": reasons}
+    if cov and cov["active"]:
+        out["coverage"] = {k: cov[k] for k in ("mode", "errors", "gaps", "unverified")}
+    return out
 
 
 def all_pages(gl, path: str, what: str, per_page: int = 100, max_pages: int = 200):
@@ -247,7 +258,7 @@ def main(argv=None) -> int:
         return rc.pc.emit({"error": True, "message": f"no job {argv[1]}"})
     review = rp.load_review(job, job.get("review_file", ""))
     note, inline = rp.payload(job, review)
-    return rc.pc.emit({"job_id": job["id"], **evaluate(job, note, inline)})
+    return rc.pc.emit({"job_id": job["id"], **evaluate(job, note, inline, review)})
 
 
 if __name__ == "__main__":

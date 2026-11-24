@@ -57,6 +57,7 @@ import sys
 import time
 
 import review_common as rc
+import review_coverage
 import review_rounds
 import review_rules as rr
 
@@ -72,6 +73,30 @@ _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 def review_path(job: dict, override: str = "") -> str:
     return override or (job.get("worktree", "") + ".review.json")
+
+
+def posting_path(job: dict) -> str:
+    """The exact review an attempt is SENDING (written before the first GitLab write). A retry that finds the
+    note already on the MR archives THIS, not the draft as it is now (Codex ocr-eval step1 R3 #5)."""
+    wt = job.get("worktree") or ""
+    return wt + ".posting.json" if wt else ""          # no worktree: no record (never a file in the cwd)
+
+
+def _posting_review(job: dict, head: str):
+    if not posting_path(job):
+        return None
+    try:
+        with open(posting_path(job), encoding="utf-8") as f:
+            p = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return p if isinstance(p, dict) and p.get("head_sha") == head else None
+
+
+def _coverage_ok(job: dict, review: dict) -> bool:
+    """The posted coverage passed the check (shadow included): the next round may inherit its statuses."""
+    cov = review_coverage.evaluate(job, review)
+    return bool(cov["active"] and not cov["errors"])
 
 
 def load_review(job: dict, override: str = "") -> dict:
@@ -164,6 +189,9 @@ def validate(job: dict, review: dict) -> list:
         errs.append("verdict APPROVE with a blocker finding is contradictory")
     prev, prev_err = review_rounds.prev_state(job)                        # re-review: previous round first
     errs += [prev_err] if prev_err else review_rounds.check(review, prev)
+    cov = review_coverage.evaluate(job, review)        # shadow: reported by `validate`, never an error
+    if cov["mode"] == "on":
+        errs += cov["errors"]
     return errs
 
 
@@ -489,7 +517,11 @@ def payload(job: dict, review: dict) -> tuple:
 def payload_hash(job: dict, review: dict) -> str:
     note, inline = payload(job, review)
     head = (job.get("diff_refs") or {}).get("head_sha") or job.get("head_sha") or ""
-    blob = json.dumps({"head": head, "note": note, "inline": inline}, ensure_ascii=False, sort_keys=True)
+    doc = {"head": head, "note": note, "inline": inline}
+    cov = review_coverage.fingerprint(job, review)     # approval void when the reviewed scope changes
+    if cov:
+        doc["coverage"] = cov
+    blob = json.dumps(doc, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
@@ -506,8 +538,10 @@ def _ws(job: dict) -> dict:
 def _preview(job: dict, review: dict) -> str:
     f = review.get("findings", [])
     top = "\n".join(f"{SEV_ICON[x['severity']]} {x['title']}" for x in f[:8])
+    cov = review_coverage.summary_line(review_coverage.evaluate(job, review))
     return (f"Đăng review {job.get('project_path')}!{job['iid']} ({job.get('source_branch')} → "
             f"{job.get('target_branch')})?\n{VERDICT_ICON[review['verdict']]} — {_counts(f)}\n{top}\n"
+            + (cov + "\n" if cov else "") +
             f"{job.get('web_url', '')}\nXem đầy đủ: python review_post.py render {job['id']}")
 
 
@@ -545,7 +579,7 @@ def request_approval(job: dict, via: str = "auto") -> dict:
 
 def _request_approval_locked(job: dict, review: dict, phash: str, via: str) -> dict:
     note, inline = payload(job, review)
-    rules = rr.evaluate(job, note, inline)
+    rules = rr.evaluate(job, note, inline, review)
     question = _preview(job, review)
     if rules["mode"] == "shadow":
         question += ("\n🤖 Auto-post (shadow): " + ("SẼ tự đăng" if rules["rules_passed"]
@@ -609,7 +643,7 @@ def approval_status(job: dict) -> str:
         return "pending"
     if a.get("via") == "rules":
         note, inline = payload(job, review)
-        return "approved" if rr.evaluate(job, note, inline)["auto_post"] else "pending"
+        return "approved" if rr.evaluate(job, note, inline, review)["auto_post"] else "pending"
     if a.get("via") == "terminal":
         decision = a.get("decision")
     elif a.get("via") == "telegram":
@@ -631,15 +665,27 @@ def human_decide(job: dict, approved: bool) -> dict:
     if review is None:
         raise ValueError("review.json missing or invalid — nothing to approve")
     print(render_note(job, review, set()))
+    cov = review_coverage.summary_line(review_coverage.evaluate(job, review))
+    if cov:
+        print("\n" + cov)
     ans = input(f"\n{'APPROVE' if approved else 'REJECT'} THIS text for {job['id']} ({job.get('title', '')[:60]})? [y/N] ")
     if ans.strip().lower() not in ("y", "yes"):
         return {"job_id": job["id"], "changed": False}
-    job.setdefault("approval", {}).update(via="terminal", decision="approved" if approved else "rejected",
-                                          payload_hash=phash,
-                                          by=os.environ.get("USER") or os.environ.get("USERNAME") or "terminal")
-    rc.log_event(job, "decided", decision=job["approval"]["decision"])
-    rc.save_job(job)
-    return {"job_id": job["id"], "decision": job["approval"]["decision"]}
+    # the human may have taken minutes: a prepare / request may have saved the job meanwhile. Save the decision on
+    # a FRESH read, under the same locks prepare publishes with, and only for the payload the human saw (R14 #2)
+    jid = job["id"]
+    with rc.file_lock(f"approval-{jid}", timeout=120), rc.file_lock("queue"):
+        cur = rc.load_job(jid) or job
+        _, now_hash = _current_payload(cur)
+        if now_hash != phash:
+            raise RuntimeError("the review / its scope changed while you were reading it — nothing saved; run "
+                               "approve/reject again to see the current text")
+        cur.setdefault("approval", {}).update(via="terminal", decision="approved" if approved else "rejected",
+                                              payload_hash=phash,
+                                              by=os.environ.get("USER") or os.environ.get("USERNAME") or "terminal")
+        rc.log_event(cur, "decided", decision=cur["approval"]["decision"])
+        rc.save_job(cur)
+    return {"job_id": jid, "decision": cur["approval"]["decision"]}
 
 
 # --------------------------------------------------------------------------- post
@@ -728,14 +774,15 @@ def _post_locked(jid: str, dry_run: bool, notify: bool) -> dict:
     if errs:
         raise ValueError("review.json invalid: " + "; ".join(errs))
     import review_ws
-    st = review_ws.check_stale(jid)
+    st = review_ws.check_stale(jid, job=job)
     if st["stale"]:
         # a previous try may have posted and lost the response: the member SAW that round, so the requeued
         # round must compare against it — reconcile BEFORE requeueing (Codex rounds R1 #7)
         with rc.gitlab_project(job["project_id"]) as gl:
             seen = rr.posted_note(gl, job)
         if seen:
-            entry, nxt = review_rounds.adopt_posted(job, seen, review.get("verdict"))
+            sent = _posting_review(job, (job.get("diff_refs") or {}).get("head_sha") or "") or review
+            entry, nxt = review_rounds.adopt_posted(job, seen, sent.get("verdict"), review=sent)
             job.update(previous=entry, round=nxt,
                        posted_rounds=review_rounds.with_entry(job.get("posted_rounds"), entry))
             rc.log_event(job, "posted_reconciled", before_stale=True)
@@ -745,9 +792,18 @@ def _post_locked(jid: str, dry_run: bool, notify: bool) -> dict:
         _save_merged(job)
         return {"job_id": jid, "stale": True, "requeued": job["status"] == "queued", "posted": False}
 
+    # approval_status read review.json on its own: what is posted must be the payload it approved, and an
+    # auto-post must pass the rules on THIS read (Codex ocr-eval step1 R1 #1)
+    a = job.get("approval") or {}
+    if a.get("via") == "rules":             # the rules ARE the gate: re-run them on this exact read
+        note_now, inline_now = payload(job, review)
+        if not rr.evaluate(job, note_now, inline_now, review)["auto_post"]:
+            raise PermissionError("auto-post rules no longer pass for this review — nothing posted")
+    elif a.get("payload_hash") != payload_hash(job, review):
+        raise PermissionError("review.json changed since it was approved — request approval again")
+
     findings = review.get("findings", [])
     inline_cands = inline_candidates(review)
-    a = job.get("approval") or {}
     auto = a.get("via") == "rules"
     approver = "luật tự đăng" if auto else _safe_name(a.get("by") or a.get("via", ""))
     if dry_run:
@@ -767,11 +823,18 @@ def _post_locked(jid: str, dry_run: bool, notify: bool) -> dict:
             at = review_rounds._epoch(seen.get("created_at")) if isinstance(seen, dict) else 0
             job.update(status="posted", posted_at=int(at) or rc.now(), auto_posted=auto, reconciled=True,
                        note_id=seen.get("id") if isinstance(seen, dict) else None)
+            sent = _posting_review(job, head) or review      # what the lost try sent, if it left a record
             job["posted_rounds"] = review_rounds.with_entry(job.get("posted_rounds"), review_rounds.record_posted(
-                job, job["posted_at"], review.get("verdict"), job.get("note_id")))
+                job, job["posted_at"], sent.get("verdict"), job.get("note_id"), review=sent))
+            # coverage_ok stays unset: what that lost try passed is unknown (step1 R5 #3)
             rc.log_event(job, "posted_reconciled")
             _save_posted(job, notify)              # the lost try never told anyone: sweep delivers these
             return {"job_id": jid, "posted": True, "reconciled": True}
+        if posting_path(job):                             # before the first GitLab write of this attempt
+            tmp = f"{posting_path(job)}.tmp-{os.getpid()}"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(review, f, ensure_ascii=True)
+            os.replace(tmp, posting_path(job))
         if (job.get("inline_uncertain") or {}).get(head):    # a previous inline POST had no clear outcome
             found = inline_already_posted(gl, job) & set(inline_cands)
             done |= found
@@ -798,7 +861,8 @@ def _post_locked(jid: str, dry_run: bool, notify: bool) -> dict:
                auto_posted=auto)
     # the round the member now sees: archived (immutable) + recorded — later rounds read history only from here
     job["posted_rounds"] = review_rounds.with_entry(job.get("posted_rounds"), review_rounds.record_posted(
-        job, job["posted_at"], review.get("verdict"), note.get("id")))
+        job, job["posted_at"], review.get("verdict"), note.get("id"), review=review,
+        coverage_ok=_coverage_ok(job, review)))
     rc.log_event(job, "posted", verdict=review["verdict"], inline=len(inline_ok), auto=auto)
     _save_posted(job, notify)                      # notices seeded in the SAME save as "posted"
     out = {"job_id": jid, "posted": True, "verdict": review["verdict"], "inline": len(inline_ok),
@@ -1232,8 +1296,12 @@ def main(argv=None) -> int:
         if not job:
             return rc.pc.emit({"error": True, "message": f"no job {a.job_id}"})
         if a.cmd == "validate":
-            errs = validate(job, load_review(job, a.file))
+            review = load_review(job, a.file)
+            errs = validate(job, review)
             out = {"job_id": a.job_id, "valid": not errs, "errors": errs}
+            cov = review_coverage.evaluate(job, review)
+            if cov["active"]:            # shadow: the problems are shown here, not errors
+                out["coverage"] = {k: cov[k] for k in ("mode", "errors", "gaps", "unverified")}
             rc.pc.emit(out)
             return 0 if not errs else 1
         if a.cmd == "render":

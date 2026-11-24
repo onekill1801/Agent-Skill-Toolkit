@@ -33,6 +33,7 @@ import sys
 import time
 
 import review_common as rc
+import review_coverage
 
 GIT_TIMEOUT = 900
 
@@ -70,6 +71,15 @@ class Repo:
         if check and p.returncode != 0:
             raise RuntimeError(f"git {args[0]} failed: {(p.stderr or p.stdout).strip()[-400:]}")
         return p.stdout
+
+    def git_exact(self, *args, timeout=GIT_TIMEOUT) -> str:
+        """Like git() but bytes in, no newline translation: a "\r" inside a NUL-separated file name survives."""
+        base = ["git"] + (["--git-dir", self.path] if self.bare else ["-C", self.path])
+        p = subprocess.run(base + list(args), capture_output=True, env=self.env, timeout=timeout,
+                           stdin=subprocess.DEVNULL)
+        if p.returncode != 0:
+            raise RuntimeError(f"git {args[0]} failed: {p.stderr.decode('utf-8', 'replace').strip()[-400:]}")
+        return p.stdout.decode("utf-8", "surrogateescape")
 
     def has(self, sha: str) -> bool:
         return bool(sha) and subprocess.run(
@@ -196,7 +206,9 @@ class AlreadyReviewed(RuntimeError):
 
 
 def _seen(job: dict) -> str:
-    return json.dumps([job.get(k) for k in ("posted_rounds", "previous", "diff_refs", "status")], sort_keys=True,
+    return json.dumps([job.get(k) for k in ("posted_rounds", "previous", "diff_refs", "status", "coverage_sha",
+                                            "coverage_mode")],
+                      sort_keys=True,
                       default=str)
 
 
@@ -243,9 +255,18 @@ def _known_previous(job: dict, pid, iid, head: str) -> tuple:
                     verdict = (json.load(f) or {}).get("verdict") or ""
             except (OSError, ValueError, AttributeError):
                 verdict = ""
+            sent = None                             # what that try sent (review_post.posting_path)
+            try:
+                with open(old_wt + ".posting.json", encoding="utf-8") as f:
+                    sent = json.load(f)
+            except (OSError, ValueError):
+                pass
+            if not (isinstance(sent, dict) and sent.get("head_sha") == old_head):
+                sent = None
             previous, _ = review_rounds.adopt_posted({**job, "head_sha": old_head, "worktree": old_wt,
                                                       "diff_refs": {"head_sha": old_head},
-                                                      "review_file": old_wt + ".review.json"}, note, verdict)
+                                                      "review_file": old_wt + ".review.json"}, note,
+                                                     (sent or {}).get("verdict") or verdict, review=sent)
             ledger = review_rounds.with_entry(ledger, previous)
             rc.log_event(job, "posted_reconciled", before_prepare=True, head=old_head[:8])
     for e in [previous, *ledger]:
@@ -356,6 +377,14 @@ def prepare(jid: str, with_merge: bool = False) -> dict:
         files = _numstat(repo, base, head)          # also pre-fetches both sides' blobs (partial clone)
         repo.git("diff", "--quiet", base, head, check=False)
         commits = _commits(repo, start, head, pid)
+        coverage = None                             # review_coverage: the files the review must account for
+        if review_coverage.mode() != "off":
+            manifest = review_coverage.build(repo.git, base, head, start, exact=repo.git_exact)
+            cov_tmp, cov_sha = review_coverage.write_tmp(wt, manifest, str(gen or "x"))
+            coverage = {"tmp": cov_tmp, "sha": cov_sha, "path": review_coverage.path_of(wt),
+                        "mode": review_coverage.mode(),
+                        "files": len(manifest["files"]),
+                        "excluded": sum(1 for f in manifest["files"] if f.get("excluded"))}
 
         merge = {"gitlab_merge_status": mr.get("detailed_merge_status") or mr.get("merge_status"),
                  "has_conflicts": mr.get("has_conflicts"), "merge_ref": merge_ref or None,
@@ -408,29 +437,71 @@ def prepare(jid: str, with_merge: bool = False) -> dict:
         "how_to_diff": f"python {os.path.join(rc.tools_dir(), 'review_ws.py')} diff {jid} [--path P]",
         "codegraph": {k: v for k, v in codegraph.items() if k != "external_callers"},
     }
-    with open(ws_json, "w", encoding="utf-8") as f:
+    if coverage:                                    # flag off: ws.json exactly as before
+        ws["coverage"] = {k: v for k, v in coverage.items() if k != "tmp"}
+    # written aside and published under the queue lock with the rest: a prepare that loses the race must not
+    # leave its ws.json next to the winner's job (Codex ocr-eval step1 R2 #5)
+    ws_tmp = f"{ws_json}.tmp-{gen or 'x'}-{os.getpid()}"
+    with open(ws_tmp, "w", encoding="utf-8") as f:
         json.dump(ws, f, ensure_ascii=False, indent=2)
-    with rc.file_lock("queue"):
+    # post → approval → queue (post holds post then queue; request_approval holds approval then saves): a post or
+    # an approval request in flight finishes — and saves its job — before this prepare publishes a new scope /
+    # mode, which then sees the change and refuses; never the other way round (step1 R5 #1, R11 #1)
+    with rc.file_lock(f"post-{jid}", timeout=900, stale_after=1800), \
+            rc.file_lock(f"approval-{jid}", timeout=120), rc.file_lock("queue"):
         job = rc.load_job(jid)
         why = (f"job {jid} was replaced by a newer request during prepare" if job.get("gen") != gen else
                f"job {jid} changed during prepare (reconciled / requeued)" if _seen(job) != seen else
                # ended while we prepared (e.g. a sweeper posted the OLD head meanwhile): never stamp the new head on
                # a posted / cancelled job — that would turn the next real request into a "same head" no-op (R3 #1)
                f"job {jid} became {job.get('status')} during prepare" if job.get("status") in rc.TERMINAL else "")
+        cov_tmp = (coverage or {}).get("tmp")
+        draft = wt + ".review.json"
+        # new scope = the manifest on disk OR the one pinned on the job differs: an off-prepare in between drops
+        # the job's pin but leaves the old file, so the file alone can look "unchanged" (step1 R6 #2)
+        new_scope = bool(coverage) and (review_coverage.file_sha(review_coverage.path_of(wt)) != coverage["sha"]
+                                        or job.get("coverage_sha") != coverage["sha"])
+        if not why and new_scope and (os.path.exists(wt + ".posting.json")
+                                      or (job.get("inline_done") or {}).get(head)
+                                      or (job.get("inline_uncertain") or {}).get(head)):
+            # a post attempt of the OLD scope at this head may be on GitLab (its markers are per head): switching
+            # scope now would let a retry take those markers for the new review. A human resolves it first
+            # (Codex ocr-eval step1 R4 #1 #3) — rare: same head + new base/start + a post attempt that never ended.
+            why = (f"MR !{iid} has an unfinished post attempt at {head[:8]} and its diff scope changed — check "
+                   f"the MR, then remove {os.path.basename(wt)}.posting.json / the job's inline state to re-review")
         if why:
-            if prev_tmp:
-                try:
-                    os.remove(prev_tmp)
-                except OSError:
-                    pass
+            for tmp in (prev_tmp, cov_tmp, ws_tmp):
+                if tmp:
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
             raise RuntimeError(why + " — not overwriting it")
+        os.replace(ws_tmp, ws_json)
+        if new_scope and os.path.exists(draft):
+            # the draft at this per-head path was written for ANOTHER manifest (other base/start, an earlier
+            # visit of this head, or before the flag): never reuse it (step_review would) (R2 #3, R3 #1).
+            # A POSTED round never reaches here (AlreadyReviewed above), and an unfinished post is refused above.
+            os.replace(draft, f"{draft}.old-scope-{int(time.time())}")
+            rc.log_event(job, "draft_set_aside", reason="coverage manifest changed at this head")
         if prev_tmp:
             os.replace(prev_tmp, review_rounds.prev_path(wt))      # published only for the verified job (R5 #1)
+        if cov_tmp:
+            os.replace(cov_tmp, review_coverage.path_of(wt))
+            try:                                    # a new manifest = a new served log (old one = other round)
+                os.remove(review_coverage.served_path(wt))
+            except OSError:
+                pass
         job.update(head_sha=head, worktree=wt, ws_path=ws_json, diff_refs=ws["diff_refs"],
                    title=mr.get("title", job.get("title")),
                    previous=known or None, round=round_now, posted_rounds=ledger,
                    # the validator refuses a prev.json that no longer matches this (review_rounds.prev_state)
                    prev_json_sha=(previous_round or {}).get("sha") or None)
+        if coverage:          # same for the coverage manifest (review_coverage.state) + the mode it runs under
+            job.update(coverage_sha=coverage["sha"], coverage_mode=coverage["mode"])
+        else:                 # flag off: no key at all (job exactly as before)
+            job.pop("coverage_sha", None)
+            job.pop("coverage_mode", None)
         rc.log_event(job, "prepared", head=head[:8], files=len(files), new_commits=commits["new"])
         rc.save_job(job)
     rc.board_card(job, status="in-progress",
@@ -438,26 +509,44 @@ def prepare(jid: str, with_merge: bool = False) -> dict:
                        f"{mr.get('source_branch')} → {mr.get('target_branch')}")
     return {k: ws[k] for k in ("job_id", "worktree", "diff_refs", "files_changed", "lines_added",
                                "lines_removed", "merge", "codegraph", "previous_round")} | {"ws_path": ws_json,
+                                                            "coverage": ws.get("coverage"),
                                                             "commits": {k: v for k, v in commits.items() if k != "list"}}
 
 
-def check_stale(jid: str) -> dict:
-    job = rc.load_job(jid)
+def check_stale(jid: str, job=None) -> dict:
+    """job = the snapshot the caller acts on (post): compare the MR with THAT, not with a re-read that a
+    concurrent prepare may already have moved (Codex ocr-eval step1 R2 #1)."""
+    job = job or rc.load_job(jid)
     mr = rc.gitlab_mr(job["project_id"], job["iid"])
     now_head = (mr.get("diff_refs") or {}).get("head_sha") or mr.get("sha")
     reviewed = (job.get("diff_refs") or {}).get("head_sha") or job.get("head_sha")
+    stale = now_head != reviewed or mr.get("state") != "opened"
+    if job.get("coverage_sha") and not stale:
+        # the coverage manifest is pinned to base/start too: same head, other scope = a review of old refs
+        now, was = mr.get("diff_refs") or {}, job.get("diff_refs") or {}
+        stale = any(now.get(k) != was.get(k) for k in ("base_sha", "start_sha"))
     return {"job_id": jid, "reviewed_head": reviewed, "current_head": now_head,
-            "state": mr.get("state"), "stale": now_head != reviewed or mr.get("state") != "opened"}
+            "state": mr.get("state"), "stale": stale}
 
 
 def diff(jid: str, stat: bool = False, path: str = "", max_lines: int = 800) -> dict:
     job = rc.load_job(jid)
     refs = job.get("diff_refs") or {}
     repo = open_repo(job["project_id"])
-    args = ["diff", "-M"] + (["--stat"] if stat else ["-U5"]) + [refs["base_sha"], refs["head_sha"]]
+    # unquoted paths = the manifest's spelling; flag off (now) = output as before
+    cov = bool(job.get("coverage_sha"))
+    args = (["-c", "core.quotePath=false"] if cov else []) + ["diff", "-M"] + \
+        (["--stat"] if stat else ["-U5"]) + [refs["base_sha"], refs["head_sha"]]
     if path:
-        args += ["--", path]
+        old = None
+        if cov:                                   # a renamed file: both sides, or git shows it as an add
+            manifest, _ = review_coverage.state(job)
+            old = next((f.get("old_path") for f in (manifest or {}).get("files", [])
+                        if f.get("path") == path and f.get("old_path")), None)
+        args += ["--", old, path] if old else ["--", path]
     lines = repo.git(*args).splitlines()
+    if not stat and cov:
+        review_coverage.record_served(job.get("worktree") or "", path, lines, max_lines)
     return {"job_id": jid, "path": path or None, "lines": len(lines),
             "truncated": len(lines) > max_lines, "diff": "\n".join(lines[:max_lines])}
 

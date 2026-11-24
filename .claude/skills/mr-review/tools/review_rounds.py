@@ -60,6 +60,19 @@ def _load(path: str):
         return None
 
 
+def _load_sha(path: str) -> tuple:
+    """(parsed JSON or None, sha256 of the SAME bytes) — one read: what is verified is what is used (step1 R12)."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None, ""
+    try:
+        return json.loads(raw.decode("utf-8")), hashlib.sha256(raw).hexdigest()
+    except ValueError:
+        return None, hashlib.sha256(raw).hexdigest()
+
+
 def file_sha(path: str) -> str:
     try:
         with open(path, "rb") as f:
@@ -103,7 +116,8 @@ def _head(job: dict) -> str:
     return (job.get("diff_refs") or {}).get("head_sha") or job.get("head_sha") or ""
 
 
-def record_posted(job: dict, posted_at: float = 0, verdict: str = "", note_id=None) -> dict:
+def record_posted(job: dict, posted_at: float = 0, verdict: str = "", note_id=None, review=None,
+                  coverage_ok: bool = False) -> dict:
     """Archive the round the job just put on GitLab (its review.json + this round's prev.json) and return its
     ledger entry. A failed copy keeps the live paths (better than no history)."""
     import os
@@ -114,6 +128,7 @@ def record_posted(job: dict, posted_at: float = 0, verdict: str = "", note_id=No
     live_review = job.get("review_file") or (wt + ".review.json" if wt else "")
     live_prev = prev_path(wt) if wt and job.get("prev_json_sha") and file_sha(prev_path(wt)) == job["prev_json_sha"] else ""
     review_file, prev_file, failed = live_review, live_prev or None, False
+    coverage_file = None                    # the round's coverage manifest (next round's "reused" proof)
 
     def freeze(src: str, dst: str) -> str:
         """Immutable: the FIRST archive of a round wins — a re-reconcile never rewrites it (R6 #3)."""
@@ -126,15 +141,34 @@ def record_posted(job: dict, posted_at: float = 0, verdict: str = "", note_id=No
         base = os.path.join(os.path.dirname(wt), "rounds", f"{job.get('iid')}-r{rnd}-{head[:12]}")
         try:
             os.makedirs(os.path.dirname(base), exist_ok=True)
-            if live_review and os.path.exists(live_review):
+            if isinstance(review, dict):
+                # the exact review that went out: the file may have been edited during the GitLab calls, and
+                # the next round reads its coverage from here (Codex ocr-eval step1 R2)
+                dst = base + ".review.json"
+                if not os.path.exists(dst):
+                    tmp = f"{dst}.tmp-{os.getpid()}"
+                    with open(tmp, "w", encoding="utf-8") as f:     # ascii: a lone surrogate never fails
+                        json.dump(review, f, ensure_ascii=True, indent=2)
+                    os.replace(tmp, dst)
+                review_file = dst
+            elif live_review and os.path.exists(live_review):
                 review_file = freeze(live_review, base + ".review.json")
             if live_prev:
                 prev_file = freeze(live_prev, base + ".prev.json")
+            live_cov = wt + ".coverage.json"
+            if job.get("coverage_sha") and file_sha(live_cov) == job["coverage_sha"]:
+                coverage_file = freeze(live_cov, base + ".coverage.json")
         except OSError:
             failed = True              # history still points at the live files: flagged, never silent
     return {"status": "posted", "head_sha": head, "round": rnd, "verdict": verdict or job.get("verdict"),
             "posted_at": int(posted_at or time.time()), "note_id": note_id, "review_file": review_file,
-            "prev_file": prev_file, "worktree": wt, "archive_failed": failed or None}
+            "prev_file": prev_file, "coverage_file": coverage_file,
+            "coverage_file_sha": job.get("coverage_sha") if coverage_file else None,
+            # the archived review as written: a "reused" inherits its statuses only while it still matches
+            "review_file_sha": file_sha(review_file) or None if review_file else None, "worktree": wt,
+            # the posted coverage passed review_coverage.check: only then may the next round inherit it
+            "coverage_ok": bool(coverage_ok and coverage_file) or None,
+            "archive_failed": failed or None}
 
 
 def with_entry(ledger, entry: dict) -> list:
@@ -179,12 +213,13 @@ def previous_of(old: dict) -> dict:
     return {k: old.get(k) for k in ("status", "head_sha", "verdict")}
 
 
-def adopt_posted(job: dict, note: dict, verdict: str = "") -> tuple:
+def adopt_posted(job: dict, note: dict, verdict: str = "", review=None) -> tuple:
     """(entry, round) when the job's OWN round turns out to be on GitLab (a POST whose response was lost,
     found by its marker) although its status never said so: the member saw it, so it is archived + recorded and
     the next round compares against it. posted_at = the note's created_at — replies after it are the answers."""
     at = _epoch(note.get("created_at")) if isinstance(note, dict) else 0.0
-    entry = record_posted(job, at, verdict, note.get("id") if isinstance(note, dict) else None)
+    # review = what the lost try SENT (posting record) when known; its coverage is never inherited (unchecked)
+    entry = record_posted(job, at, verdict, note.get("id") if isinstance(note, dict) else None, review=review)
     return entry, round_of(entry)
 
 
@@ -293,6 +328,36 @@ def replies(notes: list, since: float, marker_re) -> list:
     return out[-MAX_REPLIES:]
 
 
+def _utf8(s: str) -> bool:
+    try:
+        s.encode("utf-8")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def _reuse(review: dict, prev_manifest_file: str, want_sha: str = ""):
+    """What a coverage "reused" needs (review_coverage.check): the previous round's manifest entries (to prove a
+    file's diff is byte-identical: status, rename source, modes, blobs) and the previous round's own coverage.
+    None = no reuse possible (older round without an archived manifest)."""
+    if not (prev_manifest_file and want_sha):
+        return None
+    m, sha = _load_sha(prev_manifest_file)
+    if sha != want_sha:
+        return None                       # missing or edited since it was archived (step1 R10 #3, R12 #2)
+    if not (isinstance(m, dict) and isinstance(m.get("files"), list)):
+        return None
+    files = {f["path"]: [f.get("status"), f.get("old_path"), f.get("id")] for f in m["files"]
+             if isinstance(f, dict) and isinstance(f.get("path"), str) and f.get("id")
+             # a name that is not valid UTF-8 cannot go into prev.json (UTF-8): never reused, reviewed again (R13 #1)
+             and _utf8(f["path"]) and _utf8(f.get("old_path") or "")}
+    cov = review.get("coverage") if isinstance(review.get("coverage"), list) else []
+    return {"prev_files": files,
+            "prev_coverage": {c["path"]: c["status"] for c in cov if isinstance(c, dict)
+                              and isinstance(c.get("path"), str) and isinstance(c.get("status"), str)
+                              and _utf8(c["path"]) and _utf8(c["status"])}}
+
+
 def build(job: dict, git, notes_fn=None, marker_re=None, head: str = "") -> dict:
     """prev.json content for a prepared round, or None. git(*args) -> stdout, None on failure;
     notes_fn() -> the MR's notes (may raise: replies are then marked unavailable). head = the head being
@@ -300,7 +365,8 @@ def build(job: dict, git, notes_fn=None, marker_re=None, head: str = "") -> dict
     prev = job.get("previous")
     if not (isinstance(prev, dict) and prev.get("status") == "posted"):
         return None
-    review = _load(prev.get("review_file") or "") or {}
+    review, review_sha = _load_sha(prev.get("review_file") or "")
+    review = review or {}
     if not isinstance(review, dict) or not review.get("head_sha"):
         return None                                   # the file the member saw is gone: nothing to compare
     prev_head = review.get("head_sha") or prev.get("head_sha")
@@ -330,6 +396,9 @@ def build(job: dict, git, notes_fn=None, marker_re=None, head: str = "") -> dict
     return {"round": pr + 1, "previous": {"head_sha": prev_head, "verdict": prev.get("verdict") or review.get("verdict"),
                                          "posted_at": prev.get("posted_at"), "round": pr},
             "open": items, "replies": reps, "replies_error": rep_err,
+            "reuse": _reuse(review, prev.get("coverage_file") or "", prev.get("coverage_file_sha") or "")
+            if prev.get("coverage_ok") and prev.get("review_file_sha")
+            and review_sha == prev["review_file_sha"] else None,
             "delta": delta, "delta_note": None if delta is not None else
             "previous head not reachable (force-push / rebase?) — review the whole diff",
             "built_at": int(time.time())}

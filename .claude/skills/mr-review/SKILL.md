@@ -123,6 +123,25 @@ The validator enforces all of this; the note shows a "Đối chiếu vòng trư�
   paragraph), Standards Compliance = `compliance` (fill all 6), Positive Observations = `positives` (2–4 cụ thể)
   (no Files Reviewed table). Titles are short statements (the renderer adds the final "."); findings with
   no file (e.g. "MR chưa có description") are fine. REVIEW_NOTE_STYLE=compact = short note without tables.
+- **Coverage** (only when ws.json has `coverage` — flag `REVIEW_COVERAGE=shadow|on`): `<worktree>.coverage.json`
+  is the machine's list of every file in the diff (do not edit it — its hash is on the job). Add
+  `"coverage": [{"path": "...", "status": "reviewed|reused|skipped|truncated", "reason": "..."}]` with ONE entry
+  per file not marked `excluded` there. `reviewed` = you read its whole diff (`review_ws.py diff <job> --path P
+  --max-lines N` until `truncated` is false); `reused` = re-review only, for a file not in prev.json `delta`,
+  not in `reuse.base_changed`, and `reviewed`/`reused` in `reuse.prev_coverage` (a gap is never carried over);
+  `skipped` / `truncated` need a `reason`. Be honest: a gap sends the review to a human, it does not fail it.
+  With `on`, a missing / unknown / duplicate entry fails `validate` and a gap blocks auto-post; `shadow` only
+  reports (`validate` output `coverage`). The flag is read at PREPARE and pinned on the job (`coverage_mode`):
+  a review keeps that mode to the end — flipping the flag takes effect from the next prepare (new head / new
+  request), never half-way. Manifest + statuses are part of the approval hash; with a manifest, a new base/start
+  at the same head = stale. `unverified` (a `reviewed` file whose full diff the served log never saw) is a signal
+  in the preview only — never a gate, also under `on` (the agent may read the diff with plain git).
+- Applies whatever the flag (post hardening shipped with coverage): `prepare` publishes under the locks
+  post → approval → queue (waits for a post / approval request in flight); a post writes `<worktree>.posting.json`
+  (what that attempt sent) before its first GitLab write and a lost-response reconcile archives that; the archived
+  round is the review that was posted (ASCII JSON); a terminal approve/reject saves on a fresh read of the job
+  only if the payload is still the one shown.
+  Design: `temp/codex/ocr-eval/FINAL.md` step 1.
 - Put code identifiers in backticks (`` `@Test` ``, `` `findById` ``). Every `@` outside fenced code
   (the MR author included) gets an invisible word joiner after it when rendered, so a review never
   pings anyone; fenced code is posted byte-exact. Do not use raw HTML or `&…;` entities (they block

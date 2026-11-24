@@ -318,12 +318,15 @@ class StaleReconcileTest(unittest.TestCase):
         with mock.patch.object(rp, "approval_status", return_value="approved"), \
                 mock.patch.object(rp, "load_review", return_value=review(head_sha=H1, verdict="REQUEST_CHANGES")), \
                 mock.patch.object(rc, "gitlab_project", return_value=contextlib.nullcontext(gl)), \
-                mock.patch.dict(sys.modules, {"review_ws": mock.Mock(check_stale=lambda j: stale)}):
+                mock.patch.dict(sys.modules, {"review_ws": mock.Mock(check_stale=lambda j, job=None: stale)}):
             out = rp.post("77-5", notify=False)
         self.assertTrue(out["stale"])
         j = rc.load_job("77-5")
         self.assertEqual((j["status"], j["head_sha"], j["round"]), ("queued", H2, 2))
-        self.assertEqual(j["previous"]["review_file"], job["worktree"] + ".review.json")
+        # archived: the review that was sent (here the draft read for the post — no posting record)
+        with open(j["previous"]["review_file"], encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["verdict"], "REQUEST_CHANGES")
+        self.assertIn(os.path.join(tmp, "rounds"), j["previous"]["review_file"])
         gl.add_mr_comment.assert_not_called()
 
 

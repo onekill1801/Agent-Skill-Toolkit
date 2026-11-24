@@ -67,6 +67,11 @@ CATALOG = [
     _s("REVIEW_CODEGRAPH", "Review MR", "Dùng CodeGraph khi chuẩn bị review",
        "1 = có (nơi gọi ngoài diff, test bị ảnh hưởng; chậm hơn ~1,5 phút) · 0 = tắt", "bool", "1",
        restart=(COORD,)),
+    _s("REVIEW_COVERAGE", "Review MR", "Bảng kê độ phủ file",
+       "off = tắt · shadow = máy liệt kê mọi file trong diff, review ghi trạng thái từng file, chỉ BÁO thiếu · "
+       "on = thiếu file thì validate lỗi, file bỏ qua/cắt thì không tự đăng (cần người duyệt) · "
+       "áp từ lần prepare sau, review đang dở giữ chế độ cũ",
+       "enum", "off", choices=("off", "shadow", "on"), restart=(COORD, GROUP_WATCH), sensitive=True),
     # ---------------------------------------------------------------- TChat
     _s("FCHAT_WATCH_GROUP", "TChat", "Group được nghe",
        "id group TChat (24 ký tự hex) mà group_watch theo dõi", "text", "", item=_ID, restart=(GROUP_WATCH,)),

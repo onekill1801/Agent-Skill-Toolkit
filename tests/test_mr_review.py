@@ -422,7 +422,7 @@ class AutoPostRulesTest(unittest.TestCase):
         with mock.patch.object(rp, "load_review", return_value=self._review()), \
                 mock.patch.object(rc, "gitlab_project", return_value=contextlib.nullcontext(gl)), \
                 mock.patch.object(rp, "_ws", return_value={}), \
-                mock.patch.dict(sys.modules, {"review_ws": mock.Mock(check_stale=lambda j: stale,
+                mock.patch.dict(sys.modules, {"review_ws": mock.Mock(check_stale=lambda j, job=None: stale,
                                                                      ledger_add=lambda *a: None)}):
             return rp.post(job["id"], notify=False)
 
@@ -611,7 +611,7 @@ class CompactNoteTest(unittest.TestCase):
         gl._api.side_effect = lambda p: p
         gl._request.return_value = []                                         # no marker on the MR yet
         gl.add_mr_comment.return_value = {"id": 9}
-        ws = mock.Mock(check_stale=lambda j: {"stale": False}, ledger_add=lambda *a: None)
+        ws = mock.Mock(check_stale=lambda j, job=None: {"stale": False}, ledger_add=lambda *a: None)
         with mock.patch.object(rc, "load_job", return_value=job), mock.patch.object(rc, "save_job"),              mock.patch.object(rc, "log_event"), mock.patch.object(rc, "board_card"),              mock.patch.object(rp, "approval_status", return_value="approved"),              mock.patch.object(rp, "load_review", return_value=self.review(f)),              mock.patch.object(rc, "gitlab_project", return_value=contextlib.nullcontext(gl)),              mock.patch.dict(sys.modules, {"review_ws": ws}):
             out = rp._post_locked("77-5", dry_run=False, notify=False)
         self.assertTrue(out["posted"])
