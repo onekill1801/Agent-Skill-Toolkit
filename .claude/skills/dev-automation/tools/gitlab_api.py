@@ -11,6 +11,8 @@ Usage:
     python gitlab_api.py mr-changes <mr_iid>
     python gitlab_api.py mr-comment <mr_iid> "Comment body"
     python gitlab_api.py merge-mr <mr_iid> [--keep-source] [--squash]   # [WRITE] accept/merge MR
+    python gitlab_api.py update-mr <mr_iid> [--title T] [--description TEXT | --description-file F|-]
+                                   [--target-branch B]                  # [WRITE] sửa title/mô tả/nhánh đích
     python gitlab_api.py list-mrs [state]
     python gitlab_api.py mr-discussions <mr_iid>
     python gitlab_api.py mr-detail <mr_iid>
@@ -158,6 +160,55 @@ def accept_merge_request(mr_iid: int, remove_source: bool = True,
     if squash:
         data["squash"] = True
     return _request(url, method="PUT", data=data)
+
+
+def update_merge_request(mr_iid: int, title: str | None = None, description: str | None = None,
+                         target_branch: str | None = None) -> dict:
+    """Sửa title / mô tả / nhánh đích của MR (PUT, chỉ gửi field được truyền)."""
+    data = {k: v for k, v in (("title", title), ("description", description),
+                              ("target_branch", target_branch)) if v is not None}
+    if not data:
+        return {"error": True, "status": 0,
+                "message": "update-mr: cần ít nhất một trong --title/--description/--description-file/--target-branch"}
+    return _request(_api(f"/merge_requests/{int(mr_iid)}"), method="PUT", data=data)
+
+
+def update_mr_cli(argv: list[str]) -> dict:
+    """CLI `update-mr <iid> ...` → kết quả gọn: field đã đổi + GitLab có lưu đúng nội dung không."""
+    import argparse
+
+    ap = argparse.ArgumentParser(prog="gitlab_api.py update-mr")
+    ap.add_argument("iid", type=int)
+    ap.add_argument("--title")
+    group = ap.add_mutually_exclusive_group()
+    group.add_argument("--description")
+    group.add_argument("--description-file", help="đường dẫn file Markdown, '-' = stdin")
+    ap.add_argument("--target-branch")
+    args = ap.parse_args(argv)
+    description = args.description
+    if args.description_file:
+        if args.description_file == "-":
+            description = sys.stdin.read()
+        else:
+            try:
+                with open(args.description_file, encoding="utf-8") as fh:
+                    description = fh.read()
+            except OSError as e:
+                return {"error": True, "status": 0, "message": f"không đọc được {args.description_file}: {e}"}
+    sent = {"title": args.title, "description": description, "target_branch": args.target_branch}
+    r = update_merge_request(args.iid, args.title, description, args.target_branch)
+    if not isinstance(r, dict) or r.get("error"):
+        return r
+    changed = [k for k, v in sent.items() if v is not None]
+    return {
+        "iid": r.get("iid"),
+        "web_url": r.get("web_url"),
+        "title": r.get("title"),
+        "target_branch": r.get("target_branch"),
+        "updated": changed,
+        # GitLab có thể bỏ khoảng trắng cuối — so sau strip.
+        "verified": all((r.get(k) or "").strip() == v.strip() for k, v in sent.items() if v is not None),
+    }
 
 
 def add_mr_comment(mr_iid: int, body: str) -> dict:
@@ -339,6 +390,9 @@ if __name__ == "__main__":
         remove_source = "--keep-source" not in sys.argv
         squash = "--squash" in sys.argv
         _print_json(accept_merge_request(int(sys.argv[2]), remove_source, squash))
+
+    elif cmd == "update-mr" and len(sys.argv) >= 3:
+        _print_json(update_mr_cli(sys.argv[2:]))
 
     elif cmd == "list-mrs":
         state = sys.argv[2] if len(sys.argv) >= 3 else "opened"

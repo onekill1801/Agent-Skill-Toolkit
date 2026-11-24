@@ -92,6 +92,7 @@ python gitlab_api.py create-branch <name> [ref]    # [WRITE]
 python gitlab_api.py create-mr <source> "title" [target]   # [WRITE]
 python gitlab_api.py mr-comment <iid> "body"       # [WRITE]
 python gitlab_api.py merge-mr <iid> [--keep-source] [--squash]   # [WRITE] accept/merge MR
+python gitlab_api.py update-mr <iid> [--title T] [--description-file F|-] [--target-branch B]   # [WRITE] sửa MR
 python gitlab_api.py whoami                         # user GitLab hiện tại
 python gitlab_api.py my-review-mrs [reviewer|assignee|both]   # MR gắn tên tôi (toàn project)
 python mr_watch.py [--who ...] [--interval 300] [--once] [--no-spawn] [--mode store|terminal]   # poll MR gắn tên tôi → xếp task review_mr vào store (mặc định; `review_flow.py work` chạy) · terminal = mở Claude như cũ

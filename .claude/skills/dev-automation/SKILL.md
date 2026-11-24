@@ -27,7 +27,7 @@ The agent MUST read the tool source before first use to understand function sign
 |------|---------|
 | `tools/config.py` | Configuration loader — reads `.env` for API tokens |
 | `tools/azure_devops.py` | Azure DevOps Work Items API — read tasks, update state, add comments |
-| `tools/gitlab_api.py` | GitLab API — branches, merge requests, diffs, comments, `whoami`, `my-review-mrs` |
+| `tools/gitlab_api.py` | GitLab API — branches, merge requests (create/update/merge), diffs, comments, `whoami`, `my-review-mrs` |
 | `tools/mr_watch.py` | Poll GitLab for MRs assigned to me → auto-launch a Claude review (Workflow 5) |
 | `tools/notifier.py` | Send formatted notifications via Azure DevOps comments |
 

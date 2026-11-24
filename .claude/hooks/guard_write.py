@@ -28,7 +28,7 @@ def tool(name: str) -> str:
 
 
 WRITE_RULES = [
-    (tool("gitlab_api") + r"\s+(create-branch|delete-branch|create-mr|mr-comment|merge-mr)\b", "GitLab write"),
+    (tool("gitlab_api") + r"\s+(create-branch|delete-branch|create-mr|update-mr|mr-comment|merge-mr)\b", "GitLab write"),
     (tool("azure_devops") + r"\s+(state|comment)\b", "Azure DevOps write"),
     (tool("notifier"), "notify real people"),
     (tool("send") + "|" + tool("notify_group") + "|" + tool("reply_worker"), "TChat message to real people"),
