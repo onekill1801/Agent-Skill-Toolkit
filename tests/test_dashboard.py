@@ -260,6 +260,137 @@ class HttpTest(Base):
         self.assertEqual(srv.call_args[0][0], ("127.0.0.1", 9999))
 
 
+class TaskDetailTest(Base):
+    def test_detail_has_timeline_checkpoints_actions_and_exact_revision(self):
+        with S.Store() as st:
+            t = st.add("verify", "repo@feat", title="Kiểm feat", data={"note": "glpat-" + "B" * 24})
+            st.db.execute("update tasks set status='blocked', last_error='budget hết' where id=?", (t["id"],))
+            upd = st.get(t["id"])["updated"]
+        d = D.read_task(t["id"])
+        self.assertEqual(d["task"]["status"], "blocked")
+        self.assertEqual(d["task"]["updated"], upd)                       # revision token travels exactly
+        self.assertIn("unblock", d["actions"])
+        self.assertIn("cancel", d["actions"])
+        self.assertEqual(d["events"][0]["kind"], "added")
+        self.assertNotIn("B" * 24, json.dumps(d))                          # redacted
+        self.assertIn("report_error", d["evidence"])                       # no real repo: reason, not a crash
+
+    def test_missing_task_is_lookup_error(self):
+        with S.Store():
+            pass
+        with self.assertRaises(LookupError):
+            D.read_task("nope")
+
+    def test_actions_follow_kind_markers(self):
+        base = {"kind": "proposal", "status": "blocked"}
+        self.assertEqual(D.actions_for({**base, "last_error": "candidate: x"})[:2], ["proposal_go", "proposal_reject"])
+        self.assertEqual(D.actions_for({**base, "last_error": "adr ready: p"})[:2], ["proposal_accept", "proposal_reject"])
+        self.assertIn("atask_accept", D.actions_for({"kind": "atask_intake", "status": "blocked", "last_error": "proposal: x"}))
+        self.assertEqual(D.actions_for({"kind": "verify", "status": "failed", "last_error": "x"}), ["retry", "cancel"])
+        self.assertEqual(D.actions_for({"kind": "verify", "status": "done", "last_error": ""}), [])
+
+
+class ActionTest(Base):
+    def _blocked(self, status="blocked"):
+        with S.Store() as st:
+            t = st.add("verify", f"repo@{status}", title="x")
+            st.db.execute("update tasks set status=?, last_error='cần bạn', attempts=3 where id=?", (status, t["id"]))
+            return t["id"], st.get(t["id"])["updated"]
+
+    def test_unblock_retry_cancel_record_who_and_why(self):
+        tid, upd = self._blocked()
+        self.assertTrue(D.do_action({"id": tid, "action": "unblock", "updated": upd, "note": "đã sửa tay"})["ok"])
+        with S.Store() as st:
+            self.assertEqual(st.get(tid)["status"], "queued")
+            ev = st.events(tid)[-1]
+        self.assertEqual((ev["kind"], ev["data"]["by"], ev["data"]["note"]), ("unblocked", "human:dashboard", "đã sửa tay"))
+        fid, fupd = self._blocked("failed")
+        D.do_action({"id": fid, "action": "retry", "updated": fupd})
+        with S.Store() as st:
+            self.assertEqual((st.get(fid)["status"], st.get(fid)["attempts"]), ("queued", 0))
+            cupd = st.get(fid)["updated"]
+        with self.assertRaises(ValueError):                               # cancel needs a reason
+            D.do_action({"id": fid, "action": "cancel", "updated": cupd})
+        D.do_action({"id": fid, "action": "cancel", "updated": cupd, "note": "sai yêu cầu"})
+        with S.Store() as st:
+            self.assertEqual(st.get(fid)["status"], "cancelled")
+
+    def test_stale_revision_and_wrong_action_change_nothing(self):
+        tid, upd = self._blocked()
+        with self.assertRaises(RuntimeError):
+            D.do_action({"id": tid, "action": "unblock", "updated": upd - 1})
+        with self.assertRaises(ValueError):
+            D.do_action({"id": tid, "action": "retry", "updated": upd})       # not failed
+        with self.assertRaises(ValueError):
+            D.do_action({"id": tid, "action": "unblock"})                     # no revision given
+        with S.Store() as st:
+            self.assertEqual(st.get(tid)["status"], "blocked")
+
+    def test_refused_when_dashboard_runs_under_an_agent(self):
+        tid, upd = self._blocked()
+        with mock.patch.dict(os.environ, {"TOOLKIT_HEADLESS": "1"}):
+            with self.assertRaises(PermissionError):
+                D.do_action({"id": tid, "action": "unblock", "updated": upd})
+        with S.Store() as st:
+            self.assertEqual(st.get(tid)["status"], "blocked")
+
+    def test_web_decision_is_scoped_to_the_thread(self):
+        from agent_skill_toolkit.core import human
+        seen = {}
+        with mock.patch.object(human, "isatty", return_value=False), human.web_decision("t"):
+            human.require("x")                                                # this thread: allowed
+            th = threading.Thread(target=lambda: seen.setdefault("other", human.web_by()))
+            th.start()
+            th.join()
+        self.assertEqual(seen["other"], "")                                   # other threads: not
+        with mock.patch.object(human, "isatty", return_value=False), self.assertRaises(PermissionError):
+            human.require("x")                                                # after the block: not
+
+    def test_assign_only_inside_work_and_validates_input(self):
+        with mock.patch.dict(os.environ, {"WORK_DIR": os.path.join(self.tmp, "work")}):
+            os.makedirs(os.path.join(self.tmp, "work", "wt", "etask", "feat"))
+            with self.assertRaises(ValueError):
+                D.do_assign({"kind": "verify", "repo": self.tmp})
+            with self.assertRaises(ValueError):
+                D.do_assign({"kind": "review_mr", "text": " "})
+            with self.assertRaises(ValueError):
+                D.do_assign({"kind": "shell"})
+            repos = D.read_repos()["repos"]
+        self.assertEqual([(r["project"], r["name"]) for r in repos], [("etask", "feat")])
+
+
+class HttpWriteTest(HttpTest):
+    def post(self, path, body, key="k" * 24, origin=True):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", method="POST",
+                                     data=json.dumps(body).encode())
+        req.add_header("Content-Type", "application/json")
+        if key:
+            req.add_header("X-Dashboard-Key", key)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"{}")
+
+    def test_action_needs_key_and_current_revision(self):
+        with S.Store() as st:
+            t = st.add("verify", "repo@x", title="x")
+            st.db.execute("update tasks set status='blocked', last_error='y' where id=?", (t["id"],))
+        with mock.patch.object(D.Handler, "edit_key", "k" * 24):
+            code, h, body = self.get(f"/api/task?id={t['id']}")
+            d = json.loads(body)["data"]
+            self.assertEqual(self.post("/api/action", {"id": t["id"], "action": "unblock", "updated": d["task"]["updated"]},
+                                       key="wrong" * 5)[0], 403)
+            self.assertEqual(self.post("/api/action", {"id": t["id"], "action": "unblock",
+                                                       "updated": d["task"]["updated"] + 5})[0], 409)
+            code, out = self.post("/api/action", {"id": t["id"], "action": "unblock", "updated": d["task"]["updated"]})
+            self.assertEqual((code, out["ok"]), (200, True))
+            self.assertEqual(self.post("/api/action", {"id": "nope", "action": "unblock", "updated": 1})[0], 404)
+        with mock.patch.object(D.Handler, "edit_key", ""):                    # --read-only: no writes at all
+            self.assertEqual(self.post("/api/assign", {"kind": "verify"})[0], 403)
+        self.assertEqual(self.get("/api/task?id=nope")[0], 404)
+
+
 class ApprovalsDirTest(Base):
     def test_rc_config_follows_toolkit_state_dir(self):
         sys.path.insert(0, str(ROOT / ".claude" / "skills" / "remote-control" / "tools"))

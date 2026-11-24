@@ -10,10 +10,16 @@ usage left from Orca) · MR review jobs · pending approvals · daemons · pipel
 port-forwards · feedback · settings (workflows.settings: non-secret switches only) · a command help per section.
 
 Safety: listens on 127.0.0.1 only, refuses a foreign Host header (DNS rebinding). Monitoring is read-only
-(store opened with Store.reader = sqlite mode=ro; no reader creates a directory); approvals and every
-other action stay terminal commands (shown on the page). The ONE write is POST /api/settings, which needs
-the per-run edit key printed by `serve` (only in that terminal — the page receives it through the URL
-fragment, never from the server), a same-origin JSON request, and passes the catalog's validation.
+(store opened with Store.reader = sqlite mode=ro; no reader creates a directory). Writes — all need the
+per-run edit key printed by `serve` (only in that terminal — the page receives it through the URL
+fragment, never from the server) and a same-origin JSON request:
+  POST /api/settings  the settings form (catalog validation)
+  POST /api/action    a human decision on ONE task revision (unblock / retry / cancel + reason / accept an
+                      aTask proposal / start, accept or reject a proposal) — runs in human.web_decision and
+                      only if the task's `updated` is still the one the page showed (else 409)
+  POST /api/assign    new work -> a store task (verify ladder / proposal / MR review); repos only under work/
+Posting an MR review stays `review_post.py approve` (its approval is bound to the rendered text).
+GET /api/task?id= is the full read-only view of one task (timeline, checkpoints, evidence report).
 Secrets are never read out: the page only learns whether a secret key is set. Free text from state files
 is passed through the secret redactor before it leaves the process; no traceback is sent.
 
@@ -231,6 +237,246 @@ def read_settings() -> dict:
             st.close()
 
 
+# ----------------------------------------------------------------------------- one task, in full
+
+DETAIL_EVENTS = 150
+_BIG = 4000            # a free-text field longer than this is cut (the page shows a note)
+
+
+def _cut(v, n: int = _BIG):
+    if isinstance(v, str) and len(v) > n:
+        return v[:n] + f"… (+{len(v) - n} ký tự)"
+    if isinstance(v, dict):
+        return {k: _cut(x, n) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_cut(x, n) for x in v[:200]]
+    return v
+
+
+def _evidence(st, t: dict) -> dict:
+    """Kind-specific "what did the AI produce" view. verify: AC -> evidence report (read-only: git show
+    of the spec + stored checkpoints). Never raises: a missing report is shown as its reason."""
+    if t["kind"] != "verify":
+        return {}
+    try:
+        from agent_skill_toolkit.workflows.verify import ladder as L
+        rep = L.evidence_report(st, t["id"])
+        return {"report_md": rep.get("markdown") or "", "rungs": rep.get("rungs") or [],
+                "acs": rep.get("acs") or [], "not_checked": rep.get("not_checked") or []}
+    except Exception as e:  # noqa: BLE001
+        return {"report_error": f"{type(e).__name__}: {e}"[:400]}
+
+
+def read_task(task_id: str) -> dict:
+    """Everything one task did: row, checkpoints (what each step produced), events (timeline), deps,
+    children, usage, and the kind's evidence. READ-ONLY handle; every string redacted."""
+    if not task_id or len(task_id) > 64:
+        raise ValueError("task id missing")
+    st = store_mod.Store.reader()
+    try:
+        t = st.get(task_id)
+        if not t:
+            raise LookupError(f"no task {task_id}")
+        cps = [{"id": c["id"], "step": c["step"], "valid": bool(c["valid"]), "ts": c["ts"],
+                "sha": (c.get("sha") or "")[:12], "data": _cut(c.get("data") or {}, 1500)}
+               for c in st.checkpoints(task_id)]
+        events = [{"ts": e["ts"], "kind": e["kind"], "data": _cut(e.get("data") or {}, 600)}
+                  for e in st.events(task_id, limit=DETAIL_EVENTS)]
+        usage = st.db.execute("select count(*) n, coalesce(sum(seconds),0) s, coalesce(sum(tokens_in),0) ti, "
+                              "coalesce(sum(tokens_out),0) tout from usage where task_id=?", (task_id,)).fetchone()
+        deps = [{"id": d, "status": (st.get(d) or {}).get("status", "?"), "title": (st.get(d) or {}).get("title", "")}
+                for d in st.deps_of(task_id)]
+        kids = [{"id": c["id"], "kind": c["kind"], "status": c["status"], "title": c.get("title") or c["ref"]}
+                for c in st.children(task_id)]
+        task = {k: t.get(k) for k in ("id", "kind", "ref", "title", "status", "step", "attempts", "max_attempts",
+                                       "last_error", "created", "updated", "resource", "parent", "resume_at",
+                                       "lease_owner", "priority")}
+        out = {"task": task, "data": _cut(t.get("data") or {}), "checkpoints": cps, "events": events,
+               "deps": deps, "children": kids, "actions": actions_for(t),
+               "usage": {"runs": usage["n"], "seconds": round(usage["s"] or 0),
+                         "tokens_in": usage["ti"], "tokens_out": usage["tout"]},
+               "evidence": _evidence(st, t)}
+    finally:
+        st.close()
+    upd = out["task"]["updated"]                    # the revision token travels exactly (never redacted)
+    out = _clean(out)
+    out["task"]["updated"] = upd
+    return out
+
+
+# ----------------------------------------------------------------------------- human actions (edit key)
+#
+# Every action is a HUMAN decision: the request carries the per-run edit key, runs inside
+# human.web_decision (the same handlers the terminal uses accept it instead of a TTY; refused when the
+# dashboard itself runs under an agent), and names the revision (`updated`) the person looked at —
+# if the task moved meanwhile nothing happens and the page says "look again".
+
+def _tool(skill: str, name: str):
+    """Import a tool facade (auto-dev/tools/verify.py, ...) once, under a private module name, with its
+    own directory first on sys.path (two skills have a `config`)."""
+    import importlib.util
+    mod_name = f"_dash_{skill.replace('-', '_')}_{name}"
+    if mod_name in sys.modules:
+        return sys.modules[mod_name]
+    d = os.path.join(_SKILLS, skill, "tools")
+    if d not in sys.path:
+        sys.path.insert(0, d)
+    spec = importlib.util.spec_from_file_location(mod_name, os.path.join(d, name + ".py"))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except BaseException:
+        sys.modules.pop(mod_name, None)
+        raise
+    return mod
+
+
+PROPOSAL_WAIT_GO, PROPOSAL_WAIT_DECISION, ATASK_PROPOSAL = "candidate: ", "adr ready: ", "proposal: "
+
+
+def actions_for(t: dict) -> list:
+    """Buttons the page may show for this task revision (the server re-checks on click)."""
+    s, kind, err = t["status"], t["kind"], str(t.get("last_error") or "")
+    out = []
+    if kind == "proposal" and s == "blocked" and err.startswith(PROPOSAL_WAIT_GO):
+        out += ["proposal_go", "proposal_reject"]
+    elif kind == "proposal" and s == "blocked" and err.startswith(PROPOSAL_WAIT_DECISION):
+        out += ["proposal_accept", "proposal_reject"]
+    elif kind == "atask_intake" and s == "blocked" and err.startswith(ATASK_PROPOSAL):
+        out += ["atask_accept"]
+    elif s == "blocked":
+        out.append("unblock")
+    if s == "failed":
+        out.append("retry")
+    if s in store_mod.OPEN or s == "failed":
+        out.append("cancel")
+    return out
+
+
+def do_action(body: dict) -> dict:
+    from agent_skill_toolkit.core import human
+    tid, action = str(body.get("id") or ""), str(body.get("action") or "")
+    note = str(body.get("note") or "").strip()[:1000]
+    upd = body.get("updated")
+    if not tid or not action:
+        raise ValueError("id and action are required")
+    if not isinstance(upd, (int, float)):
+        raise ValueError("updated (the revision you looked at) is required")
+    with store_mod.Store() as st:
+        t = st.get(tid)
+    if not t:
+        raise LookupError(f"no task {tid}")
+    if t["updated"] != upd:
+        raise RuntimeError("việc đã thay đổi từ lúc bạn mở — xem lại rồi bấm lại")
+    if action not in actions_for(t):
+        raise ValueError(f"'{action}' không áp dụng cho việc đang ở trạng thái {t['status']}")
+    by = "human:dashboard"
+    with human.web_decision(by):
+        if action in ("unblock", "retry", "cancel"):
+            with store_mod.Store() as st:
+                if action == "unblock":
+                    ok = st.unblock(tid, by=by, if_updated=upd, note=note)
+                elif action == "retry":
+                    ok = st.retry(tid, by=by, if_updated=upd, note=note)
+                else:
+                    if not note:
+                        raise ValueError("ghi lý do huỷ (để sau này còn biết vì sao)")
+                    ok = st.cancel(tid, by=by, failed_too=True, if_updated=upd, note=note)
+            if not ok:
+                raise RuntimeError("việc đã thay đổi từ lúc bạn mở — xem lại rồi bấm lại")
+            return {"id": tid, "action": action, "ok": True}
+        if action == "atask_accept":
+            lane = str(body.get("lane") or "")
+            return _tool("auto-dev", "coordinator").accept(tid, lane)
+        p = _tool("auto-dev", "proposals")
+        if action == "proposal_go":
+            return p.cmd_go(tid)
+        if action == "proposal_accept":
+            return p.cmd_decide(tid, "accept", note)
+        if action == "proposal_reject":
+            if not note:
+                raise ValueError("ghi lý do từ chối (được nhớ để không đề xuất lại)")
+            return p.cmd_decide(tid, "reject", note)
+    raise ValueError(f"unknown action {action}")
+
+
+# ----------------------------------------------------------------------------- assign work (edit key)
+
+def _repo_root() -> str:
+    return status_mod._repo_root()
+
+
+def _work_dir() -> str:
+    return os.environ.get("WORK_DIR") or os.path.join(_repo_root(), "work")
+
+
+def read_repos() -> dict:
+    """Checkouts the form can target: registry clones + worktrees under work/wt/<project>/<name>.
+    Names and paths only (no git call)."""
+    work = _work_dir()
+    out = []
+    try:
+        with open(os.path.join(work, "projects.json"), encoding="utf-8") as f:
+            reg = json.load(f)
+    except (OSError, ValueError):
+        reg = {}
+    projects = reg.get("projects", reg) if isinstance(reg, dict) else {}
+    for name, p in sorted(projects.items()) if isinstance(projects, dict) else []:
+        cd = str((p or {}).get("clone_dir") or "") if isinstance(p, dict) else ""
+        if cd.startswith("work:"):
+            cd = os.path.join(work, cd[5:])
+        if cd and os.path.isdir(cd):
+            out.append({"project": name, "kind": "clone", "path": os.path.normpath(cd),
+                        "default_branch": p.get("default_branch") or ""})
+    wt = os.path.join(work, "wt")
+    if os.path.isdir(wt):
+        for proj in sorted(os.listdir(wt)):
+            pd = os.path.join(wt, proj)
+            if not os.path.isdir(pd):
+                continue
+            for n in sorted(os.listdir(pd)):
+                if os.path.isdir(os.path.join(pd, n)):
+                    out.append({"project": proj, "kind": "worktree", "name": n,
+                                "path": os.path.normpath(os.path.join(pd, n))})
+    return {"repos": out}
+
+
+def _inside_work(path: str) -> str:
+    """The form may only point at checkouts under work/ (registry clones / worktrees)."""
+    real = os.path.realpath(path)
+    work = os.path.realpath(_work_dir())
+    if not real.lower().startswith(work.lower() + os.sep):
+        raise ValueError("repo phải nằm trong work/ (clone trong registry hoặc worktree)")
+    if not os.path.isdir(real):
+        raise ValueError(f"không có thư mục {path}")
+    return real
+
+
+def do_assign(body: dict) -> dict:
+    """New work from the form -> a task in the store (the Coordinator tab runs it)."""
+    kind = str(body.get("kind") or "")
+    if kind == "verify":
+        repo = _inside_work(str(body.get("repo") or ""))
+        v = _tool("auto-dev", "verify")
+        acs = v.parse_acs(str(body.get("acs") or "").splitlines())
+        return v.start(repo, str(body.get("base") or ""), "", str(body.get("fixer_role") or "implement"),
+                       False, acs)
+    if kind == "proposal":
+        repo = _inside_work(str(body.get("repo") or ""))
+        q = str(body.get("question") or "").strip()
+        if len(q) < 10:
+            raise ValueError("câu hỏi quá ngắn")
+        return _tool("auto-dev", "proposals").cmd_new(repo, q[:2000], str(body.get("criteria") or "")[:2000])
+    if kind == "review_mr":
+        text = str(body.get("text") or "").strip()
+        if not text:
+            raise ValueError("dán link MR (hoặc project!iid)")
+        return _tool("mr-review", "review_flow").enqueue_text(text[:4000], str(body.get("project") or ""),
+                                                             source="manual", requester="dashboard")
+    raise ValueError("kind must be verify | proposal | review_mr")
+
+
 READERS = {"store": "read_store", "accounts": "read_accounts", "reviews": "read_reviews",
            "approvals": "read_approvals", "daemons": None, "runs": None, "queue": None,
            "forwards": "read_forwards", "feedback": None}
@@ -340,6 +586,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True, "data": read_settings(), "editable": bool(self.edit_key)})
             except Exception as e:  # noqa: BLE001
                 return self._json(200, {"ok": False, "error": redact(f"{type(e).__name__}: {e}")[:300]})
+        if path == "/api/task":
+            from urllib.parse import parse_qs
+            tid = (parse_qs(query).get("id") or [""])[0]
+            try:
+                return self._json(200, {"ok": True, "data": read_task(tid), "editable": bool(self.edit_key)})
+            except (LookupError, FileNotFoundError) as e:
+                return self._json(404, {"ok": False, "error": redact(str(e))[:300]})
+            except Exception as e:  # noqa: BLE001
+                return self._json(200, {"ok": False, "error": redact(f"{type(e).__name__}: {e}")[:300]})
+        if path == "/api/repos":
+            return self._json(200, {"ok": True, "data": _clean(read_repos())})
         return self._send(404, b"not found", "text/plain; charset=utf-8")
 
     def _json(self, code: int, obj):
@@ -381,16 +638,20 @@ class Handler(BaseHTTPRequestHandler):
                 n -= len(self.rfile.read(min(n, 65536)) or b"x" * n)
         return None
 
+    POST_ROUTES = ("/api/settings", "/api/action", "/api/assign")
+
     def do_POST(self):  # noqa: N802
         raw = self._drain()
         path = self.path.partition("?")[0]
-        if path != "/api/settings":
+        if path not in self.POST_ROUTES:
             return self._send(405, b"read-only", "text/plain; charset=utf-8")
         why = self._write_allowed()
         if why:
             return self._json(403, {"ok": False, "error": why})
         if not raw:
             return self._json(413, {"ok": False, "error": "body missing or too large"})
+        if path != "/api/settings":
+            return self._human_post(path, raw)
         try:
             body = json.loads(raw.decode("utf-8"))
             if not isinstance(body, dict):                     # null / [] / "x" (Codex settings R1 #5)
@@ -405,6 +666,37 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(503, {"ok": False, "error": redact(f"không ghi được: {type(e).__name__}: {e}")[:400]})
         self.snapshots.wanted.set()                            # capacity / caps show at once
         return self._json(200, {"ok": True, **out})
+
+    @staticmethod
+    def _hint(msg: str) -> str:
+        """A known cause the person can fix, in front of the raw error."""
+        low = msg.lower()
+        if "invalid_token" in low or ("401" in msg and "gitlab" in low):
+            return ("Token GitLab hết hạn / sai — tạo Personal Access Token mới (scope api) rồi sửa "
+                    "GITLAB_PRIVATE_TOKEN trong .env. Chi tiết: " + msg)
+        return msg
+
+    def _human_post(self, path: str, raw: bytes):
+        """/api/action and /api/assign: a human decision (edit key already checked). Errors come back
+        as a message, never a traceback; a task that changed meanwhile is 409."""
+        try:
+            body = json.loads(raw.decode("utf-8"))
+            if not isinstance(body, dict):
+                raise ValueError("body must be a JSON object")
+            out = do_action(body) if path == "/api/action" else do_assign(body)
+        except PermissionError as e:
+            return self._json(403, {"ok": False, "error": self._hint(redact(str(e)))[:600]})
+        except LookupError as e:
+            return self._json(404, {"ok": False, "error": self._hint(redact(str(e)))[:600]})
+        except RuntimeError as e:                              # changed meanwhile / tool refused
+            return self._json(409, {"ok": False, "error": self._hint(redact(str(e)))[:600]})
+        except (ValueError, UnicodeDecodeError, FileNotFoundError, OSError) as e:
+            return self._json(400, {"ok": False, "error": self._hint(redact(f"{e}"))[:600]})
+        except Exception as e:  # noqa: BLE001 — a tool failure is a message on the page
+            return self._json(500, {"ok": False, "error": self._hint(redact(f"{type(e).__name__}: {e}"))[:600]})
+        sys.stderr.write(f"dashboard: {path} {json.dumps({k: body.get(k) for k in ('action', 'kind', 'id')})}\n")
+        self.snapshots.wanted.set()
+        return self._json(200, {"ok": True, "result": _clean(out)})
 
     def _refuse(self):
         self._drain()

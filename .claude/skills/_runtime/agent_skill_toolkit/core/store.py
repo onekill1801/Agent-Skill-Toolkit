@@ -509,12 +509,32 @@ class Store:
                      error=error, attempts=attempts)
         return status
 
-    def unblock(self, task_id: str, by: str = ""):
+    def unblock(self, task_id: str, by: str = "", if_updated: float = None, note: str = ""):
+        """blocked -> queued. if_updated: only the exact revision the caller looked at (a dashboard
+        click on a task that changed meanwhile does nothing)."""
+        q, args = "update tasks set status='queued', updated=? where id=? and status='blocked'", [time.time(), task_id]
+        if if_updated is not None:
+            q += " and updated=?"
+            args.append(if_updated)
         with self._tx():
-            n = self.db.execute("update tasks set status='queued', updated=? where id=? and status='blocked'",
-                                (time.time(), task_id)).rowcount
+            n = self.db.execute(q, args).rowcount
             if n:
-                self._event(task_id, "unblocked", by=by)
+                self._event(task_id, "unblocked", by=by, note=note or None)
+        return bool(n)
+
+    def retry(self, task_id: str, by: str = "", if_updated: float = None, note: str = "") -> bool:
+        """failed -> queued with a fresh attempt budget (a human looked at the failure and wants another
+        run). Valid checkpoints are kept: the run resumes, it does not start over."""
+        q = ("update tasks set status='queued', attempts=0, resume_at=null, updated=? "
+             "where id=? and status='failed'")
+        args = [time.time(), task_id]
+        if if_updated is not None:
+            q += " and updated=?"
+            args.append(if_updated)
+        with self._tx():
+            n = self.db.execute(q, args).rowcount
+            if n:
+                self._event(task_id, "retried", by=by, note=note or None)
         return bool(n)
 
     def resolve_blocked(self, task_id: str, status: str = "done", by: str = "", note: str = "",
@@ -610,17 +630,21 @@ class Store:
                     self._event(r["id"], "blocked", error=why)
                     out.append(r["id"])
 
-    def cancel(self, task_id: str, by: str = "", failed_too: bool = False):
+    def cancel(self, task_id: str, by: str = "", failed_too: bool = False, if_updated: float = None,
+               note: str = ""):
         """Open task -> cancelled. failed_too: also dismiss a FAILED one (clears it from the problem lists;
-        dependents treat failed and cancelled alike)."""
+        dependents treat failed and cancelled alike). if_updated: only the revision the caller looked at."""
         allowed = OPEN + (("failed",) if failed_too else ())
+        q = (f"update tasks set status='cancelled', lease_owner=null, lease_token=null, lease_until=null, "
+             f"updated=? where id=? and status in ({','.join('?' * len(allowed))})")
+        args = [time.time(), task_id, *allowed]
+        if if_updated is not None:
+            q += " and updated=?"
+            args.append(if_updated)
         with self._tx():
-            n = self.db.execute(
-                f"update tasks set status='cancelled', lease_owner=null, lease_token=null, lease_until=null, "
-                f"updated=? where id=? and status in ({','.join('?' * len(allowed))})",
-                (time.time(), task_id, *allowed)).rowcount
+            n = self.db.execute(q, args).rowcount
             if n:
-                self._event(task_id, "cancelled", by=by)
+                self._event(task_id, "cancelled", by=by, note=note or None)
         return bool(n)
 
     # ------------------------------------------------------------------ usage / events
