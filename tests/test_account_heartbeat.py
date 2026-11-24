@@ -97,5 +97,23 @@ class TokenOwnerTest(unittest.TestCase):
         self.assertFalse(any("warning" in r for r in rows))
 
 
+class ParallelSplitTest(unittest.TestCase):
+    """24/11: 'I want 10 sessions in parallel, split over the active accounts'."""
+    CFG = {"parallel": {"claude": 10}, "limits": {"codex@main": {"max_parallel": 2}},
+           "accounts": {"claude": {n: {} for n in ("a", "b", "c", "d")}, "codex": {"main": {}}}}
+
+    def test_split_over_live_accounts(self):
+        import agent_runner as ar
+        dead = {"c", "d"}
+        with mock.patch.object(ar, "account_dead", side_effect=lambda cfg, b, n: "x" if n in dead else ""):
+            self.assertEqual(ar.account_limit(self.CFG, "claude", "a"), 5)          # 10 / 2 live
+            dead.discard("c")
+            self.assertEqual(ar.account_limit(self.CFG, "claude", "a"), 4)          # ceil(10 / 3)
+            dead.update({"a", "b", "c", "d"})
+            self.assertEqual(ar.account_limit(self.CFG, "claude", "a"), 10)         # none live: never 0
+            self.assertEqual(ar.account_limit(self.CFG, "codex", "main"), 2)        # no total: per-account limit
+            self.assertEqual(ar.account_limit({}, "claude", "a"), 99)
+
+
 if __name__ == "__main__":
     unittest.main()

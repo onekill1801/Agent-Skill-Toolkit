@@ -572,6 +572,31 @@ def login_ended(backend: str, env_extra: dict) -> str:
     return ""
 
 
+def account_dead(cfg: dict, backend: str, account: str) -> str:
+    """'' when this account can run, else why not (dead login inside the cooldown / blanked credentials)."""
+    key = f"{backend}@{account or 'default'}"
+    env_extra = _account_env(cfg, backend, account)
+    bad = auth_bad(key, auth_fingerprint(backend, env_extra))
+    return str(bad.get("message") or "login failed") if bad else login_ended(backend, env_extra)
+
+
+def active_accounts(cfg: dict, backend: str) -> list:
+    """Names of this backend's accounts (agents.json) that can run right now."""
+    return [n for n in ((cfg.get("accounts") or {}).get(backend) or {}) if not account_dead(cfg, backend, n)]
+
+
+def account_limit(cfg: dict, backend: str, account: str) -> int:
+    """Parallel sessions allowed on ONE account. `"parallel": {"claude": 10}` in agents.json = 10 sessions
+    in total for that backend, split evenly over its LIVE accounts (2 live -> 5 each; a re-login spreads
+    them again). Without it: limits.<backend@account>.max_parallel (default 99), as before."""
+    import math
+    total = (cfg.get("parallel") or {}).get(backend)
+    if isinstance(total, (int, float)) and not isinstance(total, bool) and total > 0:
+        return max(1, math.ceil(total / max(1, len(active_accounts(cfg, backend)))))
+    key = f"{backend}@{account or 'default'}"
+    return int(((cfg.get("limits") or {}).get(key) or {}).get("max_parallel", 99))
+
+
 def _limited_path(key: str) -> str:
     return os.path.join(slots_dir(), "limited", key.replace("/", "_").replace(":", "_") + ".json")
 
@@ -694,7 +719,7 @@ def run_role(prompt: str, role: str, *, system: str = None, cwd: str = None,
             tried.append({"spec": spec, "skipped": "login failed", "kind": "auth",
                           "error": str(bad.get("message") or "")[:120]})
             continue
-        limit = int(((cfg.get("limits") or {}).get(key) or {}).get("max_parallel", 99))
+        limit = account_limit(cfg, c["backend"], c["account"])
         slot = _Slot(key, limit, {"spec": spec, "role": role, "task_id": os.environ.get("TOOLKIT_TASK_ID", ""),
                                   "step": os.environ.get("TOOLKIT_STEP", "")})
         if slot.__enter__() is None:

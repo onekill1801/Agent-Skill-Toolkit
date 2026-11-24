@@ -287,6 +287,14 @@ def gather(orca_timeout: int = orca_adapter.DEFAULT_TIMEOUT, api: bool = True) -
                 r["warning"] = (r.get("warning") + "; " if r.get("warning") else "") +                     f"dùng CHUNG token với {others} — thực ra là cùng một tài khoản Claude (dung lượng và slot dùng chung)"
     if err:
         out["orca_error"] = err
+    par = {}
+    for backend, total in (cfg.get("parallel") or {}).items():
+        live = agent_runner.active_accounts(cfg, backend)
+        par[backend] = {"total": total, "active": len(live), "per_account": agent_runner.account_limit(cfg, backend, "")}
+    if par:
+        out["parallel"] = par
+    for r in out["accounts"]:
+        r["max_parallel"] = agent_runner.account_limit(cfg, r["backend"], r["name"])
     hb = _read_json(heartbeat_path())
     if hb.get("at"):
         out["heartbeat"] = {"at": hb["at"], "interval_s": heartbeat_interval_s()}
@@ -435,6 +443,8 @@ def render(rep: dict) -> str:
         o = rep["unattributed"]
         lines.append(f"{o['account']:<20} {'':<22} {'':>6}  {'':>8}  {'':<10}  {'':<15}  {o['today']['runs']} lượt"
                      f"{'':<3}  {len(o['running'])} đang chạy")
+    for b, p in (rep.get("parallel") or {}).items():
+        lines.append(f"Song song {b}: tổng {p['total']} phiên / {p['active']} tài khoản sống → tối đa {p['per_account']} phiên mỗi tài khoản")
     lines.append("")
     lines.append("* = tài khoản Orca đang chọn (số liệu trực tiếp). Tài khoản khác: số Orca đọc lần cuối.")
     lines.append("reset? = đã qua giờ reset sau lần đọc đó — số mới chưa biết. Chọn tài khoản đó trong Orca để cập nhật.")

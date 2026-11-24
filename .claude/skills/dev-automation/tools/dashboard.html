@@ -497,6 +497,14 @@ function loginLine(lg) {
     ["(mở tài khoản trong Orca)", "khi báo 'token hết hạn' — toolkit không tự gia hạn token"],
   ],
   reviews: [
+    for (const [b, p] of Object.entries(d.parallel || {}))
+      html += `<div class="note">Song song ${esc(b)}: tổng ${esc(p.total)} phiên / ${esc(p.active)} tài khoản sống → tối đa ${esc(p.per_account)} phiên mỗi tài khoản</div>`;
+    const hb = d.heartbeat;
+    const late = !hb || (Date.now() / 1000 - hb.at) > 3 * (hb.interval_s || 300);
+    html += `<div class="${late ? "err" : "note"}">Heartbeat tài khoản: ${hb ? "kiểm tra lần cuối " + ago(hb.at) : "chưa chạy lần nào"}` +
+            `${late ? " — Coordinator không chạy? (hoặc: accounts.py --heartbeat)" : ""}</div>`;
+    const dead = (d.accounts || []).filter((a) => a.routing && a.routing.state === "skipped").length;
+    if (dead) html = `<div class="err">${dead}/${(d.accounts || []).length} tài khoản không chạy được — xem dòng ✗ bên dưới.</div>` + html;
     const hb = d.heartbeat;
     const late = !hb || (Date.now() / 1000 - hb.at) > 3 * (hb.interval_s || 300);
     html += `<div class="${late ? "err" : "note"}">Heartbeat tài khoản: ${hb ? "kiểm tra lần cuối " + ago(hb.at) : "chưa chạy lần nào"}` +
