@@ -411,7 +411,10 @@ function renderAccounts() {
       const last = a.last ? `<div class="note">gần nhất: ${esc(a.last.model || "")} ${esc(a.last.task_id || "")} · ${ago(a.last.ts)}</div>` : "";
       return [`<b>${esc(a.account)}${a.orca_active ? " *" : ""}</b><div class="note">${esc(a.email || "")}${a.org ? " · " + esc(a.org) : ""}</div>` +
               (a.warning ? `<div class="note" style="color:var(--bad)">${esc(a.warning)}</div>` : "") +
-              (a.api_error && a.usage_source !== "api" ? `<div class="note" style="color:var(--warn)">không đọc trực tiếp được: ${esc(a.api_error)}</div>` : ""),
+              (a.api_error && a.usage_source !== "api" ? `<div class="note" style="color:var(--warn)">không đọc trực tiếp được: ${esc(a.api_error)}</div>` : "") +
+              (a.routing && a.routing.state === "skipped" ? `<div class="note" style="color:var(--bad)">✗ agent BỎ QUA tài khoản này: ${esc(a.routing.reason || "")}</div>` : "") +
+              Object.entries((a.routing && a.routing.limited) || {}).map(([m, t]) => `<div class="note" style="color:var(--warn)">⏸ ${esc(m)} hết lượt tới ${esc(clock(t))}</div>`).join("") +
+              loginLine(a.login),
         pct(u.session), pct(u.weekly), resets.length ? esc(clock(Math.min(...resets))) : "", `<span class="note">${esc(src)}</span>`,
         `${a.today.runs} lượt<div class="note">${Math.round(a.today.seconds / 60)} phút</div>`, doing + last];
     });
@@ -467,6 +470,15 @@ const HELP = {
     [`${MR}/review_rules.py check <job>`, "vì sao review không được tự đăng"],
     [`${MR}/review_post.py request-approval <job>`, "gửi lại thẻ duyệt khi thẻ cũ hết hạn"],
     [`${DA}/taskstore.py unblock <id>`, "cho việc bị chặn chạy tiếp (sau khi bạn đã xử lý tay)"],
+function loginLine(lg) {
+  if (!lg || !lg.expires_at) return "";
+  const day = (t) => new Date(t * 1000).toLocaleDateString("vi-VN");
+  if (lg.mode === "token")
+    return `<div class="note">🔑 token dài hạn, hạn ~${esc(day(lg.expires_at))} <span title="token không ghi hạn: ngày lưu file + 1 năm">(ước tính)</span></div>`;
+  const gone = lg.ended || lg.expires_at < Date.now() / 1000;
+  return `<div class="note" style="${gone ? "color:var(--bad)" : ""}">🔑 đăng nhập ${gone ? "ĐÃ HẾT HẠN" : "hết hạn"} ${esc(day(lg.expires_at))}</div>`;
+}
+
     [`${DA}/taskstore.py cancel <id>`, "huỷ việc"],
   ],
   tasks: [
@@ -485,6 +497,12 @@ const HELP = {
     ["(mở tài khoản trong Orca)", "khi báo 'token hết hạn' — toolkit không tự gia hạn token"],
   ],
   reviews: [
+    const hb = d.heartbeat;
+    const late = !hb || (Date.now() / 1000 - hb.at) > 3 * (hb.interval_s || 300);
+    html += `<div class="${late ? "err" : "note"}">Heartbeat tài khoản: ${hb ? "kiểm tra lần cuối " + ago(hb.at) : "chưa chạy lần nào"}` +
+            `${late ? " — Coordinator không chạy? (hoặc: accounts.py --heartbeat)" : ""}</div>`;
+    const dead = (d.accounts || []).filter((a) => a.routing && a.routing.state === "skipped").length;
+    if (dead) html = `<div class="err">${dead}/${(d.accounts || []).length} tài khoản không chạy được — xem dòng ✗ bên dưới.</div>` + html;
     [`${MR}/review_flow.py status`, "các review đang mở"],
     [`${MR}/review_flow.py work --once`, "chạy một lượt review bằng tay (thường tab Coordinator tự làm)"],
     [`${MR}/review_flow.py reconcile`, "MR có commit mới → xếp review lại; việc đã duyệt → đi tiếp"],

@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import shutil
 import time
 import unittest
 import urllib.parse
@@ -927,6 +928,14 @@ class GuardHookTest(unittest.TestCase):
 
 
 class RoleRoutingTest(unittest.TestCase):
+    def setUp(self):
+        import agent_runner as ar                       # never the real temp/agent_slots (limited / auth_bad marks)
+        self._tmp = tempfile.mkdtemp()
+        p = mock.patch.object(ar, "slots_dir", return_value=self._tmp)
+        p.start()
+        self.addCleanup(p.stop)
+        self.addCleanup(shutil.rmtree, self._tmp, True)
+
     def test_fallback_on_rate_limit_and_avoid(self):
         import agent_runner as ar
         cfg = {"roles": {"review": ["claude:sonnet", "codex"]}, "limits": {}}
@@ -943,9 +952,9 @@ class RoleRoutingTest(unittest.TestCase):
             self.assertEqual(ar.run_role("p", "review")["used"], "codex")
             self.assertEqual(calls, ["claude", "codex"])
             calls.clear()
-            with self.assertRaises(ar.AgentRunError):      # codex avoided, claude rate-limited
+            with self.assertRaises(ar.AgentQuotaError):    # codex avoided, claude rate-limited
                 ar.run_role("p", "review", avoid=("codex",))
-            self.assertEqual(calls, ["claude"])
+            self.assertEqual(calls, [])                    # remembered until its reset: not spawned again
 
     def test_non_retryable_error_raises(self):
         import agent_runner as ar

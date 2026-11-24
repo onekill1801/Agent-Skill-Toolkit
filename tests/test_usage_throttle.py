@@ -248,36 +248,95 @@ class TurnBudgetTest(Base):
         with self.assertRaises(quota.QuotaExceeded):
             self.ar.run_role("p", "r")
 
-    def test_logged_out_accounts_are_skipped_then_tried_last(self):
-        """2026-11-04: three expired logins used all 3 attempts of a review while one account worked."""
-        with open(os.path.join(self.tmp, "agents.json"), "w") as f:
-            json.dump({"roles": {"r": ["claude:opus@a", "claude:opus@b", "claude:opus@c"]}}, f)
-        dead = {"a", "b"}
-        calls = []
-
+    def _dead_login_patches(self, dead, calls, fps):
         def fake_turn(prompt, **kw):
             calls.append(kw["account"])
             if kw["account"] in dead:
                 out = "Failed to authenticate: OAuth session expired and could not be refreshed"
                 raise self.ar._cli_failure(f"CLI 'claude' exit 1: {out}", "\n" + out)    # as _run_cli does
             return "ok"
-        with mock.patch.object(self.ar, "slots_dir", return_value=os.path.join(self.tmp, "slots")), \
-                mock.patch.object(self.ar, "_balanced", side_effect=lambda specs, cfg: specs), \
-                mock.patch.object(self.ar, "run_turn", side_effect=fake_turn):
+        return [mock.patch.object(self.ar, "slots_dir", return_value=os.path.join(self.tmp, "slots")),
+                mock.patch.object(self.ar, "_balanced", side_effect=lambda specs, cfg: specs),
+                mock.patch.object(self.ar, "login_ended", return_value=""),
+                mock.patch.object(self.ar, "auth_fingerprint", side_effect=lambda b, env: fps.get(env.get("ACCT"), "x")),
+                mock.patch.object(self.ar, "run_turn", side_effect=fake_turn)]
+
+    def test_logged_out_accounts_are_skipped_until_their_login_changes(self):
+        """2026-11-04: three expired logins used all 3 attempts of a review while one account worked.
+        2026-11-24: 6 dead logins x 2 models were spawned on EVERY turn - now skipped without a spawn."""
+        accts = {n: {"env": {"ACCT": n}} for n in "abc"}
+        with open(os.path.join(self.tmp, "agents.json"), "w") as f:
+            json.dump({"roles": {"r": ["claude:opus@a", "claude:opus@b", "claude:opus@c", "claude:sonnet@a"]},
+                       "accounts": {"claude": accts}}, f)
+        dead, calls, fps = {"a", "b"}, [], {"a": "a1", "b": "b1", "c": "c1"}
+        patches = self._dead_login_patches(dead, calls, fps)
+        for p in patches:
+            p.start()
+        try:
             self.assertEqual(self.ar.run_role("p", "r")["used"], "claude:opus@c")    # same attempt, moves on
             self.assertEqual(calls, ["a", "b", "c"])
             calls.clear()
-            self.assertEqual(self.ar.run_role("p", "r")["used"], "claude:opus@c")    # dead logins go last
-            self.assertEqual(calls, ["c"])
-            dead.discard("a")                                                        # a re-logged in
+            out = self.ar.run_role("p", "r")
+            self.assertEqual((out["used"], calls), ("claude:opus@c", ["c"]))        # dead logins: no spawn
+            self.assertEqual([t.get("skipped") for t in out["tried"]], ["login failed", "login failed"])
+            dead.discard("a")                                                        # a logged in again...
             dead.add("c")
             calls.clear()
-            self.assertEqual(self.ar.run_role("p", "r")["used"], "claude:opus@a")    # still tried as last resort
-            self.assertFalse(self.ar.auth_bad("claude@a"))
-            dead.update({"a", "b", "c"})
-            with self.assertRaises(self.ar.AgentRunError) as e:
+            with self.assertRaises(self.ar.AgentRunError) as e:                     # ...but nothing changed yet
                 self.ar.run_role("p", "r")
+            self.assertEqual(calls, ["c"])
             self.assertEqual(e.exception.classification["kind"], "auth")             # -> review blocked, not failed
+            fps["a"] = "a2"                                                          # its credentials file changed
+            calls.clear()
+            self.assertEqual(self.ar.run_role("p", "r")["used"], "claude:opus@a")    # tried again at once
+            self.assertEqual(calls, ["a"])
+            self.assertFalse(self.ar.auth_bad("claude@a", "a2"))
+        finally:
+            for p in patches:
+                p.stop()
+
+    def test_usage_limited_account_model_is_skipped_until_reset(self):
+        with open(os.path.join(self.tmp, "agents.json"), "w") as f:
+            json.dump({"roles": {"r": ["claude:opus@a", "claude:opus@b", "claude:sonnet@a"]}}, f)
+        calls, reset = [], int(time.time() + 3600)
+
+        def fake_turn(prompt, **kw):
+            calls.append((kw["account"], kw["model"]))
+            if kw["model"] == "opus":
+                out = f"Claude AI usage limit reached|{reset}"
+                raise self.ar._cli_failure(f"CLI 'claude' exit 1: {out}", "\n" + out)
+            return "ok"
+        with mock.patch.object(self.ar, "slots_dir", return_value=os.path.join(self.tmp, "slots")), \
+                mock.patch.object(self.ar, "_balanced", side_effect=lambda specs, cfg: specs), \
+                mock.patch.object(self.ar, "login_ended", return_value=""), \
+                mock.patch.object(self.ar, "run_turn", side_effect=fake_turn):
+            self.assertEqual(self.ar.run_role("p", "r")["used"], "claude:sonnet@a")  # opus limited, sonnet runs
+            calls.clear()
+            self.assertEqual(self.ar.run_role("p", "r")["used"], "claude:sonnet@a")
+            self.assertEqual(calls, [("a", "sonnet")])                               # limited ones: no spawn
+            self.assertGreater(self.ar.limited_until("claude@a:opus"), time.time())
+            self.assertEqual(self.ar.limited_until("claude@a:sonnet"), 0)
+            with open(os.path.join(self.tmp, "agents.json"), "w") as f:
+                json.dump({"roles": {"r": ["claude:opus@a", "claude:opus@b"]}}, f)
+            with self.assertRaises(self.ar.AgentQuotaError) as e:                   # all limited: pause till reset
+                self.ar.run_role("p", "r")
+            self.assertEqual(int(e.exception.classification["resume_at"]), reset)
+
+    def test_login_ended_reads_a_blanked_credentials_file(self):
+        d = os.path.join(self.tmp, "cfg")
+        os.makedirs(d)
+        with open(os.path.join(d, ".credentials.json"), "w") as f:
+            json.dump({"claudeAiOauth": {"accessToken": "", "refreshToken": "", "expiresAt": 0}}, f)
+        clean = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")}
+        with mock.patch.dict(os.environ, clean, clear=True):
+            self.assertIn("login ended", self.ar.login_ended("claude", {"CLAUDE_CONFIG_DIR": d}))
+            self.assertEqual(self.ar.login_ended("claude", {"CLAUDE_CONFIG_DIR": d, "CLAUDE_CODE_OAUTH_TOKEN": "t"}), "")
+            self.assertEqual(self.ar.login_ended("claude", {"CLAUDE_CONFIG_DIR": os.path.join(self.tmp, "no")}), "")
+            self.assertEqual(self.ar.login_ended("codex", {}), "")
+            a = self.ar.auth_fingerprint("claude", {"CLAUDE_CONFIG_DIR": d})
+            b = self.ar.auth_fingerprint("claude", {"CLAUDE_CONFIG_DIR": d, "CLAUDE_CODE_OAUTH_TOKEN": "secret-tok"})
+            self.assertNotEqual(a, b)
+            self.assertNotIn("secret", b)
 
     def test_account_token_comes_from_a_secret_file(self):
         os.makedirs(os.path.join(self.tmp, "secrets"))

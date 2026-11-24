@@ -155,3 +155,94 @@ def usage_for(account_env: dict, timeout: float = TIMEOUT_S, now: float = None) 
         return {"error": "bad_response"}
     except OSError:                                       # timeouts, resets
         return {"error": "network"}
+
+
+# ----------------------------------------------------------------------------- long-lived token accounts
+# A `claude setup-token` token is refused by the usage endpoint (403, needs scope user:profile —
+# verified 2026-11-24), but every /v1/messages answer carries the SAME numbers as headers
+# (verified 2026-11-24 on a setup-token account):
+#     anthropic-ratelimit-unified-5h-utilization: 0.01      (fraction, 0..1)
+#     anthropic-ratelimit-unified-5h-reset: 1795524600      (epoch seconds)
+#     anthropic-ratelimit-unified-7d-utilization / -7d-reset / -status
+# probe() spends ONE tiny turn (max_tokens 1, CLAUDE_PROBE_MODEL, default haiku) to read them — callers
+# cache it (accounts.py: TOKEN_PROBE_S).
+
+MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+PROBE_MODEL = "claude-haiku-5-5"
+_PROBE_SYSTEM = "You are Claude Code, Anthropic's official CLI for Claude."   # OAuth tokens are Claude Code's
+
+
+def _hdr_bucket(headers, name: str):
+    try:
+        used = float(headers.get(f"anthropic-ratelimit-unified-{name}-utilization"))
+    except (TypeError, ValueError):
+        return None
+    if not 0 <= used <= 1.5:
+        return None
+    used = min(100.0, used * 100)
+    try:
+        resets = float(headers.get(f"anthropic-ratelimit-unified-{name}-reset"))
+    except (TypeError, ValueError):
+        resets = None
+    return {"used": round(used, 1), "left": round(max(0.0, 100 - used), 1), "resets_at": resets}
+
+
+def usage_from_headers(headers) -> dict:
+    out = {"session": _hdr_bucket(headers, "5h"), "weekly": _hdr_bucket(headers, "7d"), "age_min": 0}
+    if out["session"] is None and out["weekly"] is None:
+        raise ValueError("no rate-limit headers in the response")
+    return out
+
+
+def probe(token: str, timeout: float = TIMEOUT_S, now: float = None) -> dict:
+    """{"usage": {...}, "at": t, "via": "headers"} or {"error": ...} — like usage_for, never raises,
+    never returns the token or a body. A 429 still carries the headers: they are read too."""
+    now = now or time.time()
+    body = json.dumps({"model": env.get("CLAUDE_PROBE_MODEL", PROBE_MODEL) or PROBE_MODEL, "max_tokens": 1,
+                       "system": _PROBE_SYSTEM, "messages": [{"role": "user", "content": "ok"}]}).encode("utf-8")
+    req = urllib.request.Request(MESSAGES_URL, data=body, method="POST", headers={
+        "Authorization": "Bearer " + token, "anthropic-version": "2023-06-01",
+        "anthropic-beta": "oauth-2025-04-20", "content-type": "application/json", "User-Agent": USER_AGENT})
+    opener = urllib.request.build_opener(_NoRedirect(), urllib.request.HTTPSHandler(context=tls.context()))
+    try:
+        with opener.open(req, timeout=timeout) as r:
+            headers = r.headers
+            read_body(r, time.monotonic() + timeout)
+    except urllib.error.HTTPError as e:
+        headers = e.headers
+        try:
+            return {"usage": usage_from_headers(headers), "at": now, "via": "headers"}
+        except ValueError:
+            return {"error": f"http_{e.code}"}
+    except urllib.error.URLError as e:
+        reason = getattr(e, "reason", e)
+        return {"error": "tls" if "CERTIFICATE" in str(reason).upper() else "network"}
+    except OSError:
+        return {"error": "network"}
+    except ValueError:
+        return {"error": "bad_response"}
+    try:
+        out = {"usage": usage_from_headers(headers), "at": now, "via": "headers"}
+    except ValueError:
+        return {"error": "bad_response"}
+    org = headers.get("anthropic-organization-id")      # WHOSE token it is (verified 24/11: = Orca's organizationUuid)
+    if isinstance(org, str) and org.strip():
+        out["org"] = org.strip()
+    return out
+
+
+def login_info(directory: str) -> dict:
+    """When this config dir's LOGIN ends (refresh token expiry) and whether the CLI already ended it.
+    No secret is returned."""
+    try:
+        with open(os.path.join(directory, ".credentials.json"), encoding="utf-8") as f:
+            oauth = (json.load(f) or {}).get("claudeAiOauth") or {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+    if not isinstance(oauth, dict):
+        return {}
+    exp = oauth.get("refreshTokenExpiresAt")
+    out = {"expires_at": exp / 1000 if isinstance(exp, (int, float)) and not isinstance(exp, bool) and exp else None}
+    if oauth.get("loginEnded") or not oauth.get("accessToken"):
+        out["ended"] = str(oauth.get("loginEnded") or "no_token")
+    return out

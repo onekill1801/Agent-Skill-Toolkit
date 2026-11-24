@@ -55,6 +55,11 @@ def load_registry(kinds: list = None) -> tuple:
             hooks.append(review_flow.reconcile)
     except Exception as e:  # noqa: BLE001
         warn.append(f"review_mr unavailable: {type(e).__name__}: {e}")
+    try:
+        import accounts                     # account heartbeat: self-throttled (ACCOUNT_HEARTBEAT_S), no model turn
+        hooks.append(accounts.heartbeat)
+    except Exception as e:  # noqa: BLE001
+        warn.append(f"account heartbeat unavailable: {type(e).__name__}: {e}")
     if kinds:
         unknown = [k for k in kinds if k not in reg]
         if unknown:

@@ -55,6 +55,7 @@ runpy.run_path(os.path.join(_SKILLS, "_runtime", "bootstrap.py"))["activate"]()
 from agent_skill_toolkit.core import proc as proc_mod  # noqa: E402
 from agent_skill_toolkit.core import paths  # noqa: E402
 from agent_skill_toolkit.core import winexec  # noqa: E402
+from agent_skill_toolkit.integrations import claude_usage as CU  # noqa: E402
 from agent_skill_toolkit.workflows.execution import quota  # noqa: E402
 from agent_skill_toolkit.workflows.execution import usage as usage_mod  # noqa: E402
 
@@ -500,22 +501,104 @@ def auth_cooldown_s() -> int:
         return 3600
 
 
-def auth_bad(key: str) -> dict:
-    """{"at", "message"} while the account's last login failure is inside the cooldown, else {}."""
+def auth_bad(key: str, fingerprint: str = None) -> dict:
+    """{"at", "message"} while the account's last login failure is inside the cooldown AND nothing about
+    its login changed since (`fingerprint`, see auth_fingerprint: a re-login / new token clears it at
+    once), else {}."""
     try:
         with open(_auth_bad_path(key), encoding="utf-8") as f:
             info = json.load(f)
+        if fingerprint and info.get("fp") != fingerprint:
+            return {}                                       # logged in again / token added since (or an old mark)
         return info if time.time() - float(info.get("at") or 0) < auth_cooldown_s() else {}
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, AttributeError):
         return {}
 
 
-def mark_auth_bad(key: str, message: str = "") -> None:
+def mark_auth_bad(key: str, message: str = "", fingerprint: str = None) -> None:
     try:
         p = _auth_bad_path(key)
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, "w", encoding="utf-8") as f:
-            json.dump({"at": time.time(), "message": message[:300]}, f, ensure_ascii=False)
+            json.dump({"at": time.time(), "message": message[:300], "fp": fingerprint}, f, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+_OWN_AUTH = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CODEX_API_KEY")
+
+
+def _auth_env(env_extra: dict) -> dict:
+    """The auth-relevant variables the agent subprocess will see (agent_env keeps _OWN_AUTH)."""
+    keys = _OWN_AUTH + ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOME", "USERPROFILE")
+    env = {k: os.environ[k] for k in keys if os.environ.get(k)}
+    env.update({k: v for k, v in (env_extra or {}).items() if k in keys})
+    return env
+
+
+def auth_fingerprint(backend: str, env_extra: dict) -> str:
+    """Hash of what a re-login changes: the agent's own token (hashed) and its credentials file
+    (path, mtime, size). Never contains a secret."""
+    import hashlib
+    env = _auth_env(env_extra)
+    parts = [f"{k}={hashlib.sha256(env[k].encode('utf-8')).hexdigest()[:16]}" for k in _OWN_AUTH if env.get(k)]
+    if backend == "claude":
+        p = os.path.join(CU.config_dir(env), ".credentials.json")
+    elif backend == "codex":
+        p = os.path.join(os.path.expanduser(env.get("CODEX_HOME") or "~/.codex"), "auth.json")
+    else:
+        p = None
+    if p:
+        try:
+            st = os.stat(p)
+            parts.append(f"{p}|{st.st_mtime_ns}|{st.st_size}")
+        except OSError:
+            parts.append(f"{p}|none")
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def login_ended(backend: str, env_extra: dict) -> str:
+    """'' or why this account can not run WITHOUT spawning it: a claude account with no token of its own
+    whose credentials file exists but holds no access token — the CLI blanks it when a login reaches its
+    time limit (seen on all 6 Orca accounts 2026-11-15). A missing file is NOT a verdict (macOS keeps
+    the login in the Keychain)."""
+    if backend != "claude":
+        return ""
+    env = _auth_env(env_extra)
+    if env.get("CLAUDE_CODE_OAUTH_TOKEN") or env.get("ANTHROPIC_API_KEY"):
+        return ""
+    if CU.read_access(CU.config_dir(env)).get("error") == "no_token":
+        return "login ended: credentials hold no token (log in again, or: claude_token setup <account>)"
+    return ""
+
+
+def _limited_path(key: str) -> str:
+    return os.path.join(slots_dir(), "limited", key.replace("/", "_").replace(":", "_") + ".json")
+
+
+def limited_until(key: str) -> float:
+    """Epoch until which this account+model is known to be usage/rate limited, else 0."""
+    try:
+        with open(_limited_path(key), encoding="utf-8") as f:
+            until = float(json.load(f).get("until") or 0)
+        return until if until > time.time() else 0.0
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0.0
+
+
+def mark_limited(key: str, until: float, limit: str = "") -> None:
+    try:
+        p = _limited_path(key)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"at": time.time(), "until": float(until), "limit": limit}, f)
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def clear_limited(key: str) -> None:
+    try:
+        os.remove(_limited_path(key))
     except OSError:
         pass
 
@@ -582,10 +665,11 @@ def run_role(prompt: str, role: str, *, system: str = None, cwd: str = None,
     def _key(spec):
         c = parse_candidate(spec)
         return f"{c['backend']}@{c['account'] or 'default'}"
-    # an account whose login just failed (expired OAuth, "time limit") goes LAST, not first: without
-    # this every turn re-tries the dead logins before reaching a working one. Still tried as a last
-    # resort, so a re-login is picked up without waiting for the cooldown.
-    specs = [s for s in specs if not auth_bad(_key(s))] + [s for s in specs if auth_bad(_key(s))]
+    # Known-dead accounts are SKIPPED without spawning them (2026-11-24: 6 ended logins were spawned on
+    # every turn, 12 specs per review, before the one working account): a login that failed inside the
+    # cooldown with nothing changed since (auth_fingerprint), a credentials file the CLI blanked
+    # (login_ended), an account+model whose usage limit has not reset yet (limited_until). A re-login
+    # or a new token changes the fingerprint, so it is tried again at once.
     tried = []
     for spec in specs:
         c = parse_candidate(spec)
@@ -593,6 +677,23 @@ def run_role(prompt: str, role: str, *, system: str = None, cwd: str = None,
             tried.append({"spec": spec, "skipped": "avoided"})
             continue
         key = _key(spec)
+        env_extra = _account_env(cfg, c["backend"], c["account"])
+        lim_key = f"{key}:{c['model'] or ''}"           # opus can be limited while sonnet still runs
+        until = limited_until(lim_key)
+        if until:
+            tried.append({"spec": spec, "skipped": "limited", "kind": "quota", "resume_at": until})
+            continue
+        fp = auth_fingerprint(c["backend"], env_extra)
+        bad = auth_bad(key, fp)
+        if not bad:
+            ended = login_ended(c["backend"], env_extra)
+            if ended:
+                mark_auth_bad(key, ended, fp)
+                bad = {"message": ended}
+        if bad:
+            tried.append({"spec": spec, "skipped": "login failed", "kind": "auth",
+                          "error": str(bad.get("message") or "")[:120]})
+            continue
         limit = int(((cfg.get("limits") or {}).get(key) or {}).get("max_parallel", 99))
         slot = _Slot(key, limit, {"spec": spec, "role": role, "task_id": os.environ.get("TOOLKIT_TASK_ID", ""),
                                   "step": os.environ.get("TOOLKIT_STEP", "")})
@@ -602,15 +703,17 @@ def run_role(prompt: str, role: str, *, system: str = None, cwd: str = None,
         try:
             text = run_turn(prompt, system=system, backend=c["backend"], model=c["model"],
                             timeout=timeout, cwd=cwd, role=role, notes=tried, read_only=read_only,
-                            env_extra=_account_env(cfg, c["backend"], c["account"]),
-                            account=c["account"] or "")
+                            env_extra=env_extra, account=c["account"] or "")
             clear_auth_bad(key)
+            clear_limited(lim_key)
             return {"text": text, "used": spec, "tried": tried}
         except AgentRunError as e:
             msg = str(e)
             c = e.classification
             if c.get("kind") == "auth":
-                mark_auth_bad(key, msg)
+                mark_auth_bad(key, msg, fp)
+            elif c.get("kind") == "quota" and c.get("limit") in ("usage_limit", "rate_limit") and c.get("resume_at"):
+                mark_limited(lim_key, c["resume_at"], c["limit"])     # "overloaded" is provider-wide: not this account
             tried.append({"spec": spec, "error": msg[:200], "kind": c.get("kind"),
                           "resume_at": c.get("resume_at")})
             if not c.get("retry_other_backend"):
@@ -619,10 +722,11 @@ def run_role(prompt: str, role: str, *, system: str = None, cwd: str = None,
         finally:
             slot.__exit__()
     quotas = [t["resume_at"] for t in tried if t.get("kind") == "quota" and t.get("resume_at")]
-    if quotas:                       # every candidate is limited: pause until the EARLIEST reset
-        raise AgentQuotaError(f"all candidates for role '{role}' are rate/usage limited: {tried}",
-                              {"kind": "quota", "resume_at": min(quotas), "retry_other_backend": False})
     busy = [t for t in tried if t.get("skipped") == "no free slot"]
+    if quotas:                       # every candidate is limited: pause until the EARLIEST reset
+        resume = min(quotas + ([time.time() + BUSY_RETRY_S] if busy else []))   # or until a busy slot frees
+        raise AgentQuotaError(f"all candidates for role '{role}' are rate/usage limited: {tried}",
+                              {"kind": "quota", "resume_at": resume, "retry_other_backend": False})
     ran = [t for t in tried if t.get("kind")]
     if busy and all(t["kind"] in ("auth", "quota") for t in ran):
         # a working account is only BUSY (all its slots taken): wait for a slot, never block on "log in again"

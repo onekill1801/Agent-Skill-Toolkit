@@ -13,7 +13,8 @@ reading (`age_min` says how old). The toolkit never calls the provider's usage A
 
 import time
 
-SYSTEM_DEFAULT = "system-default"   # agents.json orca_id of the codex account Orca reads (~/.codex)
+SYSTEM_DEFAULT = "system-default"   # agents.json orca_id of the machine's default login Orca reads (~/.codex, ~/.claude)
+CLAUDE_SYSTEM_DEFAULT = "claude:" + SYSTEM_DEFAULT   # internal key: the claude one, apart from codex's
 
 
 def _pct_left(bucket, now):
@@ -58,6 +59,15 @@ def orca_usage(orca: dict, now: float) -> dict:
             usage, source = _limits(cached[aid], now), "cached"
         out[aid] = {"email": a.get("email"), "org": a.get("organizationName"), "active": aid == active,
                     "usage": usage, "source": source if usage else "none"}
+    if claude.get("systemDefaultEmail") or claude.get("systemDefaultHome"):
+        # the machine's own login (~/.claude) that Orca uses when no managed account is active — agents.json
+        # names it with orca_id "system-default" on a CLAUDE account (seen 24/11: chungtv8). Orca's live
+        # reading is this login's while no managed account is active.
+        u = _limits(live, now) if active is None and not live_owner.startswith("managed:") else None
+        out[CLAUDE_SYSTEM_DEFAULT] = {"email": claude.get("systemDefaultEmail"), "org": None,
+                                      "org_uuid": claude.get("systemDefaultOrganizationUuid"),
+                                      "home": claude.get("systemDefaultHome"), "active": active is None,
+                                      "usage": u, "source": "live" if u else "none"}
     codex = rl.get("codex")
     if isinstance(codex, dict):              # Orca's own Codex reading = the machine's default login
         default = ((orca.get("codex") or {}).get("systemDefault") or {})
@@ -86,7 +96,9 @@ def _api_usage(res: dict, now: float):
     return u
 
 
-API_ERRORS = {"expired": "token hết hạn (chưa gia hạn)", "missing": "chưa đăng nhập", "no_token": "chưa đăng nhập",
+API_ERRORS = {"expired": "token hết hạn (chưa gia hạn)", "missing": "chưa đăng nhập",
+              "no_token": "đăng nhập đã hết thời hạn (credentials trống) — đăng nhập lại hoặc claude_token setup",
+              "token_unreadable": "không đọc được file token (env_files)",
               "unreadable": "không đọc được credentials", "tls": "lỗi chứng chỉ TLS", "network": "lỗi mạng",
               "bad_response": "phản hồi lạ", "bad_url": "CLAUDE_USAGE_URL sai", "http_401": "token bị từ chối (401)",
               "http_403": "không có quyền (403)", "http_429": "bị giới hạn tần suất (429)"}
@@ -103,7 +115,10 @@ def report(cfg: dict, orca: dict, slots: list, turns: list, now: float = None, s
     for backend, accts in ((cfg or {}).get("accounts") or {}).items():
         for name, a in (accts or {}).items():
             a = a or {}
-            o = by_orca.get(a.get("orca_id")) if a.get("orca_id") else None
+            oid = a.get("orca_id")
+            if backend == "claude" and oid == SYSTEM_DEFAULT:
+                oid = CLAUDE_SYSTEM_DEFAULT
+            o = by_orca.get(oid) if oid else None
             row = {"account": f"{backend}@{name}", "backend": backend, "name": name,
                    "orca_id": a.get("orca_id"), "email": (o or {}).get("email"), "org": (o or {}).get("org"),
                    "orca_active": bool((o or {}).get("active")),
