@@ -400,6 +400,15 @@ function renderTasks() {
   });
 }
 
+function loginLine(lg) {
+  if (!lg || !lg.expires_at) return "";
+  const day = (t) => new Date(t * 1000).toLocaleDateString("vi-VN");
+  if (lg.mode === "token")
+    return `<div class="note">🔑 token dài hạn, hạn ~${esc(day(lg.expires_at))} <span title="token không ghi hạn: ngày lưu file + 1 năm">(ước tính)</span></div>`;
+  const gone = lg.ended || lg.expires_at < Date.now() / 1000;
+  return `<div class="note" style="${gone ? "color:var(--bad)" : ""}">🔑 đăng nhập ${gone ? "ĐÃ HẾT HẠN" : "hết hạn"} ${esc(day(lg.expires_at))}</div>`;
+}
+
 function renderAccounts() {
   setBody("acct-body", "acct-count", section("accounts"), (d) => {
     const rows = (d.accounts || []).map((a) => {
@@ -421,6 +430,14 @@ function renderAccounts() {
     let html = table(["Tài khoản", "5 giờ còn", "Tuần còn", "Reset sớm nhất", "Số liệu", "Hôm nay", "Đang làm"], rows);
     if (d.unattributed) html += `<div class="empty">Không rõ tài khoản: ${d.unattributed.today.runs} lượt hôm nay, ${d.unattributed.running.length} đang chạy (gọi không qua role).</div>`;
     if (d.orca !== "ok") html += `<div class="err">Orca không đọc được${d.orca_error ? ": " + esc(d.orca_error) : ""} — không có số dung lượng.</div>`;
+    for (const [b, p] of Object.entries(d.parallel || {}))
+      html += `<div class="note">Song song ${esc(b)}: tổng ${esc(p.total)} phiên / ${esc(p.active)} tài khoản sống → tối đa ${esc(p.per_account)} phiên mỗi tài khoản</div>`;
+    const hb = d.heartbeat;
+    const late = !hb || (Date.now() / 1000 - hb.at) > 3 * (hb.interval_s || 300);
+    html += `<div class="${late ? "err" : "note"}">Heartbeat tài khoản: ${hb ? "kiểm tra lần cuối " + ago(hb.at) : "chưa chạy lần nào"}` +
+            `${late ? " — Coordinator không chạy? (hoặc: accounts.py --heartbeat)" : ""}</div>`;
+    const dead = (d.accounts || []).filter((a) => a.routing && a.routing.state === "skipped").length;
+    if (dead) html = `<div class="err">${dead}/${(d.accounts || []).length} tài khoản không chạy được — xem dòng ✗ bên dưới.</div>` + html;
     return { html, count: rows.length };
   });
 }
@@ -470,15 +487,6 @@ const HELP = {
     [`${MR}/review_rules.py check <job>`, "vì sao review không được tự đăng"],
     [`${MR}/review_post.py request-approval <job>`, "gửi lại thẻ duyệt khi thẻ cũ hết hạn"],
     [`${DA}/taskstore.py unblock <id>`, "cho việc bị chặn chạy tiếp (sau khi bạn đã xử lý tay)"],
-function loginLine(lg) {
-  if (!lg || !lg.expires_at) return "";
-  const day = (t) => new Date(t * 1000).toLocaleDateString("vi-VN");
-  if (lg.mode === "token")
-    return `<div class="note">🔑 token dài hạn, hạn ~${esc(day(lg.expires_at))} <span title="token không ghi hạn: ngày lưu file + 1 năm">(ước tính)</span></div>`;
-  const gone = lg.ended || lg.expires_at < Date.now() / 1000;
-  return `<div class="note" style="${gone ? "color:var(--bad)" : ""}">🔑 đăng nhập ${gone ? "ĐÃ HẾT HẠN" : "hết hạn"} ${esc(day(lg.expires_at))}</div>`;
-}
-
     [`${DA}/taskstore.py cancel <id>`, "huỷ việc"],
   ],
   tasks: [
@@ -497,20 +505,6 @@ function loginLine(lg) {
     ["(mở tài khoản trong Orca)", "khi báo 'token hết hạn' — toolkit không tự gia hạn token"],
   ],
   reviews: [
-    for (const [b, p] of Object.entries(d.parallel || {}))
-      html += `<div class="note">Song song ${esc(b)}: tổng ${esc(p.total)} phiên / ${esc(p.active)} tài khoản sống → tối đa ${esc(p.per_account)} phiên mỗi tài khoản</div>`;
-    const hb = d.heartbeat;
-    const late = !hb || (Date.now() / 1000 - hb.at) > 3 * (hb.interval_s || 300);
-    html += `<div class="${late ? "err" : "note"}">Heartbeat tài khoản: ${hb ? "kiểm tra lần cuối " + ago(hb.at) : "chưa chạy lần nào"}` +
-            `${late ? " — Coordinator không chạy? (hoặc: accounts.py --heartbeat)" : ""}</div>`;
-    const dead = (d.accounts || []).filter((a) => a.routing && a.routing.state === "skipped").length;
-    if (dead) html = `<div class="err">${dead}/${(d.accounts || []).length} tài khoản không chạy được — xem dòng ✗ bên dưới.</div>` + html;
-    const hb = d.heartbeat;
-    const late = !hb || (Date.now() / 1000 - hb.at) > 3 * (hb.interval_s || 300);
-    html += `<div class="${late ? "err" : "note"}">Heartbeat tài khoản: ${hb ? "kiểm tra lần cuối " + ago(hb.at) : "chưa chạy lần nào"}` +
-            `${late ? " — Coordinator không chạy? (hoặc: accounts.py --heartbeat)" : ""}</div>`;
-    const dead = (d.accounts || []).filter((a) => a.routing && a.routing.state === "skipped").length;
-    if (dead) html = `<div class="err">${dead}/${(d.accounts || []).length} tài khoản không chạy được — xem dòng ✗ bên dưới.</div>` + html;
     [`${MR}/review_flow.py status`, "các review đang mở"],
     [`${MR}/review_flow.py work --once`, "chạy một lượt review bằng tay (thường tab Coordinator tự làm)"],
     [`${MR}/review_flow.py reconcile`, "MR có commit mới → xếp review lại; việc đã duyệt → đi tiếp"],
