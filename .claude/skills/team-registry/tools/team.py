@@ -29,6 +29,13 @@ Lệnh:
   python team.py remove <key>
   python team.py match --task "mô tả task" [--skills a,b] [--top N] [--exclude k1,k2]
   python team.py bootstrap --stdin            # nạp skeleton từ JSON [{id,username,displayName,department}]
+  python team.py perms <key> [--add a,b] [--remove a,b] [--default]   # quyền bảng việc FChat (xem dưới)
+  python team.py verify <key> --by <tên người xác minh>               # xác nhận liên kết FChat↔GitLab↔aTask
+
+Quyền bảng việc (docs/design/group-workboard.md §3.1): `review` · `task` · `admin` · `deploy:<env>` ·
+`approve:<env>` (env = dev|sandbox|demo). Không khai `perms` = mặc định thành viên (review, task); khai rồi thì
+đúng danh sách đó (vd `--remove task` để bỏ quyền tạo task); `--default` xoá danh sách → về mặc định.
+Liên kết chỉ được tin khi `fchat_id` khớp đúng MỘT người; `verify` ghi ai xác minh + lúc nào.
 """
 
 import argparse
@@ -36,6 +43,10 @@ import json
 import os
 import re
 import sys
+import time
+
+_PERM = re.compile(r"^(review|task|admin|(deploy|approve):(dev|sandbox|demo))$")   # = core.identity.valid_perm
+DEFAULT_PERMS = ["review", "task"]
 
 for _s in (sys.stdout, sys.stderr):
     try:
@@ -143,6 +154,36 @@ def match(task_text: str, skills=None, top=5, exclude=None) -> list:
     return out[:top]
 
 
+def set_perms(key, add=None, remove=None, default=False) -> dict:
+    data = load()
+    if key not in data:
+        raise ValueError(f"no such key: {key}")
+    bad = [x for x in (add or []) if not _PERM.match(x)]
+    if bad:
+        raise ValueError(f"quyền không hợp lệ: {', '.join(bad)} (review|task|admin|deploy:<env>|approve:<env>)")
+    rec = data[key]
+    if default:
+        rec.pop("perms", None)
+    else:
+        cur = list(rec.get("perms") if isinstance(rec.get("perms"), list) else DEFAULT_PERMS)
+        cur += [x for x in (add or []) if x not in cur]
+        rec["perms"] = [x for x in cur if x not in set(remove or [])]
+    save(data)
+    return {"key": key, "perms": rec.get("perms", DEFAULT_PERMS), "explicit": "perms" in rec}
+
+
+def verify(key, by) -> dict:
+    data = load()
+    if key not in data:
+        raise ValueError(f"no such key: {key}")
+    if not (data[key].get("handles") or {}).get("fchat_id"):
+        raise ValueError(f"{key} chưa có fchat_id — `team.py set {key} --fchat-id …` trước")
+    data[key]["verified_by"] = by
+    data[key]["verified_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    save(data)
+    return {"key": key, "verified_by": by, "verified_at": data[key]["verified_at"]}
+
+
 def bootstrap_from(participants: list) -> dict:
     """Tạo skeleton từ [{id,username,displayName,department}] — KHÔNG đè người đã có."""
     data = load()
@@ -193,6 +234,10 @@ if __name__ == "__main__":
 
     b = sub.add_parser("bootstrap"); b.add_argument("--stdin", action="store_true")
 
+    pp = sub.add_parser("perms"); pp.add_argument("key")
+    pp.add_argument("--add"); pp.add_argument("--remove"); pp.add_argument("--default", action="store_true")
+    v = sub.add_parser("verify"); v.add_argument("key"); v.add_argument("--by", required=True)
+
     a = p.parse_args()
     if a.cmd == "list":
         d = load()
@@ -215,6 +260,14 @@ if __name__ == "__main__":
     elif a.cmd == "match":
         print(json.dumps(match(a.task, _csv(a.skills), a.top, _csv(a.exclude)),
                          ensure_ascii=False, indent=2))
+    elif a.cmd in ("perms", "verify"):
+        try:
+            out = (set_perms(a.key, _csv(a.add), _csv(a.remove), a.default) if a.cmd == "perms"
+                   else verify(a.key, a.by))
+        except ValueError as e:
+            out = {"error": True, "message": str(e)}
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        sys.exit(1 if out.get("error") else 0)
     elif a.cmd == "bootstrap":
         parts = json.load(sys.stdin) if a.stdin else []
         print(json.dumps(bootstrap_from(parts), ensure_ascii=False, indent=2))

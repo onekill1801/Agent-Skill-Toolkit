@@ -14,6 +14,9 @@ Zero external dependencies.
 Usage:
     python doctor.py            # human-readable summary
     python doctor.py --json     # machine-readable JSON
+
+Also reports machine-specific context (.env groups, work/ registry, ssh, kubeconfig,
+DBeaver, agent accounts) via machine_context.py — presence only, no secret values.
 """
 
 import argparse
@@ -34,6 +37,11 @@ try:
 except ImportError:
     config = None
 
+try:
+    import machine_context
+except ImportError:
+    machine_context = None
+
 # CLI -> what it unlocks. Optional ones don't block core usage.
 CLI_CHECKS = {
     "git": "branch/commit/push in project repos",
@@ -47,7 +55,7 @@ CLI_CHECKS = {
     "mysql": "optional — probe_db --engine mysql uses a stdlib socket client (no CLI needed)",
     "kcat": "Kafka CLI (optional; probe_kafka uses REST/HTTP instead)",
     "docker": "local container builds (usually done on CI)",
-    "kubectl": "k8s ops (usually done on CI)",
+    "kubectl": "k8s.py (read-only logs/pods/events); falls back to Lens' bundled kubectl",
 }
 
 # Tools that are pure stdlib (urllib/socket/http) — run on any OS, need only a token.
@@ -73,6 +81,16 @@ def _terminal_for_os() -> dict:
             "found": term, "ok": term is not None}
 
 
+def _context():
+    """machine_context report; a failing probe must not take the rest of doctor down."""
+    if machine_context is None:
+        return None
+    try:
+        return machine_context.collect()
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
 def collect() -> dict:
     clis = {}
     for name, purpose in CLI_CHECKS.items():
@@ -85,7 +103,8 @@ def collect() -> dict:
             env_report["dev_automation_missing"] = config.validate()  # azure/gitlab keys
         except Exception as e:  # noqa: BLE001
             env_report["error"] = str(e)
-        env_report["jenkins_configured"] = bool(config.get("JENKINS_URL") and config.get("JENKINS_TOKEN"))
+        env_report["jenkins_configured"] = bool(config.get("JENKINS_URL") and config.get("JENKINS_USER")
+                                                and config.get("JENKINS_TOKEN"))
         env_report["kafka_ui_configured"] = bool(config.get("KAFKA_UI_URL") and config.get("KAFKA_UI_USER"))
 
     return {
@@ -97,6 +116,7 @@ def collect() -> dict:
         "clis": clis,
         "fork_terminal": _terminal_for_os(),
         "env": env_report,
+        "context": _context(),
     }
 
 
@@ -122,6 +142,11 @@ def _human(report: dict) -> str:
                   f"  dev-automation (Azure/GitLab): {'OK' if not miss else 'thiếu ' + ', '.join(miss)}",
                   f"  Jenkins: {'OK' if env.get('jenkins_configured') else 'chưa cấu hình'}",
                   f"  Kafka UI: {'OK' if env.get('kafka_ui_configured') else 'chưa cấu hình'}"]
+    ctx = report.get("context")
+    if ctx and ctx.get("error"):
+        lines += ["", f"Bối cảnh máy: lỗi khi kiểm tra — {ctx['error']}"]
+    elif ctx:
+        lines += ["", machine_context.human(ctx)]
     return "\n".join(lines)
 
 

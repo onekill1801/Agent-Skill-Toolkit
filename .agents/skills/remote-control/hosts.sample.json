@@ -1,0 +1,22 @@
+{
+  "may-build": {
+    "host": "192.168.1.20",
+    "user": "chung",
+    "port": 22,
+    "os": "linux",
+    "note": "Máy build/CI trong LAN"
+  },
+  "nas": {
+    "host": "192.168.1.30",
+    "user": "admin",
+    "os": "linux",
+    "key": "~/.ssh/id_ed25519"
+  },
+  "win-test": {
+    "host": "192.168.1.40",
+    "user": "chung",
+    "shell": "powershell",
+    "os": "windows",
+    "note": "Máy test Windows (OpenSSH server bật)"
+  }
+}

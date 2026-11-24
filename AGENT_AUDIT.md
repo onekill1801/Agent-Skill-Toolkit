@@ -6,6 +6,9 @@
 >
 > **Phương pháp:** đọc trực tiếp source (không dựa vào SKILL.md/cookbook). Mọi verdict đều trích
 > `file:line` đã kiểm chứng tận tay. Ngày lập: 2026-07-27.
+>
+> **Cập nhật 2026-09-13:** đã vá P0 #5 (verify fail-safe) và #3 (checkpoint thành gate thật,
+> có provenance), vá một nửa #14. Kèm test: suite 135 → **158**, xanh. Chi tiết ở từng dòng bảng.
 
 ## Thang verdict
 
@@ -24,9 +27,9 @@
 |---|---|---|---|---|
 | 1 | Gate `clarity`/`test`/`lint`/`review`/`ac` chặn advance nếu chưa pass | SKILL.md | `policy()` chặn khi `mode=="auto"` (run_log.py:303-305); ở `checkpoint` chỉ trả `missing` + `allowed=True` (306-311) | 🟡 |
 | 2 | Mặc định an toàn | — | Mode mặc định = **checkpoint** (run_log.py:115,137) → mặc định là **INFORM, không chặn** | 🟡 |
-| 3 | "Never pass a checkpoint without approval" (`after_plan`/`before_mr`/`before_notify`) | SKILL.md:34 | `policy()` **không hề đọc** checkpoint dict — chỉ đọc gate. `cmd_checkpoint` chỉ set `state["checkpoints"][name]=status` (run_log.py:176-184), **chính agent tự gọi được**. Checkpoint là state trang trí. | 🔴 |
+| 3 | "Never pass a checkpoint without approval" (`after_plan`/`before_mr`/`before_notify`) | SKILL.md:34 | **ĐÃ VÁ 2026-09-13.** `policy()` nay đọc `IRREVERSIBLE` (run_log.py): ở `mode=checkpoint`, stage `deliver` **không advance được** nếu `before_mr` chưa `approved` với `source ∈ {human, telegram}`. Approval mặc định `source=agent` → KHÔNG được tin. `tg_gate.cmd_parse` tự ghi checkpoint (source=telegram + proof=reply-file) thay vì nhắc agent tự ghi. *Còn hở:* `gitlab_api create-mr` / `notifier` vẫn gọi thẳng được, gate chỉ chặn `advance`. | 🟡 |
 | 4 | Gate cứng là bất khả xâm phạm | SKILL.md | `advance --force` ghi state kể cả gate chưa thỏa, chỉ để lại note (run_log.py:372-377) | 🟡 |
-| 5 | Thay đổi chạm runtime bắt buộc phải verify | SKILL.md:133-140 | `touches_runtime()` = **regex tên file** (`Controller\|Service\|Repository...` verify_gen.py:52). Có target nhưng **không khớp regex → trả `False`** (verify_gen.py:96-104) → verify KHÔNG được require → merge chỉ với unit test. **Lỗ thật.** | 🔴 |
+| 5 | Thay đổi chạm runtime bắt buộc phải verify | SKILL.md:133-140 | **ĐÃ VÁ 2026-09-13.** `touches_runtime()` đảo chiều thành fail-safe: True trừ khi **mọi** target chứng minh được là docs/test (`_INERT`). Không parse được target → True. Lỗ "tên file lạ → bỏ verify" đã đóng. | 🟢 |
 | 6 | "Never deliver on red tests" / confirm trước notify/delete/close | SKILL.md:173, CLAUDE.md guardrails | Không có code chặn tương ứng; nằm trong prompt. An toàn = agent obey. | 🔴 |
 | 7 | Fix test đỏ giới hạn số lần, đỏ mãi thì DỪNG | SKILL.md:93 | `max_attempts` (mặc định 3) enforce thật, state ở `_fixloop.json` sống qua lần gọi (fix_loop.py:276,289,323) | 🟢 |
 | 8 | Diff MR lớn được cảnh báo khi bị cắt | — | `MAX_DIFF_CHARS=200_000`; JSON **có** field `diff_truncated` (review_gate.py:33,71,91). *Cảnh báo tồn tại*; việc đọc/hành động theo nó thì là prose. | 🟢 (phơi cờ) / 🔴 (hành động) |
@@ -49,7 +52,7 @@
 | # | Lời hứa | Nơi nêu | Thực thi | Verdict |
 |---|---|---|---|---|
 | 13 | Agent học từ can thiệp người: recall bơm bài học cũ vào run sau | SKILL.md:125 | recall tự gọi **chỉ** ở `task_queue.intake` (task_queue.py:290-301) + debate qua flag `--corrections-file` thủ công. **Không** tự gọi ở review/triage. | 🟡 |
-| 14 | Sau mỗi checkpoint, ghi feedback (edited/approved/rejected) | pipeline.md | `tg_gate.cmd_parse` chỉ **trả về chuỗi hướng dẫn** "hãy ghi `feedback.py add`" (tg_gate.py:171), **không tự ghi**. Không code nào kiểm tra agent có ghi hay không. | 🔴 |
+| 14 | Sau mỗi checkpoint, ghi feedback (edited/approved/rejected) | pipeline.md | **VÁ MỘT NỬA 2026-09-13.** `tg_gate.cmd_parse` nay **tự ghi checkpoint** (không còn trả chuỗi nhắc). Nhưng `feedback.py add` khi người *sửa* plan vẫn do agent tự nhớ — chưa ai kiểm tra. | 🟡 |
 | 15 | Auto-fix thành công được học lại | — | `fix_loop` tự gọi `feedback.cmd_add` khi xanh (fix_loop.py:223-233,307-313) — đây là chỗ DUY NHẤT ghi feedback tự động | 🟢 |
 | 16 | Daemon `mr_watch` theo dõi & tự review MR | watch-mrs | Logic poll/supervise/backoff đầy đủ (mr_watch.py, daemon_common.py) nhưng **không có cron/systemd/auto-start** — phải chạy tay. | ⚫ |
 | 17 | Bảng trạng thái tổng hợp | status.py | Đọc 5 nguồn state, hoạt động. Nhưng **read-only**, không phải control plane. | 🟢 (đọc) |
@@ -85,7 +88,7 @@ an toàn *khi có người ngồi giám sát* (checkpoint mode + mắt người 
 đúng là điều kiện biến mất khi bạn delegate. Muốn tin tưởng giao việc **không giám sát**, thứ tự
 sửa theo rủi ro:
 
-- **P0 (rủi ro cao, chạy-không-người sẽ cắn):** #5 verify fail-safe · #3 checkpoint thành gate thật cho thao tác không đảo ngược (notify/merge/close/delete) · #12 lock run-vs-resolve.
+- **P0 (rủi ro cao, chạy-không-người sẽ cắn):** ~~#5 verify fail-safe~~ ✅ · ~~#3 checkpoint thành gate thật~~ ✅ (còn hở: create-mr/notifier chưa bị chặn tại chỗ gọi) · **#12 lock run-vs-resolve — CÒN LẠI**.
 - **P1 (làm hệ thống tự đứng được):** #14 ghi feedback tự động (enforce) · #13 recall nối vào review/triage · #16 daemon tự sống · chạy 1 pilot thật để #18 có dữ liệu.
 - **P2 (dễ dùng đúng):** #9-#10 gộp entry point + ép thứ tự bằng code · #4 giới hạn `--force`.
 

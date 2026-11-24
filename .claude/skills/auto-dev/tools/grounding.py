@@ -324,6 +324,22 @@ def _scout_artifact_path(run_id):
     return os.path.join(runs, f"{safe}_scout.md")
 
 
+def _definitions(root: str, keywords: list) -> dict:
+    """{keyword: [definitions]} for identifier-like keywords via code_context (CodeGraph only, no
+    sync — scouting must stay fast); {} when unavailable."""
+    import re
+    syms = [k for k in keywords if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k)
+            and (re.search(r"[a-z][A-Z]|_", k) or k[:1].isupper())][:8]
+    if not syms:
+        return {}
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "dev-automation", "tools"))
+        import code_context
+        return code_context.definitions_many(root, syms, sync=False)
+    except Exception:  # noqa: BLE001 — best effort: the text scan still works
+        return {}
+
+
 def cmd_scout(args) -> dict:
     root = os.path.abspath(args.root)
     if not os.path.isdir(root):
@@ -345,6 +361,20 @@ def cmd_scout(args) -> dict:
         score, hits, snippets = _score_file(full, kw_low)
         if score:
             scored.append({"path": full, "score": score, "hits": hits, "snippets": snippets})
+    # CodeGraph (F.12): where the symbol-like keywords are DEFINED ranks those files first
+    defs = _definitions(root, keywords)
+    def_files = {}
+    for sym, hits in defs.items():
+        for h in hits:
+            def_files.setdefault(os.path.normcase(os.path.join(root, h["file"])), []).append(sym)
+    for c in scored:
+        syms = def_files.pop(os.path.normcase(c["path"]), [])
+        if syms:
+            c["score"] += 10 * len(syms)
+            c["defines"] = syms
+    for path, syms in def_files.items():                 # defined in a file the text scan missed
+        if os.path.isfile(path):
+            scored.append({"path": path, "score": 10 * len(syms), "hits": [], "snippets": [], "defines": syms})
     scored.sort(key=lambda c: c["score"], reverse=True)
     candidates = scored[:MAX_SCOUT_CANDIDATES]
 
@@ -364,7 +394,9 @@ def cmd_scout(args) -> dict:
         "keywords": keywords,
         "candidate_count": len(candidates),
         "candidates": [{"path": os.path.relpath(c["path"], root),
-                        "score": c["score"], "hits": c["hits"]} for c in candidates],
+                        "score": c["score"], "hits": c["hits"], **({"defines": c["defines"]} if c.get("defines") else {})}
+                       for c in candidates],
+        "code_context": "codegraph" if defs else "text",
         "verdict": verdict,
         "summary": (f"{len(candidates)} candidate file(s) from {len(keywords)} keyword(s)"
                     if candidates else "no files matched task keywords"),

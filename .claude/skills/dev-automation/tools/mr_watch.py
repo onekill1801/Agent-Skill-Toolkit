@@ -18,8 +18,14 @@ the backlog) so it doesn't open dozens of terminals at once — afterwards it on
 reviews MRs that are NEW or get new commits. Use --review-existing to also work
 through the backlog (throttled by --max-per-cycle).
 
+Default (checklist F.5, design §3): the watcher ONLY ENQUEUES — each MR becomes a durable
+`review_mr` task (mr-review/tools/review_flow.py enqueue, source mr_watch) that
+`review_flow.py work` / Orca runs with the shared concurrency, quota pause and progress board.
+`--mode terminal` keeps the old behaviour (one `claude -p` terminal per MR).
+
 Usage:
-  python mr_watch.py                       # reviewer, 5-min poll, baseline first
+  python mr_watch.py                       # reviewer, 5-min poll, baseline first, enqueue
+  python mr_watch.py --mode terminal       # legacy: open a review terminal per MR
   python mr_watch.py --who both            # reviewer + assignee
   python mr_watch.py --interval 120        # poll every 2 min
   python mr_watch.py --max-per-cycle 5     # up to 5 review terminals per poll (default 3)
@@ -227,6 +233,55 @@ def _spawn_review(mr):
         print(f"[{_now()}] [WARN] không mở được terminal: {e}; context at {ctx}", file=sys.stderr)
 
 
+MODE = "store"          # "store" (enqueue into the durable store) | "terminal" (legacy)
+REVIEW_FLOW = os.path.abspath(os.path.join(TOOLS_DIR, "..", "..", "mr-review", "tools", "review_flow.py"))
+
+
+def _enqueue_review(mr) -> bool:
+    """MR -> review_mr task via review_flow (intake gate: source mr_watch). True = queued."""
+    try:
+        p = subprocess.run([sys.executable, REVIEW_FLOW, "enqueue", "--project", str(mr["project_id"]),
+                            "--iid", str(mr["iid"]), "--source", "mr_watch",
+                            "--requester", "mr_watch", "--note", f"assigned to me: {mr.get('web_url', '')}"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
+        out = json.loads(p.stdout or "{}")
+        if not isinstance(out, dict):
+            out = {"error": True, "message": f"unexpected output: {str(out)[:100]}"}
+        elif p.returncode == 0 and out.get("same_head") and out.get("job_id"):
+            # already reviewed (posted) at this commit: nothing to queue, and nothing to retry (review rounds 24/11)
+            print(f"[{_now()}] -> MR !{mr['iid']} đã review ở commit này — chờ commit mới")
+            return True
+        elif p.returncode != 0 or not out.get("task_id") or not out.get("job_id"):
+            # a crash / empty answer is NOT "queued": the MR stays unmarked and is retried (Codex F.5 #4)
+            out = {"error": True, "message": out.get("message") or f"exit {p.returncode}: {(p.stderr or '')[-200:]}"}
+    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+        out = {"error": True, "message": str(e)}
+    if out.get("error"):
+        print(f"[{_now()}] [WARN] không xếp được MR !{mr['iid']}: {str(out.get('message'))[:200]}", file=sys.stderr)
+        return False
+    dup = " (đã có trong hàng đợi)" if out.get("task_duplicate") else ""
+    print(f"[{_now()}] -> đã xếp review MR !{mr['iid']} → task {out.get('task_id')}{dup}")
+    return True
+
+
+CREATED_AFTER = ""   # ISO-8601 UTC (--created-after / MR_WATCH_CREATED_AFTER): older MRs are never reviewed
+
+
+def _parse_ts(s: str) -> float:
+    import datetime as _dt
+    return _dt.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+
+
+def _before_cutoff(mr) -> bool:
+    """True = MR opened before CREATED_AFTER -> ignore it even when it gets new commits."""
+    if not CREATED_AFTER:
+        return False
+    try:
+        return _parse_ts(mr.get("created_at") or "") < _parse_ts(CREATED_AFTER)
+    except ValueError:
+        return False          # unknown created_at: do not drop a possibly new MR
+
+
 def poll_once(username, who, include_drafts, spawn, state, max_per_cycle=3, baseline=False):
     mrs = gitlab_api.list_review_merge_requests(username, who)
     if mrs and isinstance(mrs[0], dict) and mrs[0].get("error"):
@@ -240,19 +295,25 @@ def poll_once(username, who, include_drafts, spawn, state, max_per_cycle=3, base
         if state.get(key) == mr["sha"]:
             continue   # already handled at this SHA
 
-        if baseline:
-            state[key] = mr["sha"]      # first run: record silently, don't review backlog
+        if baseline or _before_cutoff(mr):
+            state[key] = mr["sha"]      # first run / opened before the cutoff: record silently, no review
+            if not baseline:
+                _save_state(state)
             continue
 
         tag = "cập nhật (commit mới)" if key in state else "mới"
         print(f"[{_now()}] [MR {tag}] !{mr['iid']} {mr['title']!r} bởi {mr['author']} — {mr['web_url']}")
         if not spawn:
             continue                    # preview mode: don't mark as reviewed
-        if spawned >= max_per_cycle:
-            print(f"[{_now()}]        (đã đạt {max_per_cycle} review/vòng — phần còn lại để vòng sau)")
-            break
-        _spawn_review(mr)
-        spawned += 1
+        if MODE == "store":
+            if not _enqueue_review(mr):
+                continue                # not queued: try again next poll
+        else:
+            if spawned >= max_per_cycle:
+                print(f"[{_now()}]        (đã đạt {max_per_cycle} review/vòng — phần còn lại để vòng sau)")
+                break
+            _spawn_review(mr)
+            spawned += 1
         state[key] = mr["sha"]
         _save_state(state)
 
@@ -298,9 +359,19 @@ if __name__ == "__main__":
     p.add_argument("--no-spawn", dest="spawn", action="store_false", help="print only, no terminal")
     p.add_argument("--include-drafts", action="store_true")
     p.add_argument("--max-per-cycle", type=int, default=3, help="max reviews launched per poll (default 3)")
+    p.add_argument("--mode", choices=["store", "terminal"], default="store",
+                   help="store = enqueue a durable review task (default); terminal = legacy claude terminal")
     p.add_argument("--review-existing", action="store_true",
                    help="also review the current backlog (skip first-run baseline)")
+    p.add_argument("--created-after", default=None,
+                   help="ISO time (UTC); only review MRs OPENED after it — older ones are skipped even on new "
+                        "commits (default: env MR_WATCH_CREATED_AFTER, else no cutoff)")
     a = p.parse_args()
+    MODE = a.mode
+    CREATED_AFTER = a.created_after or config.get("MR_WATCH_CREATED_AFTER") or ""
+    if CREATED_AFTER:
+        _parse_ts(CREATED_AFTER)   # fail fast on a malformed value
+        print(f"[{_now()}] chỉ review MR mở sau {CREATED_AFTER}")
     if a.once:
         u = gitlab_api.current_user()
         if isinstance(u, dict) and u.get("error"):

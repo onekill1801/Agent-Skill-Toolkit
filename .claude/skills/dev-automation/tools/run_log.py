@@ -25,7 +25,7 @@ Usage:
                        [--tier trivial|standard|complex] [--mode auto|checkpoint]
     python run_log.py stage <run_id> plan active
     python run_log.py stage <run_id> test failed
-    python run_log.py checkpoint <run_id> after_plan approved
+    python run_log.py checkpoint <run_id> after_plan approved --source telegram
     python run_log.py record-gate <run_id> test --verdict pass --json result.json
     python run_log.py record-gate <run_id> lint --verdict waived --summary "no linter"
     python run_log.py advance <run_id> test [--force]
@@ -58,6 +58,15 @@ STAGES = ["plan", "implement", "test", "deliver"]
 STAGE_STATUS = ["pending", "active", "done", "failed", "skipped"]
 CHECKPOINTS = ["after_plan", "before_mr", "before_notify"]
 CHECKPOINT_STATUS = ["pending", "approved", "rejected"]
+# Who recorded the approval. Only a source OUTSIDE the agent satisfies a
+# checkpoint gate: an agent calling `checkpoint <id> before_mr approved` on its
+# own behalf is self-certification, not review (AGENT_AUDIT.md #3).
+CHECKPOINT_SOURCES = ["agent", "human", "telegram", "legacy"]
+TRUSTED_SOURCES = {"human", "telegram"}
+# Stage -> checkpoint that must carry a TRUSTED approval before it may advance.
+# Only enforced in `checkpoint` mode; `auto` mode has no human by design and is
+# guarded by its blocking gates instead.
+IRREVERSIBLE = {"deliver": "before_mr"}
 
 # --- Evidence-gated transitions (Hybrid autonomy) ---
 GATE_VERDICTS = ["pass", "fail", "error", "waived"]
@@ -110,6 +119,12 @@ def _normalize(state: dict) -> dict:
     so it informs and never silently auto-advances.
     """
     state.setdefault("gates", {})
+    # Older runs stored checkpoints as bare strings ("approved"). Upgrade them to
+    # records; an approval with no recorded provenance is NOT trusted.
+    cps = state.setdefault("checkpoints", {})
+    for name, val in list(cps.items()):
+        if not isinstance(val, dict):
+            cps[name] = {"status": val, "source": "legacy", "at": None}
     state.setdefault("acceptance_criteria", [])
     state.setdefault("tier", "standard")
     state.setdefault("mode", "checkpoint")
@@ -150,7 +165,8 @@ def cmd_init(args) -> dict:
         "branch": None,
         "mr_url": None,
         "stages": {s: "pending" for s in STAGES},
-        "checkpoints": {c: "pending" for c in CHECKPOINTS},
+        "checkpoints": {c: {"status": "pending", "source": None, "at": None}
+                        for c in CHECKPOINTS},
         "gates": {},
         "acceptance_criteria": [],
         "notes": [],
@@ -179,7 +195,15 @@ def cmd_checkpoint(args) -> dict:
         raise ValueError(f"unknown checkpoint '{args.name}', expected one of {CHECKPOINTS}")
     if args.status not in CHECKPOINT_STATUS:
         raise ValueError(f"unknown status '{args.status}', expected one of {CHECKPOINT_STATUS}")
-    state["checkpoints"][args.name] = args.status
+    source = getattr(args, "source", None) or "agent"
+    if source not in CHECKPOINT_SOURCES:
+        raise ValueError(f"unknown source '{source}', expected one of {CHECKPOINT_SOURCES}")
+    if source == "legacy":
+        raise ValueError("'legacy' is a migration marker, not a source you may record")
+    record = {"status": args.status, "source": source, "at": _now()}
+    if getattr(args, "proof", None):
+        record["proof"] = args.proof
+    state["checkpoints"][args.name] = record
     _write(state)
     return state
 
@@ -203,12 +227,22 @@ def cmd_get(args) -> dict:
 
 
 def cmd_list(args) -> list:
+    """List run states. `temp/runs/` also holds per-run artifacts (`*_verify.json`,
+    `*_answers.json`, `*_gate_*.json`), so anything that is not a run state — a
+    JSON array, or an object with no `run_id` — is skipped rather than crashing
+    the listing."""
     out = []
     for fn in sorted(os.listdir(_runs_dir())):
         if not fn.endswith(".json"):
             continue
-        with open(os.path.join(_runs_dir(), fn), encoding="utf-8") as f:
-            st = _normalize(json.load(f))
+        try:
+            with open(os.path.join(_runs_dir(), fn), encoding="utf-8") as f:
+                raw = json.load(f)
+        except (ValueError, OSError):
+            continue                       # unreadable/partial artifact, not a run
+        if not isinstance(raw, dict) or "run_id" not in raw:
+            continue                       # an artifact, not a run state
+        st = _normalize(raw)
         is_open = st.get("stages", {}).get("deliver") != "done"
         if args.open and not is_open:
             continue
@@ -281,6 +315,24 @@ def policy(state: dict, stage: str) -> dict:
         if st not in ("done", "skipped"):
             return {"allowed": False, "missing": [], "advisory": [],
                     "reason": f"prior stage '{prior}' not done (is '{st}')"}
+
+    # (a2) irreversible-stage guard — a checkpoint is only a control if something
+    # reads it. In checkpoint mode the stage that ships work outward may not
+    # advance on an approval the agent wrote for itself.
+    cp_name = IRREVERSIBLE.get(stage)
+    if cp_name and mode == "checkpoint":
+        rec = state.get("checkpoints", {}).get(cp_name) or {}
+        if not isinstance(rec, dict):
+            rec = {"status": rec, "source": "legacy"}
+        if rec.get("status") != "approved" or rec.get("source") not in TRUSTED_SOURCES:
+            got = f"{rec.get('status', 'missing')}/{rec.get('source') or 'none'}"
+            return {"allowed": False, "missing": [f"checkpoint:{cp_name}:{got}"],
+                    "advisory": [],
+                    "reason": (f"stage '{stage}' is irreversible: checkpoint "
+                               f"'{cp_name}' needs an approval from {sorted(TRUSTED_SOURCES)} "
+                               f"(have: {got}). Record it via tg_gate, or "
+                               f"`checkpoint <id> {cp_name} approved --source human` "
+                               f"when a person approved out of band.")}
 
     # (b) required gates must be pass|waived — static per-stage set, plus any
     # per-run extras (e.g. `require <RID> verify` when the task touches runtime).
@@ -485,6 +537,10 @@ def main() -> int:
     p.add_argument("run_id")
     p.add_argument("name")
     p.add_argument("status")
+    p.add_argument("--source", default="agent",
+                   help="agent (default, NOT trusted for irreversible stages) | human | telegram")
+    p.add_argument("--proof", default=None,
+                   help="path to the artifact backing the approval (tg_gate reply file)")
 
     p = sub.add_parser("note")
     p.add_argument("run_id")

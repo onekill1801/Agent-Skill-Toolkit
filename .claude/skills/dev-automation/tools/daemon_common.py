@@ -89,6 +89,36 @@ def health_log(label: str, event: str, detail: str = "") -> None:
         pass
 
 
+def _heartbeat_path(label: str) -> str:
+    d = os.path.join(_repo_root(), "temp", "heartbeat")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, f"{label}.json")
+
+
+def heartbeat(label: str, **detail) -> None:
+    """The daemon is alive and its loop turns: temp/heartbeat/<label>.json (atomic replace). Never raises.
+    supervise.py --heartbeat <label> --stale-after S restarts a daemon whose heartbeat stops."""
+    rec = {"ts": time.time(), "pid": os.getpid(), **detail}
+    try:
+        path = _heartbeat_path(label)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(rec, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def last_heartbeat(label: str) -> dict:
+    """{} when the daemon never beat; else the record plus `age` in seconds."""
+    try:
+        with open(_heartbeat_path(label), encoding="utf-8") as f:
+            rec = json.load(f)
+        return {**rec, "age": max(0.0, time.time() - float(rec.get("ts") or 0))}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
 def classify_status(status) -> str:
     """Map an HTTP-ish status to 'fatal' | 'transient'. Unknown non-auth → transient."""
     try:

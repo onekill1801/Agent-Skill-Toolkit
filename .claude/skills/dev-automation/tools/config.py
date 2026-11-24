@@ -19,6 +19,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 _ENV_LOADED = False
+_ENV_PATH = None  # the .env actually loaded (None = none found); read by machine_context.py
 
 
 def _strip_inline_comment(value: str) -> str:
@@ -34,7 +35,7 @@ def _strip_inline_comment(value: str) -> str:
 
 def _load_dotenv():
     """Parse .env file and inject into os.environ (only once)."""
-    global _ENV_LOADED
+    global _ENV_LOADED, _ENV_PATH
     if _ENV_LOADED:
         return
     _ENV_LOADED = True
@@ -51,6 +52,7 @@ def _load_dotenv():
         else:
             return
 
+    _ENV_PATH = env_path
     with open(env_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -89,6 +91,17 @@ def azure_base_url() -> str:
 def gitlab_base_url() -> str:
     url = get("GITLAB_URL", "https://gitlab.com").rstrip("/")
     return f"{url}/api/v4"
+
+
+def claude_usage_url() -> str:
+    """Orca-compatible OAuth usage endpoint; tokens stay in managed auth files."""
+    return get("CLAUDE_USAGE_URL", "https://api.anthropic.com/api/oauth/usage")
+
+
+def claude_oauth_config() -> tuple[str, str]:
+    """Public Claude Code OAuth configuration, matching Orca's refresh client."""
+    return (get("CLAUDE_OAUTH_TOKEN_URL", "https://platform.claude.com/v1/oauth/token"),
+            get("CLAUDE_OAUTH_CLIENT_ID", "9d1c250a-e61b-44d9-88ed-5944d1962f5e"))
 
 
 def validate() -> list[str]:
